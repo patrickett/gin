@@ -5,29 +5,19 @@ use ast::{ConstValue, HashFloat};
 use flask::CompileTarget;
 use internment::Intern;
 use std::collections::HashMap;
+use typecheck::TypedExprKind;
 use typecheck::analysis::{CompTimeEvaluator, ConstEnv, TyInfer, TyInferEnv};
 use typecheck::intrinsic::IntrinsicOp;
 use typecheck::prepare_parse_ast;
 use typecheck::ty::Ty;
-use typecheck::{DefId, ExprId, TypedExprKind};
 
 mod support;
-use support::transform_source;
+use support::{body_expr_id, transform_source};
 
 fn prepare(source: &str) -> ast::FileAst {
     let mut ast = parser::cursor::TokenCursor::parse_source(source);
     let _ = prepare_parse_ast(&mut ast, &CompileTarget::Library);
     ast
-}
-
-fn body_expr_id(typed: &typecheck::TypedFileAst, def_name: &str) -> Option<ExprId> {
-    let def_id = DefId(Intern::new(def_name.to_string()));
-    let bind = typed.defs.get(&def_id)?;
-    match &bind.body {
-        typecheck::BindBody::Expr(eid) => Some(*eid),
-        typecheck::BindBody::Body { exprs, ret } => ret.or_else(|| exprs.last().copied()),
-        typecheck::BindBody::Unlowered => None,
-    }
 }
 
 fn typed_bind_const_value<'a>(
@@ -112,27 +102,19 @@ fn eval_binop_float_arithmetic() {
 }
 
 #[test]
-fn eval_binop_equality_returns_bool_tags() {
+fn eval_binop_equality_returns_proposition_status() {
     assert_eq!(
         ConstValue::Int(7.into()).eval_binop(&BinOp::Equal, &ConstValue::Int(7.into())),
-        Some(ConstValue::Tag {
-            name: Intern::from_ref("True"),
-            qual_path: None,
-            args: vec![].into(),
-        })
+        Some(ConstValue::Proposition(true))
     );
     assert_eq!(
         ConstValue::Int(7.into()).eval_binop(&BinOp::Equal, &ConstValue::Int(8.into())),
-        Some(ConstValue::Tag {
-            name: Intern::from_ref("False"),
-            qual_path: None,
-            args: vec![].into(),
-        })
+        Some(ConstValue::Proposition(false))
     );
 }
 
 #[test]
-fn anonymous_integer_equality_has_structural_result_family_and_folds_constants() {
+fn anonymous_integer_equality_has_a_proposition_type_and_folds_constants() {
     let typed = transform_source("same := 7 = 7\n");
     let expression = body_expr_id(&typed, "same").expect("same body");
 
@@ -148,18 +130,12 @@ fn anonymous_integer_equality_has_structural_result_family_and_folds_constants()
     ));
     assert!(matches!(
         typed.exprs.ty[expression.as_usize()],
-        ast::Ty::ResultFamily {
-            owner: ast::ResultFamilyOwner::Structural(ast::OperatorRole::Equal),
-            ..
-        }
+        ast::Ty::Proposition(_)
     ));
     assert!(
         matches!(
             typed.exprs.facts.const_facts.const_value[expression.as_usize()],
-            Some(ConstValue::ResultAlternative {
-                owner: ast::ResultFamilyOwner::Structural(ast::OperatorRole::Equal),
-                label,
-            }) if label.as_str() == "True"
+            Some(ConstValue::Proposition(true))
         ),
         "{:?}",
         typed.exprs.facts.const_facts.const_value[expression.as_usize()]
@@ -167,31 +143,98 @@ fn anonymous_integer_equality_has_structural_result_family_and_folds_constants()
 }
 
 #[test]
-fn equality_rejects_distinct_nominal_types() {
+fn equality_compares_distinct_nominal_numeric_types() {
     let typed = transform_source(
-        "Left is in 0 to 255\nRight is in 0 to 255\nBool is True or False\nsame(a Left, b Right) Bool: a = b\n",
+        "Left is in 0 to 255\nLeft has release(self): return\nRight is in -128 to 127\nRight has release(self): return\nsame(a ref Left, b ref Right): return a = b\n",
     );
-
-    assert!(
-        typed
-            .all_flaws()
-            .iter()
-            .any(|(_, flaw)| flaw.code.slug() == "type-nominal-operator-unavailable")
-    );
+    assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
+    let expression = body_expr_id(&typed, "same").expect("same body");
+    assert!(matches!(
+        typed.exprs.ty[expression.as_usize()],
+        Ty::Proposition(_)
+    ));
+    assert!(matches!(
+        typed.exprs.kind[expression.as_usize()],
+        TypedExprKind::IntrinsicCall {
+            op: IntrinsicOp::BitsCompare {
+                interpretation: typecheck::intrinsic::IntegerComparison::Signed,
+                predicate: typecheck::intrinsic::ComparisonPredicate::Equal,
+            },
+            ..
+        }
+    ));
 }
 
 #[test]
 fn equality_rejects_pointer_values() {
     let typed = transform_source(
-        "Int is in 0 to 255\nBool is True or False\nsame(a @Int, b @Int) Bool: a = b\n",
+        "Int is in 0 to 255\nInt has release(self): return\nsame(a @Int, b @Int): return a = b\n",
     );
 
-    assert!(
+    assert_eq!(
         typed
             .all_flaws()
             .iter()
-            .any(|(_, flaw)| flaw.code.slug() == "type-no-visible-operator-contract")
+            .map(|(_, flaw)| flaw.code.slug())
+            .collect::<Vec<_>>(),
+        ["type-numeric-predicate-operands"]
     );
+}
+
+#[test]
+fn compile_time_anonymous_arithmetic_preserves_folded_values_after_flow_analysis() {
+    for (expression, expected) in [
+        ("1 + 2", 3),
+        ("7 - 3", 4),
+        ("3 * 4", 12),
+        ("(1 + 2) * 2", 6),
+        ("(1 + 2) * 4", 12),
+        ("4 * (1 + 2)", 12),
+        ("(1 + 2) + 4", 7),
+        ("4 + (1 + 2)", 7),
+        ("(1 + 2) - 4", -1),
+        ("(1 + 2) + 18446744073709551615", 18446744073709551618),
+    ] {
+        let typed = transform_source(&format!("answer := {expression}\n"));
+        assert!(
+            typed.all_flaws().is_empty(),
+            "{expression}: {:?}",
+            typed.all_flaws()
+        );
+        assert_const_int(typed_bind_const_value(&typed, "answer"), expected);
+    }
+}
+
+#[test]
+fn inferred_arithmetic_does_not_relax_explicit_or_nominal_bounds() {
+    for (source, expected) in [
+        (
+            "Small is in 0 to 3\nanswer is in Small := (1 + 2) + 4\n",
+            "type-integer-literal-out-of-range",
+        ),
+        (
+            "Small is in 0 to 3\nanswer is in Small := (1 + 2) * 2\n",
+            "type-integer-narrowing-failed",
+        ),
+        (
+            "Small is in 0 to 3\nleft Small := 3\nanswer := left + 4\n",
+            "type-integer-literal-out-of-range",
+        ),
+        (
+            "Small is in 0 to 3\nright Small := 3\nanswer := 4 + right\n",
+            "type-integer-literal-out-of-range",
+        ),
+    ] {
+        let typed = transform_source(source);
+        assert!(
+            typed
+                .all_flaws()
+                .iter()
+                .any(|(_, flaw)| flaw.code.slug() == expected),
+            "{source}: {:?}",
+            typed.all_flaws()
+        );
+    }
 }
 
 #[test]
@@ -201,14 +244,14 @@ fn compile_time_bind_folds_addition() {
 add_bits(a Word, b Word) Word:
     left is in 0 to 255: a
     right is in 0 to 255: b
-return (left + right) as Word
+    return ((left + right) & 255) as Word
 #infix('+')
 #inline
-word_add(a Word, b Word) Word: add_bits(a, b)
+word_add(a Word, b Word) Word: return add_bits(a, b)
 two() Word:
     a Word := 1
     b Word := 1
-return a + b
+    return a + b
 "#,
     );
     assert_const_int(typed_bind_const_value(&typed, "two"), 2);
@@ -221,15 +264,15 @@ fn compile_time_bind_folds_nested_addition() {
 add_bits(a Word, b Word) Word:
     left is in 0 to 255: a
     right is in 0 to 255: b
-return (left + right) as Word
+    return ((left + right) & 255) as Word
 #infix('+')
 #inline
-word_add(a Word, b Word) Word: add_bits(a, b)
+word_add(a Word, b Word) Word: return add_bits(a, b)
 sum() Word:
     a Word := 1
     b Word := 2
     c Word := 3
-return (a + b) + c
+    return (a + b) + c
 "#,
     );
     assert_const_int(typed_bind_const_value(&typed, "sum"), 6);
@@ -238,7 +281,7 @@ return (a + b) + c
 #[test]
 fn eval_compile_time_expr_folds_addition() {
     let main = parser::cursor::TokenCursor::parse_source("x: 1 + 2\n");
-    let const_binds: ConstEnv = main.defs.keys().map(|name| (*name, None)).collect();
+    let const_binds: ConstEnv = main.defs.keys().map(|name| (name.0, None)).collect();
     let bind = main.defs.get(&Intern::from_ref("x")).unwrap();
     let ast::BindValue::Expr(e) = &bind.value else {
         panic!("expected expr bind");
@@ -251,9 +294,9 @@ fn eval_compile_time_expr_folds_addition() {
 #[test]
 fn compile_time_function_body_exposes_local_binds_to_return() {
     let ast = parser::cursor::TokenCursor::parse_source(
-        "identity(value Int) Int :=\n    result := value\n    doubled := result + result\nreturn doubled\nanswer := identity(42)\n",
+        "identity(value Int) Int :=\n    result := value\n    doubled := result + result\n    return doubled\nanswer := identity(42)\n",
     );
-    let const_binds = ast.defs.keys().map(|name| (*name, None)).collect();
+    let const_binds = ast.defs.keys().map(|name| (name.0, None)).collect();
     let answer = ast.defs.get(&Intern::from_ref("answer")).expect("answer");
     let ast::BindValue::Expr(expr) = &answer.value else {
         panic!("expected expression body");
@@ -268,9 +311,9 @@ fn compile_time_function_body_exposes_local_binds_to_return() {
 #[test]
 fn compile_time_call_with_wrong_arity_is_not_evaluated() {
     let ast = parser::cursor::TokenCursor::parse_source(
-        "pick(first Int, second Int) Int := first\nanswer := pick(1)\n",
+        "pick(first Int, second Int) Int := return first\nanswer := pick(1)\n",
     );
-    let const_binds = ast.defs.keys().map(|name| (*name, None)).collect();
+    let const_binds = ast.defs.keys().map(|name| (name.0, None)).collect();
     let answer = ast.defs.get(&Intern::from_ref("answer")).expect("answer");
     let ast::BindValue::Expr(expr) = &answer.value else {
         panic!("expected expression body");
@@ -283,9 +326,9 @@ fn compile_time_call_with_wrong_arity_is_not_evaluated() {
 #[test]
 fn recursive_compile_time_call_is_not_evaluated() {
     let ast = parser::cursor::TokenCursor::parse_source(
-        "recurse(value Int) Int := recurse(value)\nanswer := recurse(1)\n",
+        "recurse(value Int) Int := return recurse(value)\nanswer := recurse(1)\n",
     );
-    let const_binds = ast.defs.keys().map(|name| (*name, None)).collect();
+    let const_binds = ast.defs.keys().map(|name| (name.0, None)).collect();
     let answer = ast.defs.get(&Intern::from_ref("answer")).expect("answer");
     let ast::BindValue::Expr(expr) = &answer.value else {
         panic!("expected expression body");
@@ -374,10 +417,7 @@ fn bind_expr_const_value_removed(ast: &ast::FileAst, name: &str) -> bool {
 #[test]
 fn runtime_binary_with_variables_stays_dynamic() {
     let typed = transform_source(
-        "Int is in 0 to 255
-#infix('+')
-add_int(a Int, b Int) Int: a
-x: 10\ny: 20\nmain: x + y",
+        "Int is in 0 to 255\n#infix('+')\nadd_int(a Int, b Int) Int: return a\nx: 10\ny: 20\nmain: x + y",
     );
     let main_id = body_expr_id(&typed, "main").expect("main");
     let expr = typed.exprs.get(main_id.as_usize()).expect("main expr");

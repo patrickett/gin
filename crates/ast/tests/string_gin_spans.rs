@@ -1,13 +1,7 @@
 mod support;
 use ast::source::SourceExt;
 use support::transform_source;
-
-/// Record field types that reference undeclared tags (`List`, `Byte`) without imports.
-const STRING_GIN_SOURCE: &str = "\
-String has bytes List(Byte)\n\
-\n\
-ToString has to_string String\n\
-";
+use test_fixtures::semantic_fixtures::STRING_GIN_SOURCE;
 
 #[test]
 fn string_gin_unknown_tag_spans() {

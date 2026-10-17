@@ -9,7 +9,7 @@ mod support;
 use support::transform_source;
 
 fn bind_body_ty(typed: &typecheck::TypedFileAst, name: &str) -> Ty {
-    let def_id = DefId(Intern::new(name.to_string()));
+    let def_id = DefId::named(Intern::new(name.to_string()));
     let bind = typed.defs.get(&def_id).expect(name);
     let body = match &bind.body {
         typecheck::BindBody::Expr(id) => *id,
@@ -19,12 +19,12 @@ fn bind_body_ty(typed: &typecheck::TypedFileAst, name: &str) -> Ty {
 }
 
 #[test]
-fn site_string_bind_is_literal_not_union() {
+fn site_string_bind_materializes_as_bytes_not_union() {
     let typed = transform_source("greeting: 'John'\n");
     let ty = bind_body_ty(&typed, "greeting");
     assert!(
-        matches!(&ty, Ty::UnresolvedLiteral(ast::ty::LiteralKind::Text)),
-        "expected unresolved contextual text literal, got {ty:?}"
+        matches!(&ty, Ty::Array { elem, size } if matches!(elem.as_ref(), Ty::AnonymousInteger { validity } if validity.domain().contains(255.into()) && !validity.domain().contains(256.into())) && *size == ast::NormalExpr::from(4)),
+        "expected a four-byte array, got {ty:?}"
     );
     assert!(ty.union_literal_values().is_none());
 }
@@ -66,7 +66,7 @@ fn widened_string_bind_uses_nominal_string() {
     }
     let bind = typed
         .defs
-        .get(&DefId(Intern::new("label".to_string())))
+        .get(&DefId::named(Intern::new("label".to_string())))
         .expect("label");
     match typed
         .type_registry

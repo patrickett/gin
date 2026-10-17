@@ -9,13 +9,14 @@ fn hover_wildcard_in_record_pattern() {
     let src = "\
 Type is Primitive(width BigInt, signed Bool) or Record(name Str, fields List(NamedTy))
 NamedTy has name Str, ty Type
+#sequence_builder(x, empty, push)
 List(x) has pointer @x, length BigInt
 BigInt is in 0 to 1000
 Str is in 0 to 255
 Bool is True or False
 Pointer(x) has addr BigInt
 
-f(x Type) Bool := when x is
+f(x Type) Bool := return when x is
     Record(_, fields) then True
     else False
 ";
@@ -41,6 +42,7 @@ fn reflect_type_record_variant_map_resolves_forward_refs() {
     // Self-contained: no large fixture load (avoids materializing a large reflection shape).
     let src = "\
 NamedTy has name String, ty Type
+#sequence_builder(x, empty, push)
 List(x) has pointer @x, length BigInt
 BigInt is in 0 to 1000
 String has bytes List(Byte)
@@ -86,6 +88,7 @@ Type is Primitive(width BigInt, signed Bool) or Record(name String, fields List(
 fn record_pattern_fields_hover_matches_reflect_type() {
     let src = "\
 NamedTy has name String, ty Type
+#sequence_builder(x, empty, push)
 List(x) has pointer @x, length BigInt
 BigInt is in 0 to 1000
 String has bytes List(Byte)
@@ -94,7 +97,7 @@ Bool is True or False
 Pointer(x) has addr BigInt
 Type is Primitive(width BigInt, signed Bool) or Record(name String, fields List(NamedTy))
 
-f(x Type) Bool := when x is
+f(x Type) Bool := return when x is
     Record(_, fields) then True
     else False
 ";
@@ -127,13 +130,14 @@ fn hover_record_variant_head_in_pattern() {
     let src = "\
 Type is Primitive(width BigInt, signed Bool) or Record(name Str, fields List(NamedTy))
 NamedTy has name Str, ty Type
+#sequence_builder(x, empty, push)
 List(x) has pointer @x, length BigInt
 BigInt is in 0 to 1000
 Str is in 0 to 255
 Bool is True or False
 Pointer(x) has addr BigInt
 
-f(x Type) Bool := when x is
+f(x Type) Bool := return when x is
     Record(_, fields) then True
     else False
 ";
@@ -161,7 +165,7 @@ Type is Primitive(width BigInt, signed Bool)
 
 Copy has can_copy Bool: is_copy(Self)
 
-is_copy(x Type) Bool := when x is
+is_copy(x Type) Bool := return when x is
     Ref(_, False)       then True
     Ref(_, True)        then False
 ";
@@ -191,7 +195,7 @@ Type is Primitive(width BigInt, signed Bool)
 
 Copy has can_copy Bool: is_copy(Self)
 
-is_copy(x Type) Bool := when x is
+is_copy(x Type) Bool := return when x is
     Ref(_, False)       then True
 ";
     let typed = transform_with_marker_package(src);
@@ -217,19 +221,19 @@ is_copy(x Type) Bool := when x is
 
 #[test]
 fn hover_list_pattern_variables_not_bool() {
-    let src = "\
-List(x) has pointer @x, length BigInt\n\
-BigInt is in 0 to 1000\n\
-Bool is True or False\n\
-NamedTy has name String, ty Type\n\
-String has bytes List(Byte)\n\
-Byte is in 0 to 255\n\
-Type is Primitive(width BigInt, signed Bool) or Record(name String, fields List(NamedTy))\n\
-\
-all_copy(fields List(NamedTy)) Bool := when fields is\n\
-    []                  then True\n\
-    [f, ...rest]        then True\n\
-";
+    let src = r#"BigInt is in 0 to 1000
+#sequence_builder(x, empty, push)
+List(x) has pointer @x, length BigInt
+Bool is True or False
+NamedTy has name String, ty Type
+String has bytes List(Byte)
+Byte is in 0 to 255
+Type is Primitive(width BigInt, signed Bool) or Record(name String, fields List(NamedTy))
+
+all_copy(fields List(NamedTy)) Bool := return when fields is
+    [] then True
+    [f, ...rest] then True
+"#;
     let typed = transform_source(src);
 
     // Hover on `f` in the list cons pattern `[f, ...rest]`
@@ -256,4 +260,18 @@ all_copy(fields List(NamedTy)) Bool := when fields is\n\
     if let Some(ref text) = rest_hover {
         assert_eq!(text, "```gin\nrest List(NamedTy)\n```");
     }
+}
+
+#[test]
+fn nested_constructor_bindings_hover_with_their_source_names() {
+    let source = "Byte is in 0 to 255\nByte.finish(self): return\nInner is Left(Byte) or Right(Byte)\nInner.finish(self): return\nOuter is Some(Inner) or None\nOuter.finish(self):\n    when self is\n        Some(value) then\n            value.finish\n            return\n        None then return\nchoose(value ref Outer) Byte: return when value is\n    Some(Left(y)) and y > 0 then deref y\n    Some(_) then 0\n    None then 0\n";
+    let typed = transform_source(source);
+    assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
+    let offset = source.find("Left(y)").unwrap() + "Left(".len();
+    let (line, character) = source.byte_offset_to_position(offset);
+    let hover = typed
+        .hover_at(source, line, character)
+        .expect("nested binding hover");
+    assert!(hover.contains("Byte"), "{hover}");
+    assert!(!hover.contains("when$"), "{hover}");
 }

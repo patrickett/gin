@@ -1,23 +1,7 @@
 //! Traits provided by unified declarations must resolve trait names in scope.
 
-use typecheck::TypedFileAst;
-
 mod support;
-use support::transform_source;
-
-fn unknown_symbol_names(typed: &TypedFileAst) -> Vec<&str> {
-    typed
-        .declaration_flaws
-        .iter()
-        .filter_map(|(_, flaw)| {
-            if flaw.code.slug() == "type-unknown-symbol" && flaw.arg("suggested").is_none() {
-                flaw.arg("name")
-            } else {
-                None
-            }
-        })
-        .collect()
-}
+use support::{transform_source, unknown_symbol_names};
 
 #[test]
 fn provided_trait_to_string_ok_when_declared_in_same_file() {

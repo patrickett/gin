@@ -5,6 +5,38 @@ use ast::declare::{Declare, DeclareValue, HasMember};
 use ast::expr::Bind;
 use ast::parameter::ParameterKind;
 
+pub fn format_variant(variant: &ast::Variant) -> String {
+    let mut surface = variant.shape().value.format_variant_shape();
+    if let Some(discriminant) = variant.discriminant() {
+        let _ = write!(surface, " := {}", discriminant.value);
+    }
+    surface
+}
+
+pub fn format_parameter_constraints(parameter: &ast::Parameter) -> String {
+    parameter
+        .constraints
+        .iter()
+        .map(|constraint| {
+            let mut surface = constraint.trait_name.to_string();
+            if !constraint.args.is_empty() {
+                surface.push('(');
+                surface.push_str(
+                    &constraint
+                        .args
+                        .iter()
+                        .map(|arg| arg.value.format_surface())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+                surface.push(')');
+            }
+            surface
+        })
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
+
 /// Extension trait providing [`Declare::surface_text`].
 pub trait DeclareFormatExt {
     /// Type surface for hover and docs: name, params, and `is`/`has` value only.
@@ -26,6 +58,10 @@ impl DeclareFormatExt for Declare {
                     out.push_str(", ");
                 }
                 first = false;
+                if let Some(pattern) = &v.range_pattern {
+                    let _ = write!(&mut out, "{} to {}", pattern.start, pattern.end);
+                    continue;
+                }
                 let _ = match &v.kind {
                     ParameterKind::Tagged(sp) => {
                         let _ = write!(&mut out, "{} ", k.as_str());
@@ -40,31 +76,12 @@ impl DeclareFormatExt for Declare {
                     kind => write!(&mut out, "{}{kind}", k.as_str()),
                 };
                 if !v.constraints.is_empty() {
-                    let _ = write!(&mut out, " has {}", v.constraints_surface());
+                    let _ = write!(&mut out, " has {}", format_parameter_constraints(v));
                 }
             }
             out.push(')');
         }
-        if matches!(&self.value, DeclareValue::Has(members) if members.is_empty())
-            && !self.provided_traits.is_empty()
-            && self.provided_traits.iter().all(|pt| pt.fields.is_empty())
-        {
-            out.push_str(" is ");
-            let mut first = true;
-            for pt in &self.provided_traits {
-                if !first {
-                    out.push_str(" and ");
-                }
-                first = false;
-                out.push_str(pt.trait_name.as_str());
-            }
-            return out;
-        }
-
         let continuation_indent = out.len() + 1;
-        if matches!(&self.value, DeclareValue::Has(_)) {
-            out.push_str(" has")
-        }
         out.push_str(&self.value.format_value(continuation_indent));
         out
     }
@@ -74,6 +91,26 @@ impl DeclareFormatExt for Declare {
 pub trait BindFormatExt {
     /// Source-level signature for IDE hover (parameter and return type surfaces as written).
     fn signature_surface(&self) -> String;
+}
+
+fn push_named_results(sig: &mut String, bind: &Bind) {
+    for (index, result) in bind.named_results.iter().enumerate() {
+        if index > 0 {
+            sig.push_str(", ");
+        }
+        if let Some(name) = result.name {
+            sig.push_str(name.as_str());
+            sig.push(' ');
+        }
+        sig.push_str(&result.ty.value.format_surface());
+    }
+}
+
+fn push_return_tag(sig: &mut String, tag: &ast::Spanned<ast::Expr>, bind: &Bind) {
+    sig.push_str(&payload_result_surface(
+        &tag.value,
+        &bind.payload_postconditions,
+    ));
 }
 
 impl BindFormatExt for Bind {
@@ -116,48 +153,41 @@ impl BindFormatExt for Bind {
                         sig.push_str(&ty.value.format_surface());
                         sig.push_str(": ?");
                     }
-                    ParameterKind::Generic => sig.push_str(name.as_str()),
+                    ParameterKind::Proposition(_) | ParameterKind::Generic => {
+                        sig.push_str(name.as_str());
+                        match self.param_conventions.get(name) {
+                            Some(ast::ParamConvention::Mutate) => sig.push_str(" mut"),
+                            Some(ast::ParamConvention::Observe) => sig.push_str(" ref"),
+                            Some(ast::ParamConvention::Own) => sig.push_str(" own"),
+                            _ => {}
+                        }
+                        if let ParameterKind::Proposition(predicate) = kind {
+                            let _ = write!(&mut sig, " is {predicate}");
+                        }
+                    }
                     ParameterKind::Default(expr) => {
                         sig.push_str(name.as_str());
                         sig.push_str(&format!(": {:?}", expr.value));
                     }
                 }
                 if !parameter.constraints.is_empty() {
-                    let _ = write!(&mut sig, " has {}", parameter.constraints_surface());
+                    let _ = write!(&mut sig, " has {}", format_parameter_constraints(parameter));
                 }
             }
             sig.push(')');
             if !self.named_results.is_empty() {
                 sig.push(' ');
-                for (index, result) in self.named_results.iter().enumerate() {
-                    if index > 0 {
-                        sig.push_str(", ");
-                    }
-                    if let Some(name) = result.name {
-                        sig.push_str(name.as_str());
-                        sig.push(' ');
-                    }
-                    sig.push_str(&result.ty.value.format_surface());
-                }
+                push_named_results(&mut sig, self);
             } else if let Some(sp) = &self.return_tag {
                 sig.push(' ');
-                sig.push_str(&sp.value.format_surface());
+                push_return_tag(&mut sig, sp, self);
             }
         } else if !self.named_results.is_empty() {
             sig.push(' ');
-            for (index, result) in self.named_results.iter().enumerate() {
-                if index > 0 {
-                    sig.push_str(", ");
-                }
-                if let Some(name) = result.name {
-                    sig.push_str(name.as_str());
-                    sig.push(' ');
-                }
-                sig.push_str(&result.ty.value.format_surface());
-            }
+            push_named_results(&mut sig, self);
         } else if let Some(sp) = &self.return_tag {
             sig.push(' ');
-            sig.push_str(&sp.value.format_surface());
+            push_return_tag(&mut sig, sp, self);
         } else if let Some(rtn) = &self.return_type_name {
             sig.push(' ');
             sig.push_str(rtn.as_str());
@@ -174,6 +204,11 @@ impl BindFormatExt for Bind {
                 }
             }
         }
+        if self.return_tag.is_none()
+            && let Some(ast::PredicateExpr::Proposition(predicate)) = &self.return_refinement
+        {
+            let _ = write!(&mut sig, " is {predicate}");
+        }
         sig
     }
 }
@@ -186,7 +221,12 @@ trait DeclareValueFormatExt {
 impl DeclareValueFormatExt for DeclareValue {
     fn format_value(&self, continuation_indent: usize) -> String {
         match self {
-            DeclareValue::Alias(sp) => format!(" is {}", sp.value.format_surface()),
+            DeclareValue::Alias(sp) => match &sp.value {
+                ast::Expr::IntegerDomain(inner) => {
+                    format!(" is in {}", inner.value.format_surface())
+                }
+                _ => format!(" is {}", sp.value.format_surface()),
+            },
             DeclareValue::When(_) => " is when …".to_string(),
             DeclareValue::Union { variants } => {
                 let all_literal = variants
@@ -200,15 +240,10 @@ impl DeclareValueFormatExt for DeclareValue {
                         )
                     });
                 if multiline && !variants.is_empty() {
-                    let mut out =
-                        format!(" is {}", variants[0].shape().value.format_variant_shape());
+                    let mut out = format!(" is {}", format_variant(&variants[0]));
                     let indent = " ".repeat(continuation_indent);
                     for v in &variants[1..] {
-                        let _ = write!(
-                            &mut out,
-                            "\n{indent}or {}",
-                            v.shape().value.format_variant_shape()
-                        );
+                        let _ = write!(&mut out, "\n{indent}or {}", format_variant(v));
                     }
                     return out;
                 }
@@ -219,136 +254,56 @@ impl DeclareValueFormatExt for DeclareValue {
                         out.push_str(" or ");
                     }
                     first = false;
-                    out.push_str(&v.shape().value.format_variant_shape());
+                    out.push_str(&format_variant(v));
                 }
                 out
             }
 
             DeclareValue::Has(members) => {
-                let members: Vec<_> = members
+                let fields: Vec<_> = members
                     .iter()
-                    .filter(|member| match member {
-                        HasMember::Property(property) => property.qualifier.is_none(),
-                        HasMember::Function(function) => function.qualifier.is_none(),
+                    .filter_map(|member| match member {
+                        HasMember::Property(property)
+                            if property.qualifier.is_none()
+                                && !property.attributes.is_private() =>
+                        {
+                            Some(property)
+                        }
+                        _ => None,
                     })
-                    .cloned()
                     .collect();
-                if members.is_empty() {
+                if fields.is_empty() {
                     return String::new();
                 }
 
-                if members.iter().all(|m| match m {
-                    HasMember::Property(_) => true,
-                    HasMember::Function(f) => f.body.is_none() && f.params.is_empty(),
-                }) && members.len() <= 3
-                {
+                if fields.len() <= 3 {
                     let mut inline = String::new();
-                    for (i, m) in members.iter().enumerate() {
+                    for (i, field) in fields.iter().enumerate() {
                         if i > 0 {
                             inline.push_str(", ");
                         }
-                        match m {
-                            HasMember::Property(p) => {
-                                let _ = write!(inline, "{}", p.name.as_str());
-                                if let Some(ty) = &p.ty {
-                                    let _ = write!(inline, " {}", ty.value.format_surface());
-                                }
-                            }
-                            HasMember::Function(f) => {
-                                let _ = write!(inline, "{}", f.name.as_str());
-                                for (index, alternative) in
-                                    f.anonymous_result_alternatives.iter().enumerate()
-                                {
-                                    inline.push_str(if index == 0 { " " } else { " or " });
-                                    inline.push_str(alternative.value.label.as_str());
-                                    if let Some(proposition) = &alternative.value.proposition {
-                                        let _ = write!(&mut inline, " thus {proposition}");
-                                    }
-                                }
-                                if let Some(rt) = &f.return_ty {
-                                    let _ = write!(inline, " {}", rt.value.format_surface());
-                                }
-                                if let Some(et) = &f.error_ty {
-                                    let _ = write!(inline, " or {}", et.value.format_surface());
-                                }
-                            }
+                        inline.push_str(field.name.as_str());
+                        if field.owned_storage {
+                            inline.push_str(" own");
+                        }
+                        if let Some(ty) = &field.ty {
+                            let _ = write!(&mut inline, " {}", ty.value.format_surface());
                         }
                     }
-                    // Total rendered line = name + " has" + " " + inline
-                    // = (continuation_indent - 1) + 4 + 1 + inline.len()
-                    // = continuation_indent + 4 + inline.len()
                     if continuation_indent + 4 + inline.len() <= 40 {
-                        let mut out = String::new();
-                        out.push(' ');
-                        out.push_str(&inline);
-                        return out;
+                        return format!(" has {inline}");
                     }
                 }
 
-                let mut out = String::new();
-                for m in members.iter() {
-                    match m {
-                        ast::HasMember::Property(p) => {
-                            let _ = write!(&mut out, "\n    {}", p.name.as_str());
-                            if let Some(ty) = &p.ty {
-                                out.push(' ');
-                                out.push_str(&ty.value.format_surface());
-                            }
-                        }
-                        ast::HasMember::Function(f) if f.body.is_none() => {
-                            let _ = write!(&mut out, "\n    {}", f.name.as_str());
-                            if !f.params.is_empty() {
-                                out.push('(');
-                                let mut first = true;
-                                for (k, v) in f.params.iter() {
-                                    if !first {
-                                        out.push_str(", ");
-                                    }
-                                    first = false;
-                                    out.push_str(k.as_str());
-                                    match &v.kind {
-                                        ast::ParameterKind::Tagged(sp) => {
-                                            out.push(' ');
-                                            out.push_str(&sp.value.format_surface());
-                                        }
-                                        ast::ParameterKind::ValueParam { ty } => {
-                                            out.push(' ');
-                                            out.push_str(&ty.value.format_surface());
-                                        }
-                                        kind => {
-                                            let _ = write!(&mut out, "{kind}");
-                                        }
-                                    }
-                                    if let Some(conv) = f.conventions.get(k) {
-                                        match conv {
-                                            ast::ParamConvention::Observe => out.push_str(" ref"),
-                                            ast::ParamConvention::Mutate => out.push_str(" mut"),
-                                            ast::ParamConvention::Own => out.push_str(" own"),
-                                            ast::ParamConvention::Terminal => {}
-                                        }
-                                    }
-                                }
-                                out.push(')');
-                            }
-                            for (index, alternative) in
-                                f.anonymous_result_alternatives.iter().enumerate()
-                            {
-                                out.push_str(if index == 0 { " " } else { " or " });
-                                out.push_str(alternative.value.label.as_str());
-                                if let Some(proposition) = &alternative.value.proposition {
-                                    let _ = write!(&mut out, " thus {proposition}");
-                                }
-                            }
-                            if let Some(rt) = &f.return_ty {
-                                out.push(' ');
-                                out.push_str(&rt.value.format_surface());
-                            }
-                            if let Some(et) = &f.error_ty {
-                                out.push_str(" or ");
-                                out.push_str(&et.value.format_surface());
-                            }
-                        }
-                        ast::HasMember::Function(_) => {}
+                let mut out = " has".to_string();
+                for field in fields {
+                    let _ = write!(&mut out, "\n    {}", field.name.as_str());
+                    if field.owned_storage {
+                        out.push_str(" own");
+                    }
+                    if let Some(ty) = &field.ty {
+                        out.push(' ');
+                        out.push_str(&ty.value.format_surface());
                     }
                 }
                 out
@@ -356,10 +311,48 @@ impl DeclareValueFormatExt for DeclareValue {
             DeclareValue::Set() => " is set".to_string(),
             DeclareValue::Range(start, end) => format!(" is {start} to {end}"),
             DeclareValue::InRange(start, end) => format!(" is in {start} to {end}"),
-            DeclareValue::Refinement(predicate) => format!(" is {predicate:?}"),
+            DeclareValue::Refinement(predicate) => {
+                match ast::integer::IntegerDomain::from_refinement(predicate).closed_bounds() {
+                    Some((lower, upper)) => format!(" is in {lower} to {upper}"),
+                    None => format!(" is {predicate:?}"),
+                }
+            }
         }
     }
 }
 #[cfg(test)]
 #[path = "../../tests/declare_tests.rs"]
 mod tests;
+
+pub fn payload_result_surface(
+    surface: &ast::Expr,
+    contracts: &[ast::PayloadPostcondition],
+) -> String {
+    let mut pending = vec![surface];
+    let mut alternatives = Vec::new();
+    while let Some(surface) = pending.pop() {
+        if let ast::Expr::Binary(binary) = surface
+            && binary.op == ast::BinOp::LogicalOr
+        {
+            pending.push(&binary.rhs.value);
+            pending.push(&binary.lhs.value);
+            continue;
+        }
+        let ty = surface.format_surface();
+        let contracts: Vec<_> = contracts
+            .iter()
+            .filter(|contract| contract.ty.value == *surface)
+            .collect();
+        alternatives.push(if let Some(contract) = contracts.first() {
+            let propositions = contracts
+                .iter()
+                .map(|contract| contract.proposition.to_string())
+                .collect::<Vec<_>>()
+                .join(" and ");
+            format!("{} {ty} thus {propositions}", contract.name)
+        } else {
+            ty
+        });
+    }
+    alternatives.join(" or ")
+}

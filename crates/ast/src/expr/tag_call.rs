@@ -17,3 +17,20 @@ pub struct TagCall {
     pub qual_path: Option<Spanned<ModPath>>,
     pub args: Vec<Typed<Expr>>,
 }
+
+impl TagCall {
+    pub fn qualifier(&self) -> Option<String> {
+        self.qual_path.as_ref().map(|path| {
+            let segments = path
+                .segments
+                .strip_suffix(std::slice::from_ref(&self.name))
+                .unwrap_or(&path.segments);
+            let mut qualifier = path.root.as_str().to_string();
+            for segment in segments {
+                qualifier.push('.');
+                qualifier.push_str(segment.as_str());
+            }
+            qualifier
+        })
+    }
+}

@@ -40,12 +40,4 @@ impl TyState {
             TyState::Infer => None,
         }
     }
-
-    pub fn is_resolved(&self) -> bool {
-        matches!(self, TyState::Resolved(_))
-    }
-
-    pub fn is_narrowed(&self) -> bool {
-        matches!(self, TyState::Narrowed { .. })
-    }
 }

@@ -9,12 +9,12 @@ use support::transform_with_markers;
 
 const ARCH_GIN: &str = r#"--- Target CPU architectures for conditional compilation.
 Architecture is 'x86_64'
-             or 'arm64'
+             or 'aarch64'
              or 'wasm32'
 "#;
 
 const ARCHITECTURE_HOVER: &str = "\
-```gin\nArchitecture is 'x86_64'\n             or 'arm64'\n             or 'wasm32'\n```\n---\n\nTarget CPU architectures for conditional compilation.";
+```gin\nArchitecture is 'x86_64'\n             or 'aarch64'\n             or 'wasm32'\n```\n---\n\nTarget CPU architectures for conditional compilation.";
 
 fn arch_gin_source() -> String {
     ARCH_GIN.to_owned()
@@ -41,7 +41,7 @@ fn arch_gin_architecture_resolves_to_string_literal_const_union() {
         .expect("Architecture tag");
     assert_eq!(
         tag.declaration_text,
-        "Architecture is 'x86_64'\n             or 'arm64'\n             or 'wasm32'"
+        "Architecture is 'x86_64'\n             or 'aarch64'\n             or 'wasm32'"
     );
 }
 
@@ -66,6 +66,6 @@ fn arch_gin_string_literal_variant_hover() {
 
     assert_eq!(
         hover,
-        "```gin\nArchitecture is \'x86_64\'\n             or \'arm64\'\n             or \'wasm32\'\n```\n---\n\nTarget CPU architectures for conditional compilation."
+        "```gin\nArchitecture is \'x86_64\'\n             or \'aarch64\'\n             or \'wasm32\'\n```\n---\n\nTarget CPU architectures for conditional compilation."
     );
 }

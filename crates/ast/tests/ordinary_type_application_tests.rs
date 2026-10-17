@@ -9,11 +9,10 @@ use typecheck::normal_expr::Normalize;
 use typecheck::representation::Repr;
 use typecheck::ty::Ty;
 use typecheck::typed::TagId;
-use typecheck::{CompileTimeTraitRegistry, trait_field_for_ty};
 
 #[test]
 fn binary_type_argument_resolves_as_array_size() {
-    let source = "#fixed_array(x, n)\nBuffer(x Type, n Int) has size Int\nHolder has values Buffer(Int, n + 1)\n";
+    let source = "#fixed_array(x, n)\nBuffer(x, n Int) has\n    size Int\n    finish(self):\n        return\nHolder has\n    values Buffer(Int, n + 1)\n    finish(self):\n        self.values.finish\n        return\n";
     let typed = transform_source(source);
     assert!(
         typed.all_flaws().is_empty(),
@@ -105,7 +104,7 @@ fn binary_type_argument_resolves_as_array_size() {
 #[test]
 fn symbolic_length_expressions_support_nested_arithmetic() {
     let typed = transform_source(
-        "#fixed_array(x, n)\nBuffer(x Type, n Int) has size Int\nHolder has values Buffer(Int, 2 * n + 1)\n",
+        "#fixed_array(x, n)\nBuffer(x, n Int) has\n    size Int\n    finish(self):\n        return\nHolder has\n    values Buffer(Int, 2 * n + 1)\n    finish(self):\n        self.values.finish\n        return\n",
     );
     assert!(
         typed.all_flaws().is_empty(),
@@ -169,7 +168,7 @@ fn symbolic_length_expressions_support_nested_arithmetic() {
 #[test]
 fn symbolic_length_expressions_support_multiplicative_growth() {
     let typed = transform_source(
-        "#fixed_array(x, n)\nBuffer(x Type, n Int) has size Int\nHolder has values Buffer(Int, 2 * n)\n",
+        "#fixed_array(x, n)\nBuffer(x, n Int) has\n    size Int\n    finish(self):\n        return\nHolder has\n    values Buffer(Int, 2 * n)\n    finish(self):\n        self.values.finish\n        return\n",
     );
     assert!(
         typed.all_flaws().is_empty(),
@@ -229,8 +228,9 @@ fn symbolic_length_expressions_support_multiplicative_growth() {
 
 #[test]
 fn unannotated_array_spelling_remains_nominal_record() {
-    let typed =
-        transform_source("Array(x Type, n Int) has size Int\nHolder has values Array(Int, n)\n");
+    let typed = transform_source(
+        "Int is in 0 to 255\nInt has\n    finish(self):\n        return\nArray(x, n Int) has\n    size Int\n    finish(self):\n        return\nHolder has\n    values Array(Int, n)\n    finish(self):\n        self.values.finish\n        return\n",
+    );
     assert!(
         typed.all_flaws().is_empty(),
         "ordinary type argument should resolve without flaws: {:?}",
@@ -279,7 +279,7 @@ fn unannotated_array_spelling_remains_nominal_record() {
 #[test]
 fn equivalent_symbolic_former_lengths_compare_by_normalized_expression() {
     let typed = transform_source(
-        "Array(x Type, n Int) has size Int\nHolderOne is Array(Int, n + 0)\nHolderTwo is Array(Int, 0 + n)\n",
+        "Int is in 0 to 255\nInt has\n    finish(self):\n        return\nArray(x, n Int) has\n    size Int\n    finish(self):\n        return\nHolderOne is Array(Int, n + 0)\nHolderTwo is Array(Int, 0 + n)\n",
     );
     assert!(
         typed.all_flaws().is_empty(),
@@ -339,7 +339,7 @@ fn equivalent_symbolic_former_lengths_compare_by_normalized_expression() {
 #[test]
 fn symbolic_array_type_applications_preserve_alias_identity() {
     let typed = transform_source(
-        "Array(x Type, n Int) has size Int\nHolder is Array(Int, 2 + 1)\nAlias is Holder\n",
+        "Int is in 0 to 255\nInt has\n    finish(self):\n        return\nArray(x, n Int) has\n    size Int\n    finish(self):\n        return\nHolder is Array(Int, 2 + 1)\nAlias is Holder\n",
     );
     assert!(
         typed.all_flaws().is_empty(),
@@ -406,46 +406,29 @@ fn same_range_declarations_keep_distinct_identity_and_equal_representation() {
 }
 
 #[test]
-fn trait_lookup_does_not_cross_equal_integer_representations() {
-    let source = "\
-Int is in 0 to 4294967295
-Flavor has code Int
-
-First is in 0 to 4294967295
-First has Flavor
-    Flavor.code: 1
-
-Second is in 0 to 4294967295
-Second has Flavor
-    Flavor.code: 2
-";
-    let ast = parser::parse_from_str(source);
-    let registry = CompileTimeTraitRegistry::from_file_ast(&ast);
-    let typed = typecheck::transform::transform_file(ast, typecheck::FileId(0));
-    let first = typed
-        .tag_types
-        .get(&TagId(internment::Intern::from_ref("First")))
-        .expect("First");
-    let second = typed
-        .tag_types
-        .get(&TagId(internment::Intern::from_ref("Second")))
-        .expect("Second");
-
-    assert_eq!(
-        trait_field_for_ty("Flavor", "code", first, &typed, &registry),
-        Some(ast::ConstValue::Int(1.into()))
-    );
-    assert_eq!(
-        trait_field_for_ty("Flavor", "code", second, &typed, &registry),
-        Some(ast::ConstValue::Int(2.into()))
-    );
+fn trait_static_members_do_not_cross_equal_integer_representations() {
+    let source = "Int is in 0 to 4294967295\nInt has\n    finish(self):\n        return\nFlavor has code Int\n\nFirst is in 0 to 4294967295\nFirst has Flavor\n    Flavor.code: 1\n\nSecond is in 0 to 4294967295\nSecond has Flavor\n    Flavor.code: 2\nfirst_value: First.code\nsecond_value: Second.code\n";
+    let mut ast = parser::parse_from_str(source);
+    typecheck::prepare_target::materialize_type_static_access(&mut ast);
+    for (name, expected) in [("first_value", 1), ("second_value", 2)] {
+        let name = internment::Intern::from_ref(name);
+        let bind = ast
+            .defs
+            .get(&ast::DefinitionId::named(name))
+            .expect("static member bind");
+        let ast::BindValue::Expr(expr) = &bind.value else {
+            panic!("{name} should hold an expression value");
+        };
+        assert_eq!(
+            expr.const_value,
+            Some(Box::new(ast::ConstValue::Int(expected.into())))
+        );
+    }
 }
 
 #[test]
 fn ordinary_integer_value_is_stored_on_the_expression() {
-    let typed = transform_source(
-        "main := 1 + 2\n",
-    );
+    let typed = transform_source("main := 1 + 2\n");
     let (index, _) = typed
         .exprs
         .kind

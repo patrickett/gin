@@ -76,7 +76,7 @@ process(p Coord) Int:
         .iter()
         .filter(|(_, f)| {
             matches!(
-                f.code.slug(),
+                f.code.slug().as_str(),
                 "type-unreachable-when-arm"
                     | "type-wildcard-when-pattern"
                     | "type-missing-else-arm"
@@ -258,7 +258,9 @@ Coord(x: px, y: py, z: pz) := p
     // The first bind `p := Coord(...)` should still be present.
     let has_p_def = typed
         .defs
-        .contains_key(&typecheck::DefId(internment::Intern::new("p".to_string())));
+        .contains_key(&typecheck::DefId::named(internment::Intern::new(
+            "p".to_string(),
+        )));
     assert!(
         has_p_def,
         "`p := Coord(...)` bind should be present after transform"
@@ -287,7 +289,9 @@ Coord(x, y, z) := p
     // The first bind `p := Coord(...)` should still be present.
     let has_p_def = typed
         .defs
-        .contains_key(&typecheck::DefId(internment::Intern::new("p".to_string())));
+        .contains_key(&typecheck::DefId::named(internment::Intern::new(
+            "p".to_string(),
+        )));
     assert!(
         has_p_def,
         "`p := Coord(...)` bind should be present after transform"

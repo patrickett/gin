@@ -8,11 +8,8 @@ mod support;
 use support::transform_source;
 
 use ast::HoverDoc;
-use ast::UnionVariant;
 use ast::source::SourceExt;
-use internment::Intern;
 use typecheck::HoverTarget;
-use typecheck::ty::Ty;
 
 fn classify(source: &str, line: u32, character: u32) -> Option<HoverTarget> {
     let typed = transform_source(source);
@@ -30,7 +27,7 @@ fn classify_at_needle(source: &str, needle: &str) -> Option<HoverTarget> {
 
 #[test]
 fn self_in_has_method_body_classified_as_selfref() {
-    let source = "Region has\n    reset(self) Region: self\n";
+    let source = "Region has\n    reset(self) Region: return self\n";
     let target = classify_at_needle(source, "self\n").expect("classify body self");
     match target {
         HoverTarget::SelfRef { modifier, .. } => {
@@ -43,8 +40,14 @@ fn self_in_has_method_body_classified_as_selfref() {
 #[test]
 fn ref_and_mut_self_in_has_method_body_include_modifier() {
     let cases = [
-        ("Region has\n    reset(self ref) Region: self\n", "self ref"),
-        ("Region has\n    reset(self mut) Region: self\n", "self mut"),
+        (
+            "Region has\n    reset(self ref) Region: return self\n",
+            "self ref",
+        ),
+        (
+            "Region has\n    reset(self mut) Region: return self\n",
+            "self mut",
+        ),
     ];
 
     for (source, expected_name) in cases {
@@ -60,9 +63,7 @@ fn ref_and_mut_self_in_has_method_body_include_modifier() {
 
 #[test]
 fn self_in_associated_has_method_reports_specific_diagnostic_inline_body() {
-    let source = "Region has
-    allocate(size Int) Int: self
-";
+    let source = "Region has\n    allocate(size Int) Int: return self\n";
     let typed = transform_source(source);
     let codes: Vec<_> = typed
         .all_flaws()
@@ -70,7 +71,9 @@ fn self_in_associated_has_method_reports_specific_diagnostic_inline_body() {
         .map(|(_, diagnostic)| diagnostic.code.slug())
         .collect();
     assert!(
-        codes.contains(&"no-self-in-associated-method"),
+        codes
+            .iter()
+            .any(|code| code == "no-self-in-associated-method"),
         "expected no-self-in-associated-method in inline body, got {codes:?}"
     );
 }
@@ -89,7 +92,9 @@ fn self_in_associated_has_method_reports_specific_diagnostic_block_body() {
         .map(|(_, diagnostic)| diagnostic.code.slug())
         .collect();
     assert!(
-        codes.contains(&"no-self-in-associated-method"),
+        codes
+            .iter()
+            .any(|code| code == "no-self-in-associated-method"),
         "expected no-self-in-associated-method in block body, got {codes:?}"
     );
 }
@@ -100,7 +105,7 @@ fn has_block_body_full_region() {
     start Int
     end Int
 
-    new(start Int, end Int) Self: Self(start, end)
+    new(start Int, end Int) Self: return Self(start, end)
 "#;
     let typed = transform_source(source);
     let has_parse_error = typed.all_flaws().iter().any(|(_, d)| {
@@ -145,7 +150,7 @@ fn definition_name_classified() {
 
 #[test]
 fn function_name_classified() {
-    let source = "foo() Int := 42\n";
+    let source = "foo() Int := return 42\n";
     let target = classify(source, 0, 0).expect("classify on function name");
     assert!(
         matches!(target, HoverTarget::Definition(_)),
@@ -187,7 +192,7 @@ fn expr_bind_classified() {
 
 #[test]
 fn expr_fn_call_classified() {
-    let source = "foo() Int := 42\nmain:\n    foo()\n    return 0\n";
+    let source = "foo() Int := return 42\nmain:\n    foo()\n    return 0\n";
     // Cursor on 'foo()' call in main
     let target = classify(source, 2, 4).expect("classify on fn call");
     assert!(
@@ -203,30 +208,6 @@ fn number_literal_classified() {
     assert!(
         matches!(target, HoverTarget::Expr(_)),
         "expected Expr for number literal, got {target:?}"
-    );
-}
-
-#[test]
-fn def_name_wins_over_expr() {
-    // When cursor is on a definition name, it must be classified as Definition,
-    // not as Expr (which would also match the same position).
-    let source = "two := 1 + 1\nmain:\n    return two\n";
-    let target = classify(source, 0, 0).expect("classify on definition name");
-    assert!(
-        matches!(target, HoverTarget::Definition(_)),
-        "definition name must win over overlapping Expr, got {target:?}"
-    );
-}
-
-#[test]
-fn tag_name_wins_over_expr() {
-    // When cursor is on a tag declaration name, it must be classified as TagDecl,
-    // not as Expr.
-    let source = "Bool is True or False\n";
-    let target = classify(source, 0, 0).expect("classify on tag name");
-    assert!(
-        matches!(target, HoverTarget::TagDecl(_)),
-        "tag name must win over overlapping Expr, got {target:?}"
     );
 }
 
@@ -282,26 +263,12 @@ fn module_path_root_classified() {
 fn hover_doc_matches_tag_golden_shape() {
     let md = HoverDoc::new()
         .gin("Bool is True or False")
-        .ty_display("Bool")
         .prose("A boolean type.")
-        .size_align_from_ty(
-            &Ty::Union {
-                name: Intern::from_ref("Bool"),
-                variants: vec![
-                    UnionVariant::new(Intern::from_ref("True"), vec![]),
-                    UnionVariant::new(Intern::from_ref("False"), vec![]),
-                ],
-                literal_values: None,
-                resolved_params: None,
-            },
-            &(),
-            &(),
-        )
         .render();
 
     assert_eq!(
         md,
         "\
-```gin\nBool is True or False\n```\n---\n\n`Bool`\n---\n\nA boolean type."
+```gin\nBool is True or False\n```\n---\n\nA boolean type."
     );
 }

@@ -6,44 +6,18 @@ mod support;
 
 use ast::TyArg;
 use internment::Intern;
-use typecheck::TypedFileAst;
 use typecheck::ty::Ty;
-use typecheck::{BindBody, DefId, ExprId, TypedExprKind};
+use typecheck::{DefId, TypedExprKind};
 
-use support::transform_source;
-
-/// Helper: extract the body expression ID from a bind.
-fn body_expr_id(typed: &TypedFileAst, def_name: &str) -> Option<ExprId> {
-    let def_id = DefId(Intern::new(def_name.to_string()));
-    let bind = typed.defs.get(&def_id).expect("def exists");
-    match &bind.body {
-        BindBody::Expr(eid) => Some(*eid),
-        BindBody::Body { exprs, ret } => {
-            if let Some(ret_id) = ret {
-                Some(*ret_id)
-            } else {
-                exprs.last().copied()
-            }
-        }
-        BindBody::Unlowered => None,
-    }
-}
+use support::{body_expr_id, transform_source};
 
 #[test]
 fn generic_has_method_call_retains_record_type() {
-    let src = "\
-Range(x) has
-    start x
-    end x
-
-    new(start x, end x) Self: Self(start, end)
-
-main: Range.new(12, 1200)
-";
+    let src = "Range(x) has\n    start x\n    end x\n\n    new(start x, end x) Self: return Self(start, end)\n\nmain: Range.new(12, 1200)\n";
     let typed = transform_source(src);
     let method = typed
         .defs
-        .get(&DefId(Intern::new("Range.new".to_string())))
+        .get(&DefId::named(Intern::new("Range.new".to_string())))
         .expect("Range.new definition");
     assert!(
         matches!(
@@ -61,7 +35,7 @@ main: Range.new(12, 1200)
         .iter()
         .zip(&typed.exprs.ty)
         .find(|(kind, _)| {
-            matches!(kind, TypedExprKind::FnCall { target, .. } if target.0.as_str() == "Range.new")
+            matches!(kind, TypedExprKind::FnCall { target, .. } if target.0.as_str().starts_with("Range.new"))
         })
         .expect("Range.new call");
     assert!(
@@ -75,10 +49,7 @@ main: Range.new(12, 1200)
 
 #[test]
 fn shape_literal_infers_record_type() {
-    let src = "\
-Coord has x Int, y Int, z Int
-p := Coord(x: 1, y: 2, z: 3)
-";
+    let src = "Int is in 0 to 255\nInt has\n    finish(self):\n        return\nCoord has\n    x Int, y Int, z Int\n    finish(self):\n        return\np := Coord(x: 1, y: 2, z: 3)\n";
     let typed = transform_source(src);
     let flaws = typed.all_flaws();
     assert!(
@@ -105,67 +76,36 @@ p := Coord(x: 1, y: 2, z: 3)
 
 #[test]
 fn return_type_inferred_from_shape_literal() {
-    let src = "\
-Coord has x Int, y Int, z Int
-Coord.new(x Int, y Int, z Int):
-    Coord(x, y, z)
-";
+    let src = "Int is in 0 to 255\nInt has\n    finish(self):\n        return\nCoord has\n    x Int, y Int, z Int\n    finish(self):\n        return\nCoord.new(x Int, y Int, z Int):\n    return Coord(x, y, z)\n";
     let typed = transform_source(src);
-    // Return-type inference from body is not yet implemented;
-    // the body expression itself should resolve to Coord type.
-    // At minimum, no crashes during transform.
-
-    // The body's last expression should be a Coord TagCall whose type
-    // resolves to the Coord record type (even if field types are Opaque
-    // because Int isn't declared).
-    let bind = typed
-        .defs
-        .get(&DefId(Intern::new("Coord.new".to_string())))
-        .expect("Coord.new");
-    if let BindBody::Body { ref exprs, .. } = bind.body {
-        let last = exprs.last().expect("Coord.new has body exprs");
-        let last_ty = typed.exprs.ty.get(last.as_usize()).expect("last expr type");
-        assert!(
-            matches!(
-                typed.type_registry.resolved_definition_for_type(last_ty),
-                Ty::Record { name, .. } if name.as_str() == "Coord"
-            ),
-            "body last expression should be Coord record, got {last_ty:?}"
-        );
-    } else {
-        panic!("Coord.new should have a Body body");
-    }
+    let body = body_expr_id(&typed, "Coord.new").expect("Coord.new body");
+    let ty = &typed.exprs.ty[body.as_usize()];
+    assert!(
+        matches!(typed.type_registry.resolved_definition_for_type(ty),
+        Ty::Record { name, .. } if name.as_str() == "Coord"),
+        "{ty:?}"
+    );
 }
 
 #[test]
 fn return_type_inferred_from_variant_construction() {
     let src = "\
-Maybe(value) is Some(value) or None
-Maybe.some(v Int):
-    Maybe.Some(value: v)
+Word is in 0 to 255
+Word.finish(self): return
+Maybe is Some(value Word) or None
+Maybe.finish(self): return
+Maybe.some(v Word):
+    return Maybe.Some(value: v)
 ";
     let typed = transform_source(src);
-    // Variant construction with explicit `Maybe.Some(...)` should resolve
-    // via the qualified path. Check that the body expression type resolves
-    // to the Maybe union type.
-
-    let bind = typed
-        .defs
-        .get(&DefId(Intern::new("Maybe.some".to_string())))
-        .expect("Maybe.some");
-    if let BindBody::Body { ref exprs, .. } = bind.body {
-        let last = exprs.last().expect("Maybe.some has body exprs");
-        let last_ty = typed.exprs.ty.get(last.as_usize()).expect("last expr type");
-        assert!(
-            matches!(
-                typed.type_registry.resolved_definition_for_type(last_ty),
-                Ty::Union { name, .. } if name.as_str() == "Maybe"
-            ),
-            "body last expression should be Maybe union, got {last_ty:?}"
-        );
-    } else {
-        panic!("Maybe.some should have a Body body");
-    }
+    assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
+    let body = body_expr_id(&typed, "Maybe.some").expect("Maybe.some body");
+    let ty = &typed.exprs.ty[body.as_usize()];
+    assert!(
+        matches!(typed.type_registry.resolved_definition_for_type(ty),
+        Ty::Union { name, .. } if name.as_str() == "Maybe"),
+        "{ty:?}"
+    );
 }
 
 #[test]
@@ -202,7 +142,7 @@ fn generic_record_application_retains_resolved_params_in_declaration_order() {
     let typed = transform_source("Pair(a, b) has first a, second b\nvalue Pair(Int, String)");
     let value = typed
         .defs
-        .get(&DefId(Intern::from_ref("value")))
+        .get(&DefId::named(Intern::from_ref("value")))
         .expect("value bind");
     let Ty::Record {
         resolved_params: Some(params),
@@ -227,11 +167,7 @@ fn generic_record_application_retains_resolved_params_in_declaration_order() {
 
 #[test]
 fn method_body_shape_literal_inferred() {
-    let src = "\
-Coord has x Int, y Int, z Int
-Coord.origin: Coord(x: 0, y: 0, z: 0)
-Coord.new(x Int, y Int, z Int): Coord(x, y, z)
-";
+    let src = "Int is in 0 to 255\nInt has\n    finish(self):\n        return\nCoord has\n    x Int, y Int, z Int\n    finish(self):\n        return\nCoord.origin: return Coord(x: 0, y: 0, z: 0)\nCoord.new(x Int, y Int, z Int): return Coord(x, y, z)\n";
     let typed = transform_source(src);
     let flaws = typed.all_flaws();
     let unknown_sym_flaws: Vec<_> = flaws

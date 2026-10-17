@@ -88,62 +88,6 @@ impl fmt::Display for InRangeBounds {
     }
 }
 
-impl TypeExpr {
-    /// Whether this type expression is a "type surface" — a nominal, qualified,
-    /// generic, in-range, or reference type (as opposed to a literal value or
-    /// structural pattern).
-    pub fn is_type_surface(&self) -> bool {
-        match self {
-            TypeExpr::Nominal(..) | TypeExpr::Qualified(_) | TypeExpr::Generic { .. } => true,
-            TypeExpr::InRange { .. } => true,
-            TypeExpr::Ref { inner, .. } => inner.value.is_type_surface(),
-            _ => false,
-        }
-    }
-
-    /// A pattern that matches any remaining value (wildcard `_` or generic with wildcard param).
-    pub fn is_catch_all_pattern(&self) -> bool {
-        match self {
-            TypeExpr::Nominal(name, _) if name.as_str() == "_" => true,
-            TypeExpr::Generic { params, .. } => {
-                params.len() == 1
-                    && params[0].0.as_str() == "_"
-                    && matches!(params[0].1, ParameterKind::Generic)
-            }
-            _ => false,
-        }
-    }
-
-    /// Collect every type-parameter name introduced by a method's receiver type
-    /// surface, e.g. `x` in `Range[x].new(...)`. The returned substitution maps
-    /// each name to `Ty::Opaque(name)` (the identity binding used while
-    /// typechecking the method itself).
-    ///
-    /// Returns an empty map for non-`Generic` receivers (`Bool.to_string`
-    /// introduces no type variables).
-    pub fn typevars_from_receiver(&self) -> HashMap<Intern<String>, Ty> {
-        let mut out = HashMap::new();
-        if let TypeExpr::Generic { params, .. } = self {
-            for (name, kind) in params {
-                if matches!(kind, ParameterKind::Generic) {
-                    out.insert(*name, Ty::Opaque(*name));
-                }
-            }
-        }
-        out
-    }
-
-    /// Source span of a variant name inside a union variant shape (`False` in `Bool is True or False`).
-    pub fn variant_shape_name_span(&self, variant_name: &str) -> Option<SpanId> {
-        match self {
-            TypeExpr::Nominal(n, span) if n.as_str() == variant_name => Some(*span),
-            TypeExpr::Generic { name, span, .. } if name.as_str() == variant_name => Some(*span),
-            TypeExpr::Literal(Literal::String(s), span) if s == variant_name => Some(*span),
-            _ => None,
-        }
-    }
-}
-
 /// Payload fields for a variant, looking up the variant in the variant map
 /// and matching against the subject type's union name.
 pub(crate) fn payload_fields_for_variant(

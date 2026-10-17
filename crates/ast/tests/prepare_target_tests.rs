@@ -1,4 +1,4 @@
-//! Compile target: Default trait materialization and flask triple merge.
+//! Explicit static fields and target queries.
 
 use ast::ConstValue;
 use flask::{CompileTarget, TargetTriple};
@@ -15,7 +15,7 @@ fn prepare_source(source: &str, entry: &CompileTarget) -> ast::FileAst {
 #[test]
 fn type_static_default_field_expands_target_default() {
     let source = r#"
-Architecture is 'x86_64' or 'arm64'
+Architecture is 'x86_64' or 'aarch64'
 Vendor is 'unknown'
 OperatingSystem is 'unknown'
 Default(value) has default value
@@ -29,7 +29,7 @@ target := Target.default
     let ast = prepare_source(source, &CompileTarget::Library);
     let target = ast.defs.get(&Intern::from_ref("target")).expect("target");
     let cv = match &target.value {
-        ast::BindValue::Expr(e) => e.const_value.as_ref().expect("folded target"),
+        ast::BindValue::Expr(e) => e.const_value.as_deref().expect("folded target"),
         _ => panic!("expected expr bind"),
     };
     let arch = match cv {
@@ -44,7 +44,7 @@ target := Target.default
 }
 
 #[test]
-fn default_trait_materializes_kind_variant() {
+fn explicit_default_field_materializes_kind_variant() {
     let source = r#"
 Default(value) has default value
 
@@ -52,12 +52,12 @@ Kind is A or B or C
 Kind has Default
     Default.default: Kind.A
 
-k Kind
+k := Kind.default
 "#;
     let ast = prepare_source(source, &CompileTarget::Library);
     let k = ast.defs.get(&Intern::from_ref("k")).expect("k bind");
     let cv = match &k.value {
-        ast::BindValue::Expr(e) => e.const_value.as_ref().expect("const k"),
+        ast::BindValue::Expr(e) => e.const_value.as_deref().expect("const k"),
         _ => panic!("expected expr bind"),
     };
     match cv {
@@ -82,9 +82,9 @@ target Target
 #[test]
 fn full_target_fixture_parses() {
     let source = r#"
-Architecture is 'x86_64' or 'arm64' or 'wasm32'
+Architecture is 'x86_64' or 'aarch64' or 'wasm32'
 Vendor is 'unknown'
-OperatingSystem is 'linux' or 'macOS' or 'windows' or 'unknown'
+OperatingSystem is 'linux' or 'darwin' or 'windows' or 'unknown'
 Default(value) has default value
 Target has Default
     arch Architecture
@@ -95,7 +95,7 @@ target Target
 "#;
     let ast = TokenCursor::parse_source(source);
     assert!(!ast.tags.is_empty(), "tags empty");
-    let keys: Vec<_> = ast.defs.keys().map(|k| k.as_str()).collect();
+    let keys: Vec<_> = ast.defs.keys().map(|k| k.0.as_str()).collect();
     assert!(
         ast.defs.contains_key(&Intern::from_ref("target")),
         "defs={keys:?}"
@@ -103,11 +103,11 @@ target Target
 }
 
 #[test]
-fn target_merge_overrides_default_arch() {
+fn target_query_selects_architecture() {
     let source = r#"
-Architecture is 'x86_64' or 'arm64' or 'wasm32'
+Architecture is 'x86_64' or 'aarch64' or 'wasm32'
 Vendor is 'unknown'
-OperatingSystem is 'linux' or 'macOS' or 'windows' or 'unknown'
+OperatingSystem is 'linux' or 'darwin' or 'windows' or 'unknown'
 
 Default(value) has default value
 
@@ -117,7 +117,7 @@ Target has Default
     os OperatingSystem
     Default.default: [ arch: 'x86_64', vendor: 'unknown', os: 'unknown', ]
 
-target Target
+target := #target
 "#;
     let triple = TargetTriple::parse("wasm32-unknown-unknown").unwrap();
     let entry = CompileTarget::Concrete(triple);
@@ -125,11 +125,11 @@ target Target
     assert!(
         ast.defs.contains_key(&Intern::from_ref("target")),
         "prepare defs: {:?}",
-        ast.defs.keys().map(|k| k.as_str()).collect::<Vec<_>>()
+        ast.defs.keys().map(|k| k.0.as_str()).collect::<Vec<_>>()
     );
     let target = ast.defs.get(&Intern::from_ref("target")).expect("target");
     let cv = match &target.value {
-        ast::BindValue::Expr(e) => e.const_value.as_ref().expect("target const"),
+        ast::BindValue::Expr(e) => e.const_value.as_deref().expect("target const"),
         _ => panic!("expected materialized target"),
     };
     let arch = match cv {

@@ -1,4 +1,4 @@
-//! Hover on `[f, ...rest]` must show `f NamedTy` and `rest List(NamedTy)`.
+//! Hover on `[f, ...rest]` must show `f NamedTy` and `rest Chain(NamedTy)`.
 //!
 //! This exercises the full type-resolution pipeline through public API:
 //! parse → declare → resolve (with generic param substitution) → hover.
@@ -12,13 +12,14 @@ fn hover_f_shows_named_ty() {
     let src = "\
 Bool is True or False
 BigInt is in 0 to 1000
-List(x) has pointer @x, length BigInt
+#sequence_builder(element, empty, push)
+Chain(element) has pointer @element, length BigInt
 NamedTy has name String, ty Type
-String has bytes List(Byte)
+String has bytes Chain(Byte)
 Byte is in 0 to 255
-Type is Primitive(width BigInt, signed Bool) or Record(name String, fields List(NamedTy))
+Type is Primitive(width BigInt, signed Bool) or Record(name String, fields Chain(NamedTy))
 
-all_copy(fields List(NamedTy)) Bool := when fields is
+all_copy(fields Chain(NamedTy)) Bool := return when fields is
     []                  then True
     [f, ...rest]        then True
 ";
@@ -41,17 +42,18 @@ all_copy(fields List(NamedTy)) Bool := when fields is
 }
 
 #[test]
-fn hover_rest_shows_list_named_ty() {
+fn hover_rest_shows_sequence_named_ty() {
     let src = "\
 Bool is True or False
 BigInt is in 0 to 1000
-List(x) has pointer @x, length BigInt
+#sequence_builder(element, empty, push)
+Chain(element) has pointer @element, length BigInt
 NamedTy has name String, ty Type
-String has bytes List(Byte)
+String has bytes Chain(Byte)
 Byte is in 0 to 255
-Type is Primitive(width BigInt, signed Bool) or Record(name String, fields List(NamedTy))
+Type is Primitive(width BigInt, signed Bool) or Record(name String, fields Chain(NamedTy))
 
-all_copy(fields List(NamedTy)) Bool := when fields is
+all_copy(fields Chain(NamedTy)) Bool := return when fields is
     []                  then True
     [f, ...rest]        then True
 ";
@@ -69,6 +71,6 @@ all_copy(fields List(NamedTy)) Bool := when fields is
     assert_eq!(
         markdown,
         "\
-```gin\nrest List(NamedTy)\n```"
+```gin\nrest Chain(NamedTy)\n```"
     );
 }

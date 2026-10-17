@@ -9,27 +9,30 @@ fn copy_src() -> &'static str {
     // Types resolve from the marker package fixture; only need the is_copy
     // definitions whose binder names are being tested.
     "\
+BigInt is in 0 to 1000
+#sequence_builder(x, empty, push)
+List(x) has pointer @x, length BigInt
 Copy has can_copy Bool: is_copy(Self)
 
-is_copy(x Type) Bool := when x is
+is_copy(x Type) Bool := return when x is
     Primitive(_, _)     then True
     Ptr(_)              then False
     Ref(_, False)       then True
     Ref(_, True)        then False
     Opaque(_)           then False
     Record(_, fields)   then all_named_copy(fields)
-    Tuple(_, elems)     then all_types_copy(elems)
+    Tuple(elems)     then all_types_copy(elems)
     Union(_, variants)  then all_variants_copy(variants)
 
-all_named_copy(fields) Bool := when fields is
+all_named_copy(fields List(NamedTy)) Bool := return when fields is
     []                  then True
     [f, ...rest]        then is_copy(f.ty) and all_named_copy(rest)
 
-all_types_copy(elems) Bool := when elems is
+all_types_copy(elems List(Type)) Bool := return when elems is
     []                  then True
     [t, ...rest]        then is_copy(t) and all_types_copy(rest)
 
-all_variants_copy(variants) Bool := when variants is
+all_variants_copy(variants List(VariantShape)) Bool := return when variants is
     []                  then True
     [v, ...rest]        then all_named_copy(v.fields) and all_variants_copy(rest)
 "
@@ -87,7 +90,7 @@ fn list_cons_head_variable_f_is_not_unknown_symbol() {
 use core.reflect NamedTy, Type
 use core.primitive List, Bool
 
-all_copy(fields List(NamedTy)) Bool := when fields is
+all_copy(fields List(NamedTy)) Bool := return when fields is
     []                  then True
     [f, ...rest]        then True
 "#;
@@ -117,7 +120,7 @@ fn list_cons_rest_variable_is_not_unknown_symbol() {
 use core.reflect NamedTy, Type
 use core.primitive List, Bool
 
-all_copy(fields List(NamedTy)) Bool := when fields is
+all_copy(fields List(NamedTy)) Bool := return when fields is
     []                  then True
     [f, ...rest]        then True
 "#;

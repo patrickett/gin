@@ -4,7 +4,7 @@ use std::ops::ControlFlow;
 
 use internment::Intern;
 
-use crate::{DefMap, Expr, FileAst, FnCall, folder::*, path::ModPath};
+use crate::{DefMap, FileAst, FnCall, folder::*, path::ModPath};
 
 impl FileAst {
     /// Prefix every top-level def with `module_qual.` (e.g. `io.print`), rewrite
@@ -24,26 +24,63 @@ impl FileAst {
             return self;
         }
 
-        let old_names: HashSet<Intern<String>> = self.defs.keys().copied().collect();
+        let qual_prefix = qual_parts
+            .iter()
+            .map(|part| part.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
+
+        let old_names: HashSet<Intern<String>> = self.defs.keys().map(|id| id.0).collect();
 
         let mut new_defs = DefMap::new();
         let old_defs = mem::take(&mut self.defs);
         let mut folder = ModuleQualifyFolder {
             old_names,
             qual_parts,
+            qual_prefix,
         };
         for (name, mut bind) in old_defs {
-            let new_name = Intern::<String>::new(format!("{module_qual}.{}", name.as_str()));
+            let new_name =
+                Intern::<String>::new(format!("{}.{}", folder.qualified_prefix(), name.0.as_str()));
             let _ = folder.visit_bind(&mut bind);
             let bind = bind.remap_module_symbol(new_name);
-            new_defs.insert(new_name, bind);
+            new_defs.insert(name.with_name(new_name), bind);
         }
         self.defs = new_defs;
+        for declaration in self.tags.values_mut() {
+            let shadowed: Vec<_> = declaration
+                .params
+                .iter()
+                .flat_map(|params| params.keys())
+                .copied()
+                .filter(|name| folder.old_names.remove(name))
+                .collect();
+            if let crate::DeclareValue::Refinement(predicate) = &mut declaration.value {
+                folder.qualify_predicate(predicate);
+            }
+            if let crate::DeclareValue::Has(members) = &mut declaration.value {
+                for member in members {
+                    if let crate::HasMember::Property(property) = member {
+                        if let Some(surface) = &mut property.ty {
+                            let _ = folder.visit_expr(&mut surface.value);
+                        }
+                        if let Some(predicate) = &mut property.refinement {
+                            folder.qualify_predicate(predicate);
+                        }
+                    }
+                }
+            }
+            if let Some(bits) = &mut declaration.attributes.bits {
+                let _ = folder.visit_expr(&mut bits.value);
+            }
+            folder.old_names.extend(shadowed);
+        }
 
         let mut new_private = HashSet::new();
         for name in self.private_defs.drain() {
             new_private.insert(Intern::<String>::new(format!(
-                "{module_qual}.{}",
+                "{}.{}",
+                folder.qualified_prefix(),
                 name.as_str()
             )));
         }
@@ -56,30 +93,74 @@ impl FileAst {
 struct ModuleQualifyFolder {
     old_names: HashSet<Intern<String>>,
     qual_parts: Vec<Intern<String>>,
+    qual_prefix: String,
+}
+
+impl ModuleQualifyFolder {
+    fn qualified_prefix(&self) -> &str {
+        &self.qual_prefix
+    }
+
+    fn qualify_predicate(&self, predicate: &mut crate::PredicateExpr) {
+        let prefix = self.qualified_prefix();
+        crate::ty::walk_predicate_names(predicate, &mut |name| {
+            if self.old_names.contains(name) {
+                *name = Intern::new(format!("{prefix}.{name}"));
+            }
+        });
+    }
+
+    fn qualify_proposition(&self, proposition: &mut crate::ProofProposition) {
+        let mut predicate = crate::PredicateExpr::Proposition(Box::new(proposition.clone()));
+        self.qualify_predicate(&mut predicate);
+        let crate::PredicateExpr::Proposition(value) = predicate else {
+            unreachable!()
+        };
+        *proposition = *value;
+    }
 }
 
 impl Folder for ModuleQualifyFolder {
-    fn visit_bind(&mut self, bind: &mut crate::Bind) -> ControlFlow<()> {
-        for attribute in bind.attributes.raw_attributes.iter_mut().flatten() {
-            if let crate::AttributeItem::Call { name, args, .. } = attribute
-                && matches!(name.as_str(), "machine")
-            {
-                for arg in args {
-                    self.visit_expr(arg)?;
-                }
-            }
+    fn visit_return(&mut self, ret: &mut crate::Return) -> ControlFlow<()> {
+        if let Some(proof) = &mut ret.postcondition {
+            self.qualify_proposition(&mut proof.value);
         }
-        walk_bind_mut(self, bind)
+        crate::folder::walk_return_mut(self, ret)
     }
 
-    fn visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
-        // Type expressions (TypeExpr) are now a separate enum and are not
-        // folded through the Expr Folder. Qualification of TypeExpr nodes
-        // will be handled in a separate pass.
-        walk_expr_mut(self, expr)
+    fn visit_bind(&mut self, bind: &mut crate::Bind) -> ControlFlow<()> {
+        let shadowed: Vec<_> = bind
+            .params
+            .iter()
+            .flat_map(|params| params.keys())
+            .copied()
+            .filter(|name| self.old_names.remove(name))
+            .collect();
+        for predicate in bind.param_refinements.values_mut() {
+            self.qualify_predicate(predicate);
+        }
+        if let Some(predicate) = &mut bind.return_refinement {
+            self.qualify_predicate(predicate);
+        }
+        for proof in &mut bind.payload_postconditions {
+            let shadowed_result = self.old_names.remove(&proof.name);
+            self.qualify_proposition(&mut proof.proposition);
+            if shadowed_result {
+                self.old_names.insert(proof.name);
+            }
+        }
+        let result = walk_bind_mut(self, bind);
+        self.old_names.extend(shadowed);
+        result
     }
 
     fn visit_fn_call(&mut self, call: &mut FnCall) -> ControlFlow<()> {
+        if let Some(id) = call.definition
+            && self.old_names.contains(&id.0)
+        {
+            let prefix = self.qualified_prefix();
+            call.definition = Some(id.with_name(Intern::new(format!("{prefix}.{}", id.0))));
+        }
         call.path
             .rewrite_module_path(&self.old_names, &self.qual_parts);
         walk_fn_call_mut(self, call)

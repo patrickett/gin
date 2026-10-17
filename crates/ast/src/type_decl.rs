@@ -7,10 +7,18 @@ pub trait TypeNameExt {
     /// Returns `true` when `name` starts with an ASCII uppercase letter,
     /// matching Gin's convention that type names are capitalized.
     fn is_capitalized_type_name(&self) -> bool;
+
+    /// Returns `true` when `name` starts with an ASCII lowercase letter,
+    /// matching Gin's convention that value and binder names are lowercase.
+    fn starts_with_lowercase(&self) -> bool;
 }
 
 impl TypeNameExt for str {
     fn is_capitalized_type_name(&self) -> bool {
         self.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+    }
+
+    fn starts_with_lowercase(&self) -> bool {
+        self.chars().next().is_some_and(|c| c.is_ascii_lowercase())
     }
 }

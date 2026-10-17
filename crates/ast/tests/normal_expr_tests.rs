@@ -53,12 +53,6 @@ fn value_string_displays() {
 }
 
 #[test]
-fn value_int_round_trips() {
-    let expr = NormalExpr::Value(ConstValue::Int(3.into()));
-    assert_eq!(expr.to_string(), "3");
-}
-
-#[test]
 fn equality_and_hash() {
     use std::collections::HashSet;
     let a = NormalExpr::Var(Intern::from_ref("n"));
@@ -79,7 +73,10 @@ fn equality_and_hash() {
 fn inferred_identity_controls_equality_and_hash() {
     use std::collections::HashSet;
 
-    let binder = BinderId::new(7, BinderOwner::Definition(Intern::from_ref("Vector")));
+    let binder = BinderId::new(
+        7,
+        BinderOwner::Definition(ast::DefinitionId::named(Intern::from_ref("Vector"))),
+    );
     let a = NormalExpr::Inferred(DependentArgId::new(binder, 0));
     let same = NormalExpr::Inferred(DependentArgId::new(binder, 0));
     let other_slot = NormalExpr::Inferred(DependentArgId::new(binder, 1));

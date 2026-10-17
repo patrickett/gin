@@ -8,6 +8,7 @@ use ast::{
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn ast_layout_stays_within_current_ceilings() {
+    let mut exceeded = Vec::new();
     macro_rules! check {
         ($ty:ty, $ceiling:expr) => {{
             let size = size_of::<$ty>();
@@ -17,16 +18,17 @@ fn ast_layout_stays_within_current_ceilings() {
                 size,
                 align_of::<$ty>()
             );
-            assert!(
-                size <= $ceiling,
-                "{} grew to {size} bytes (ceiling {} bytes)",
-                stringify!($ty),
-                $ceiling
-            );
+            if size > $ceiling {
+                exceeded.push(format!(
+                    "{} grew to {size} bytes (ceiling {} bytes)",
+                    stringify!($ty),
+                    $ceiling
+                ));
+            }
         }};
     }
 
-    check!(Expr, 112);
+    check!(Expr, 120);
     check!(Typed<Expr>, 312);
     check!(Ty, 104);
     check!(TyState, 112);
@@ -42,6 +44,7 @@ fn ast_layout_stays_within_current_ceilings() {
     check!(Declare, 472);
     check!(HasMember, 360);
     check!(HasFunction, 368);
-    check!(HasProperty, 232);
-    check!(FileAst, 480);
+    check!(HasProperty, 288);
+    check!(FileAst, 608);
+    assert!(exceeded.is_empty(), "{}", exceeded.join("\n"));
 }

@@ -2,7 +2,6 @@ use ast::parameter::ParameterKind;
 use ast::span::{SpanId, Spanned};
 use ast::{Expr, Pattern, TypeExpr};
 use ast_format::type_expr::PatternFormatExt;
-use ast_format::type_expr::TypeExprFormatExt;
 use internment::Intern;
 
 fn pattern_name(name: &str) -> Spanned<Pattern> {
@@ -31,7 +30,7 @@ fn generic(name: &str, params: Vec<(&str, TypeExpr)>) -> TypeExpr {
                         value: match ty {
                             TypeExpr::Nominal(name, _) => Expr::AnonymousTag(name),
                             TypeExpr::Literal(lit, _) => Expr::Lit(lit),
-                            _ => Expr::Lit(ast::Literal::Number(0)),
+                            _ => Expr::Lit(ast::Literal::Int(0.into())),
                         },
                         span_id: SpanId::INVALID,
                     })),
@@ -67,7 +66,7 @@ fn variant_shape_surface_keeps_field_names() {
     );
 
     assert_eq!(
-        expr.format_variant_shape(),
+        Pattern::from(expr).format_variant_shape(),
         "Primitive(width BigInt, signed Bool)"
     );
 }

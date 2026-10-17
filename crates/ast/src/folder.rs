@@ -16,6 +16,13 @@ macro_rules! walk_expr_body {
             Expr::Bind(b) => $v.visit_bind(b),
             Expr::When(w) => $v.visit_when_expr(w),
             Expr::If(ifx) => $v.visit_if_expr(ifx),
+            Expr::Return(ret) => $v.visit_return(ret),
+            Expr::Block(exprs) => {
+                for expr in exprs {
+                    $v.visit_expr(expr)?;
+                }
+                Continue(())
+            }
             Expr::Loop(l) => $v.visit_loop(l),
             Expr::TagCall(tc) => $v.visit_tag_call(tc),
             Expr::FormatString(fs) => $v.visit_format_string(fs),
@@ -52,6 +59,11 @@ macro_rules! walk_expr_body {
                 $v.visit_expr(value)
             }
             Expr::Destructure { value, .. } => $v.visit_expr(value),
+            Expr::SliceGet { buf, start, length } => {
+                $v.visit_expr(buf)?;
+                $v.visit_expr(start)?;
+                $v.visit_expr(length)
+            }
             Expr::BufGet { buf, index } => {
                 $v.visit_expr(buf)?;
                 $v.visit_expr(index)
@@ -64,16 +76,25 @@ macro_rules! walk_expr_body {
                 $v.visit_expr(value)
             }
             Expr::Cast { expr: e, .. } => $v.visit_expr(e),
-            Expr::Asm { .. } => Continue(()),
-            Expr::Register(e) | Expr::TakePtr(e) | Expr::Ref { inner: e, .. } | Expr::Deref(e) | Expr::Negate(e) => {
-                $v.visit_expr(e)
+            Expr::Emit { code, arguments } => {
+                $v.visit_expr(code)?;
+                $v.visit_expr(arguments)
             }
-            Expr::Lit(_)
+            Expr::DomainOf(e)
+            | Expr::IntegerDomain(e)
+            | Expr::TakePtr(e)
+            | Expr::Ref { inner: e, .. }
+            | Expr::Deref(e)
+            | Expr::Negate(e) => $v.visit_expr(e),
+            Expr::DomainValue(_)
+            | Expr::Import(_)
+            | Expr::TypeValue(_)
+            | Expr::Lit(_)
             | Expr::SelfRef
             | Expr::AnonymousTag(..)
             | Expr::TargetQuery { .. }
             | Expr::Target
-            | Expr::Register(_)
+            | Expr::Todo
             | Expr::Invalid(_) => Continue(()),
         }
     };
@@ -157,6 +178,9 @@ macro_rules! walk_expr_child_nodes {
                     }
                 }
             }
+            Expr::DomainOf(expr) | Expr::IntegerDomain(expr) => {
+                child!(expr);
+            }
             Expr::Range(range) => {
                 child!(range.start);
                 child!(range.end);
@@ -166,7 +190,15 @@ macro_rules! walk_expr_child_nodes {
                     child!(expr);
                 }
             }
-            Expr::ResultValues(exprs) | Expr::ArrayLit(exprs) | Expr::List(exprs) => {
+            Expr::Return(ret) => {
+                for expr in borrow!(ret.values) {
+                    child!(expr);
+                }
+            }
+            Expr::Block(exprs)
+            | Expr::ResultValues(exprs)
+            | Expr::ArrayLit(exprs)
+            | Expr::List(exprs) => {
                 for expr in exprs {
                     child!(expr);
                 }
@@ -196,6 +228,11 @@ macro_rules! walk_expr_child_nodes {
                 child!(base);
                 child!(value);
             }
+            Expr::SliceGet { buf, start, length } => {
+                child!(buf);
+                child!(start);
+                child!(length);
+            }
             Expr::BufGet { buf, index } => {
                 child!(buf);
                 child!(index);
@@ -207,13 +244,19 @@ macro_rules! walk_expr_child_nodes {
                 child!(index);
                 child!(value);
             }
-            Expr::Asm { .. }
+            Expr::Emit { code, arguments } => {
+                child!(code);
+                child!(arguments);
+            }
+            Expr::DomainValue(_)
+            | Expr::Import(_)
+            | Expr::TypeValue(_)
             | Expr::Lit(_)
             | Expr::SelfRef
             | Expr::AnonymousTag(_)
             | Expr::TargetQuery { .. }
             | Expr::Target
-            | Expr::Register(_)
+            | Expr::Todo
             | Expr::Invalid(_) => {}
         }
         Continue(())
@@ -224,17 +267,6 @@ pub fn walk_typed_expr_children<'a>(
     expr: &'a Expr,
     visit: &mut impl FnMut(&'a crate::expr::Typed<Expr>) -> ControlFlow<()>,
 ) -> ControlFlow<()> {
-    if let Expr::Asm {
-        specification,
-        operands,
-    } = expr
-    {
-        visit(specification)?;
-        for operand in operands {
-            visit(&operand.value)?;
-        }
-        return Continue(());
-    }
     macro_rules! borrow {
         ($value:expr) => {
             &$value
@@ -257,17 +289,6 @@ pub fn walk_typed_expr_children_mut(
     expr: &mut Expr,
     visit: &mut impl FnMut(&mut crate::expr::Typed<Expr>) -> ControlFlow<()>,
 ) -> ControlFlow<()> {
-    if let Expr::Asm {
-        specification,
-        operands,
-    } = expr
-    {
-        visit(specification)?;
-        for operand in operands {
-            visit(&mut operand.value)?;
-        }
-        return Continue(());
-    }
     macro_rules! borrow {
         ($value:expr) => {
             &mut $value
@@ -291,7 +312,11 @@ pub fn walk_condition_typed_exprs<'a>(
     visit: &mut impl FnMut(&'a crate::expr::Typed<Expr>) -> ControlFlow<()>,
 ) -> ControlFlow<()> {
     match condition {
-        Condition::Is { subject, .. } => visit(subject),
+        Condition::Compare { left, right, .. } => {
+            visit(left)?;
+            visit(right)
+        }
+        Condition::Proposition { subject } | Condition::Is { subject, .. } => visit(subject),
         Condition::Not(inner) => walk_condition_typed_exprs(inner, visit),
         Condition::And(left, right) | Condition::Or(left, right) => {
             walk_condition_typed_exprs(left, visit)?;
@@ -305,7 +330,11 @@ pub fn walk_condition_typed_exprs_mut(
     visit: &mut impl FnMut(&mut crate::expr::Typed<Expr>) -> ControlFlow<()>,
 ) -> ControlFlow<()> {
     match condition {
-        Condition::Is { subject, .. } => visit(subject),
+        Condition::Compare { left, right, .. } => {
+            visit(left)?;
+            visit(right)
+        }
+        Condition::Proposition { subject } | Condition::Is { subject, .. } => visit(subject),
         Condition::Not(inner) => walk_condition_typed_exprs_mut(inner, visit),
         Condition::And(left, right) | Condition::Or(left, right) => {
             walk_condition_typed_exprs_mut(left, visit)?;
@@ -319,13 +348,6 @@ pub fn walk_expr_children<'a>(
     visit: &mut impl FnMut(SpanId, &'a Expr) -> ControlFlow<()>,
 ) -> ControlFlow<()> {
     walk_typed_expr_children(expr, &mut |child| visit(child.span_id, &child.value))
-}
-
-pub fn walk_expr_children_mut(
-    expr: &mut Expr,
-    visit: &mut impl FnMut(SpanId, &mut Expr) -> ControlFlow<()>,
-) -> ControlFlow<()> {
-    walk_typed_expr_children_mut(expr, &mut |child| visit(child.span_id, &mut child.value))
 }
 
 // Most walk bodies are textually identical for Visitor and Folder (auto-deref
@@ -374,28 +396,7 @@ walk_fn!(@s walk_bind_value, walk_bind_value_mut, v, val, BindValue, {
     }
 });
 
-walk_fn!(@d walk_expr, walk_expr_mut, v, expr, Expr, {
-    if let Expr::Asm { specification, operands } = expr {
-        v.visit_expr(&specification.value)?;
-        for operand in operands {
-            v.visit_expr(&operand.value.value)?;
-        }
-        Continue(())
-    } else {
-        walk_expr_body!(v, expr)
-    }
-}, {
-    if let Expr::Asm {
-        specification,
-        operands,
-    } = expr
-    {
-        v.visit_expr(&mut specification.value)?;
-        for operand in operands {
-            v.visit_expr(&mut operand.value.value)?;
-        }
-        return Continue(());
-    }
+walk_fn!(@s walk_expr, walk_expr_mut, v, expr, Expr, {
     walk_expr_body!(v, expr)
 });
 
@@ -422,16 +423,7 @@ walk_fn!(@d walk_when, walk_when_mut, v, when, WhenExpr, {
     Continue(())
 });
 
-walk_fn!(@d walk_when_arm, walk_when_arm_mut, v, arm, WhenArm, {
-    match arm {
-        WhenArm::Cond { condition, body, .. } => {
-            v.visit_condition(condition)?;
-            v.visit_expr(body)
-        }
-        WhenArm::Is { body, .. } => v.visit_expr(body),
-        WhenArm::Else(body, _) => v.visit_expr(body),
-    }
-}, {
+walk_fn!(@s walk_when_arm, walk_when_arm_mut, v, arm, WhenArm, {
     match arm {
         WhenArm::Cond { condition, body, .. } => {
             v.visit_condition(condition)?;
@@ -442,18 +434,13 @@ walk_fn!(@d walk_when_arm, walk_when_arm_mut, v, arm, WhenArm, {
     }
 });
 
-walk_fn!(@d walk_condition, walk_condition_mut, v, condition, Condition, {
+walk_fn!(@s walk_condition, walk_condition_mut, v, condition, Condition, {
     match condition {
-        Condition::Is { subject, .. } => v.visit_expr(subject),
-        Condition::Not(inner) => v.visit_condition(inner),
-        Condition::And(left, right) | Condition::Or(left, right) => {
-            v.visit_condition(left)?;
-            v.visit_condition(right)
+        Condition::Compare { left, right, .. } => {
+            v.visit_expr(left)?;
+            v.visit_expr(right)
         }
-    }
-}, {
-    match condition {
-        Condition::Is { subject, .. } => v.visit_expr(subject),
+        Condition::Proposition { subject } | Condition::Is { subject, .. } => v.visit_expr(subject),
         Condition::Not(inner) => v.visit_condition(inner),
         Condition::And(left, right) | Condition::Or(left, right) => {
             v.visit_condition(left)?;
@@ -525,19 +512,11 @@ walk_fn!(@d walk_range, walk_range_mut, v, r, Range,
 
 walk_fn!(@d walk_return, walk_return_mut, v, r, Return,
     {
-        if r.values.is_empty() {
-            for e in &r.values { v.visit_expr(e)?; }
-        } else {
-            for e in &r.values { v.visit_expr(e)?; }
-        }
+        for e in &r.values { v.visit_expr(e)?; }
         Continue(())
     },
     {
-        if r.values.is_empty() {
-            for e in &mut r.values { v.visit_expr(e)?; }
-        } else {
-            for e in &mut r.values { v.visit_expr(e)?; }
-        }
+        for e in &mut r.values { v.visit_expr(e)?; }
         Continue(())
     }
 );
@@ -667,4 +646,36 @@ pub trait Visitor: Sized {
 /// Mutable folder — same shape as [`Visitor`] but with `&mut` references.
 pub trait Folder: Sized {
     f!();
+}
+
+pub struct ParameterSubstitution<'a>(
+    &'a std::collections::HashMap<internment::Intern<String>, Expr>,
+);
+
+impl<'a> ParameterSubstitution<'a> {
+    pub fn new(args: &'a std::collections::HashMap<internment::Intern<String>, Expr>) -> Self {
+        Self(args)
+    }
+}
+
+impl Folder for ParameterSubstitution<'_> {
+    fn visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
+        let name = match expr {
+            Expr::AnonymousTag(name) => Some(*name),
+            Expr::FnCall(call) if call.args.is_none() && call.path.segments.is_empty() => {
+                Some(call.path.root)
+            }
+            _ => None,
+        };
+        if let Some(value) = name.and_then(|name| self.0.get(&name)) {
+            *expr = value.clone();
+            return ControlFlow::Continue(());
+        }
+        if let Expr::Bind(bind) = expr
+            && let Some(surface) = &mut bind.return_tag
+        {
+            self.visit_expr(&mut surface.value)?;
+        }
+        walk_expr_mut(self, expr)
+    }
 }

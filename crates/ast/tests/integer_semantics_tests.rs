@@ -1,10 +1,8 @@
 use std::num::NonZeroU32;
 
 use ast::integer::{
-    CanonicalIntegerExpr, CanonicalNaturalExpr, CanonicalPredicate, ContainmentProof,
-    IntegerDomain, IntegerKnowledge, IntegerRepresentation, IntegerRepresentationError,
-    IntegerRepresentationRule, IntegerValidity, prove_containment, proves_lossless_storage,
-    resolve_representation, resolve_runtime_representation,
+    CanonicalNaturalExpr, CanonicalPredicate, ContainmentProof, IntegerDomain,
+    IntegerRepresentationError, IntegerRepresentationRule, IntegerValidity,
 };
 use i256::I256;
 
@@ -13,13 +11,11 @@ fn validity(min: i128, max: i128) -> IntegerValidity {
 }
 
 fn inferred_width(min: i128, max: i128) -> u32 {
-    resolve_representation(
-        &validity(min, max),
-        &IntegerRepresentationRule::InferFromValidity,
-    )
-    .unwrap()
-    .width()
-    .get()
+    validity(min, max)
+        .resolve_representation(&IntegerRepresentationRule::InferFromValidity)
+        .unwrap()
+        .width()
+        .get()
 }
 
 #[test]
@@ -65,13 +61,11 @@ fn hole_predicate_preserves_storage_hull() {
 #[test]
 fn exact_bits_is_separate_from_validity() {
     let validity = validity(0, 256);
-    let representation = resolve_representation(
-        &validity,
-        &IntegerRepresentationRule::ExactBits(CanonicalNaturalExpr::Value(
-            NonZeroU32::new(16).unwrap(),
-        )),
-    )
-    .unwrap();
+    let representation = validity
+        .resolve_representation(&IntegerRepresentationRule::ExactBits(
+            CanonicalNaturalExpr::Value(NonZeroU32::new(16).unwrap()),
+        ))
+        .unwrap();
     assert_eq!(representation.width().get(), 16);
     assert_eq!(
         validity.domain().storage_hull().unwrap().max(),
@@ -81,13 +75,11 @@ fn exact_bits_is_separate_from_validity() {
 
 #[test]
 fn exact_bits_rejects_a_representation_smaller_than_validity() {
-    let error = resolve_representation(
-        &validity(0, 256),
-        &IntegerRepresentationRule::ExactBits(CanonicalNaturalExpr::Value(
-            NonZeroU32::new(8).unwrap(),
-        )),
-    )
-    .unwrap_err();
+    let error = validity(0, 256)
+        .resolve_representation(&IntegerRepresentationRule::ExactBits(
+            CanonicalNaturalExpr::Value(NonZeroU32::new(8).unwrap()),
+        ))
+        .unwrap_err();
     assert!(matches!(
         &error,
         IntegerRepresentationError::RepresentationTooSmall {
@@ -96,7 +88,7 @@ fn exact_bits_rejects_a_representation_smaller_than_validity() {
         } if requested.width().get() == 8 && required.width().get() == 9
     ));
     assert_eq!(
-        error.diagnostic_code(),
+        error.diagnostic_code().slug().as_str(),
         "type-integer-representation-too-small"
     );
 }
@@ -104,12 +96,12 @@ fn exact_bits_rejects_a_representation_smaller_than_validity() {
 #[test]
 fn empty_domain_is_rejected_for_runtime_materialization() {
     let validity = IntegerValidity::new(IntegerDomain::empty());
-    let error =
-        resolve_runtime_representation(&validity, &IntegerRepresentationRule::InferFromValidity)
-            .unwrap_err();
+    let error = validity
+        .resolve_runtime_representation(&IntegerRepresentationRule::InferFromValidity)
+        .unwrap_err();
     assert_eq!(error, IntegerRepresentationError::EmptyDomain);
     assert_eq!(
-        error.diagnostic_code(),
+        error.diagnostic_code().slug().as_str(),
         "type-integer-representation-width-invalid"
     );
 }
@@ -117,13 +109,13 @@ fn empty_domain_is_rejected_for_runtime_materialization() {
 #[test]
 fn unbounded_domain_requires_finite_runtime_bounds() {
     let validity = IntegerValidity::new(IntegerDomain::unbounded());
-    let error =
-        resolve_runtime_representation(&validity, &IntegerRepresentationRule::InferFromValidity)
-            .unwrap_err();
+    let error = validity
+        .resolve_runtime_representation(&IntegerRepresentationRule::InferFromValidity)
+        .unwrap_err();
 
     assert_eq!(error, IntegerRepresentationError::UnboundedDomain);
     assert_eq!(
-        error.diagnostic_code(),
+        error.diagnostic_code().slug().as_str(),
         "type-integer-refinement-requires-finite-bounds"
     );
 }
@@ -134,7 +126,7 @@ fn containment_proves_bounded_subset() {
     let expected = IntegerDomain::bounded(I256::from(0), I256::from(10)).unwrap();
 
     assert_eq!(
-        prove_containment(&actual, &expected),
+        actual.prove_containment(&expected),
         ContainmentProof::Proven
     );
 }
@@ -143,11 +135,11 @@ fn containment_proves_bounded_subset() {
 fn containment_disproves_value_outside_expected_domain() {
     let actual = IntegerDomain::bounded(I256::from(2), I256::from(12)).unwrap();
     let expected = IntegerDomain::bounded(I256::from(0), I256::from(10)).unwrap();
-    let proof = prove_containment(&actual, &expected);
+    let proof = actual.prove_containment(&expected);
 
     assert_eq!(proof, ContainmentProof::Disproven);
     assert_eq!(
-        proof.diagnostic_code(),
+        proof.diagnostic_code().map(|code| code.slug()).as_deref(),
         Some("type-integer-narrowing-failed")
     );
 }
@@ -156,36 +148,22 @@ fn containment_disproves_value_outside_expected_domain() {
 fn containment_reports_symbolic_proof_as_unknown() {
     let actual = IntegerDomain::symbolic(ast::NormalExpr::Var(internment::Intern::from_ref("n")));
     let expected = IntegerDomain::bounded(I256::from(0), I256::from(10)).unwrap();
-    let proof = prove_containment(&actual, &expected);
+    let proof = actual.prove_containment(&expected);
 
     assert_eq!(proof, ContainmentProof::Unknown);
     assert_eq!(
-        proof.diagnostic_code(),
+        proof.diagnostic_code().map(|code| code.slug()).as_deref(),
         Some("type-integer-narrowing-unproven")
     );
-}
-
-#[test]
-fn exact_knowledge_proves_lossless_storage_reduction() {
-    let knowledge = IntegerKnowledge::Exact(CanonicalIntegerExpr::Value(I256::from(15)));
-    let target = IntegerRepresentation::new(NonZeroU32::new(4).unwrap());
-
-    assert!(proves_lossless_storage(&knowledge, target));
-}
-
-#[test]
-fn unknown_knowledge_cannot_prove_lossless_storage_reduction() {
-    let target = IntegerRepresentation::new(NonZeroU32::new(8).unwrap());
-
-    assert!(!proves_lossless_storage(&IntegerKnowledge::Unknown, target));
 }
 
 #[test]
 fn wide_compile_time_domain_retains_i256_endpoints() {
     let max = (I256::from(1) << 199) - I256::from(1);
     let validity = IntegerValidity::new(IntegerDomain::bounded(I256::from(0), max).unwrap());
-    let representation =
-        resolve_representation(&validity, &IntegerRepresentationRule::InferFromValidity).unwrap();
+    let representation = validity
+        .resolve_representation(&IntegerRepresentationRule::InferFromValidity)
+        .unwrap();
     assert_eq!(representation.width().get(), 199);
     assert!(!representation.is_runtime_supported());
 }
@@ -194,16 +172,16 @@ fn wide_compile_time_domain_retains_i256_endpoints() {
 fn wide_compile_time_domain_is_rejected_for_runtime_materialization() {
     let max = (I256::from(1) << 199) - I256::from(1);
     let validity = IntegerValidity::new(IntegerDomain::bounded(I256::from(0), max).unwrap());
-    let error =
-        resolve_runtime_representation(&validity, &IntegerRepresentationRule::InferFromValidity)
-            .unwrap_err();
+    let error = validity
+        .resolve_runtime_representation(&IntegerRepresentationRule::InferFromValidity)
+        .unwrap_err();
     assert!(matches!(
         &error,
         IntegerRepresentationError::RuntimeWidthUnsupported(representation)
             if representation.width().get() == 199
     ));
     assert_eq!(
-        error.diagnostic_code(),
+        error.diagnostic_code().slug().as_str(),
         "type-integer-runtime-width-unsupported"
     );
 }

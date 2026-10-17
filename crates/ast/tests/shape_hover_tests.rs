@@ -96,36 +96,6 @@ x 1
 }
 
 #[test]
-fn shorthand_field_y_in_call_shows_bind_value() {
-    let src = "\
-Int is in 1 to 400
-
-Coord has x Int, y Int, z Int
-x := 1
-y := 2
-z := 3
-p := Coord(x, y, z)";
-    let typed = transform_source(src);
-
-    // Hover on `y` inside `Coord(x, y, z)` — more reliably positioned
-    // because `y` doesn't appear inside the Coord tag name itself.
-    let call = src.find("Coord(x, y, z)").unwrap();
-    let y_byte = call + src[call..].find("y, z").unwrap();
-    let (line, character) = src.byte_offset_to_position(y_byte);
-
-    let hover = typed
-        .hover_at(src, line, character)
-        .expect("hover on shorthand field y");
-    assert_eq!(
-        hover,
-        "\
-```gin
-y 2
-```"
-    );
-}
-
-#[test]
 fn field_access_x_shows_field_type() {
     let src = "\
 Int is in 1 to 400

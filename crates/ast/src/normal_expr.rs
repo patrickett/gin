@@ -9,10 +9,18 @@ use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinderOwner {
-    Definition(Intern<String>),
+    Definition(crate::DefinitionId),
     Expression(u32),
+    Pattern {
+        expression: u32,
+        slot: u32,
+    },
     Parameter {
-        definition: Intern<String>,
+        definition: crate::DefinitionId,
+        slot: u32,
+    },
+    LocalParameter {
+        expression: u32,
         slot: u32,
     },
 }
@@ -117,16 +125,6 @@ impl From<i256::I256> for NormalExpr {
     }
 }
 
-impl TryFrom<&NormalExpr> for usize {
-    type Error = ();
-
-    fn try_from(expr: &NormalExpr) -> Result<usize, ()> {
-        expr.as_const_int()
-            .and_then(|n| usize::try_from(n).ok())
-            .ok_or(())
-    }
-}
-
 impl PartialEq<ConstValue> for NormalExpr {
     fn eq(&self, other: &ConstValue) -> bool {
         matches!(self, NormalExpr::Value(v) if v == other)
@@ -136,69 +134,7 @@ impl PartialEq<ConstValue> for NormalExpr {
 impl fmt::Display for NormalExpr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            NormalExpr::Value(v) => match v {
-                ConstValue::Int(i) => write!(f, "{i}"),
-                ConstValue::Float(hf) => write!(f, "{hf}"),
-                ConstValue::Text(s) => write!(f, "\"{s}\""),
-                ConstValue::Tag {
-                    name,
-                    qual_path,
-                    args,
-                } => {
-                    if let Some(qp) = qual_path {
-                        write!(f, "{qp}.{}", name.as_str())?;
-                    } else {
-                        write!(f, "{}", name.as_str())?;
-                    }
-                    if !args.is_empty() {
-                        write!(f, "(")?;
-                        for (i, arg) in args.iter().enumerate() {
-                            if i > 0 {
-                                write!(f, ", ")?;
-                            }
-                            write!(f, "{}", NormalExpr::Value(arg.clone()))?;
-                        }
-                        write!(f, ")")?;
-                    }
-                    Ok(())
-                }
-                ConstValue::ResultAlternative { label, .. } => {
-                    write!(f, "{}", label.as_str())
-                }
-                ConstValue::Record { fields } => {
-                    write!(f, "{{ ")?;
-                    for (i, (name, val)) in fields.iter().enumerate() {
-                        if i > 0 {
-                            write!(f, ", ")?;
-                        }
-                        write!(f, "{}: {}", name.as_str(), NormalExpr::Value(val.clone()))?;
-                    }
-                    write!(f, " }}")
-                }
-                ConstValue::ResultRow(items) => {
-                    write!(f, "{{ ")?;
-                    for (i, item) in items.iter().enumerate() {
-                        if i > 0 {
-                            write!(f, ", ")?;
-                        }
-                        write!(f, "{}", NormalExpr::Value(item.clone()))?;
-                    }
-                    write!(f, " }}")
-                }
-                ConstValue::FixedArray(items) | ConstValue::Sequence(items) => {
-                    write!(f, "[")?;
-                    for (i, item) in items.iter().enumerate() {
-                        if i > 0 {
-                            write!(f, ", ")?;
-                        }
-                        write!(f, "{}", NormalExpr::Value(item.clone()))?;
-                    }
-                    write!(f, "]")
-                }
-                ConstValue::SequenceRepeat { seed, count } => {
-                    write!(f, "[{}; {count}]", NormalExpr::Value((**seed).clone()))
-                }
-            },
+            NormalExpr::Value(v) => write!(f, "{}", v.to_hover_string()),
             NormalExpr::Var(name) => write!(f, "{}", name.as_str()),
             NormalExpr::Inferred(_) => write!(f, "?"),
             NormalExpr::Add(l, r) => write!(f, "({l} + {r})"),

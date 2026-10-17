@@ -2,12 +2,12 @@
 
 mod traversal;
 
-pub use traversal::TyChild;
+pub use traversal::{TyChild, TyChildMapper};
 
 use internment::Intern;
 use std::collections::HashMap;
 
-use crate::{ConstValue, HashFloat, NormalExpr, SpanId};
+use crate::{ConstValue, HashFloat, NormalExpr};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -56,13 +56,13 @@ pub struct DeclarationKey {
     pub package: PackageInstanceKey,
     pub module: Vec<Intern<String>>,
     pub declaration: Intern<String>,
+    pub member: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ResultFamilyOwner {
-    Callable(DeclarationKey),
+    Callable(Box<DeclarationKey>),
     LocalCallable(crate::BinderId),
-    Structural(crate::OperatorRole),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -94,6 +94,41 @@ pub enum ProofRelation {
     LessOrEqual,
     Greater,
     GreaterOrEqual,
+}
+
+impl ProofRelation {
+    pub fn for_bin_op(op: &crate::BinOp) -> Option<Self> {
+        Some(match op {
+            crate::BinOp::Equal => Self::Equal,
+            crate::BinOp::Less => Self::Less,
+            crate::BinOp::LessOrEqual => Self::LessOrEqual,
+            crate::BinOp::Greater => Self::Greater,
+            crate::BinOp::GreaterOrEqual => Self::GreaterOrEqual,
+            _ => return None,
+        })
+    }
+
+    pub fn complement(self) -> Self {
+        match self {
+            Self::Equal => Self::NotEqual,
+            Self::NotEqual => Self::Equal,
+            Self::Less => Self::GreaterOrEqual,
+            Self::LessOrEqual => Self::Greater,
+            Self::Greater => Self::LessOrEqual,
+            Self::GreaterOrEqual => Self::Less,
+        }
+    }
+
+    pub fn holds(self, left: i256::I256, right: i256::I256) -> bool {
+        match self {
+            Self::Equal => left == right,
+            Self::NotEqual => left != right,
+            Self::Less => left < right,
+            Self::LessOrEqual => left <= right,
+            Self::Greater => left > right,
+            Self::GreaterOrEqual => left >= right,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -169,7 +204,13 @@ impl DeclarationKey {
             package,
             module,
             declaration,
+            member: 0,
         }
+    }
+
+    pub fn with_member(mut self, member: u32) -> Self {
+        self.member = member;
+        self
     }
 
     pub fn from_qualified_name(
@@ -217,6 +258,7 @@ pub struct UnionVariant {
     pub kind: UnionVariantKind,
     pub name: Intern<String>,
     pub fields: Vec<(Intern<String>, Box<Ty>)>,
+    pub discriminant: Option<i256::I256>,
     /// Result type with const-generic indices, e.g. `Vec(x, 0)` for `Nil`.
     /// `None` means the default — same as the parent union's type parameters.
     pub result_ty: Option<Ty>,
@@ -234,8 +276,13 @@ impl UnionVariant {
             kind: UnionVariantKind::Constructor,
             name,
             fields,
+            discriminant: None,
             result_ty: None,
         }
+    }
+
+    pub fn discriminant_value(&self, index: usize) -> i256::I256 {
+        self.discriminant.unwrap_or_else(|| (index as u64).into())
     }
 }
 
@@ -252,6 +299,85 @@ pub enum PredicateExpr {
     Ne(NormalExpr),
     And(Vec<PredicateExpr>),
     Proposition(Box<ProofProposition>),
+}
+
+/// Walk every name position in `predicate`, handing each to `apply`.
+pub(crate) fn walk_predicate_names(
+    predicate: &mut PredicateExpr,
+    apply: &mut impl FnMut(&mut Intern<String>),
+) {
+    enum Node<'a> {
+        Predicate(&'a mut PredicateExpr),
+        Proposition(&'a mut ProofProposition),
+        Term(&'a mut ProofTerm),
+        Normal(&'a mut NormalExpr),
+    }
+
+    let mut pending = vec![Node::Predicate(predicate)];
+    while let Some(node) = pending.pop() {
+        let name = match node {
+            Node::Predicate(predicate) => match predicate {
+                PredicateExpr::Lt(value)
+                | PredicateExpr::Gt(value)
+                | PredicateExpr::Le(value)
+                | PredicateExpr::Ge(value)
+                | PredicateExpr::Eq(value)
+                | PredicateExpr::Ne(value) => {
+                    pending.push(Node::Normal(value));
+                    continue;
+                }
+                PredicateExpr::And(predicates) => {
+                    pending.extend(predicates.iter_mut().map(Node::Predicate));
+                    continue;
+                }
+                PredicateExpr::Proposition(proposition) => {
+                    pending.push(Node::Proposition(proposition));
+                    continue;
+                }
+            },
+            Node::Proposition(proposition) => {
+                match proposition {
+                    ProofProposition::Compare { left, right, .. } => {
+                        pending.extend([Node::Term(left), Node::Term(right)]);
+                    }
+                    ProofProposition::InRange { value, start, end } => {
+                        pending.extend([Node::Term(value), Node::Term(start), Node::Term(end)]);
+                    }
+                    ProofProposition::And(left, right) | ProofProposition::Or(left, right) => {
+                        pending.extend([Node::Proposition(left), Node::Proposition(right)]);
+                    }
+                    ProofProposition::Not(inner) => pending.push(Node::Proposition(inner)),
+                }
+                continue;
+            }
+            Node::Term(term) => match term {
+                ProofTerm::Name(name) => name,
+                ProofTerm::Add(left, right)
+                | ProofTerm::Sub(left, right)
+                | ProofTerm::Mul(left, right)
+                | ProofTerm::Remainder(left, right) => {
+                    pending.extend([Node::Term(left), Node::Term(right)]);
+                    continue;
+                }
+                ProofTerm::PowerOfTwo(inner) => {
+                    pending.push(Node::Term(inner));
+                    continue;
+                }
+                _ => continue,
+            },
+            Node::Normal(normal) => match normal {
+                NormalExpr::Var(name) => name,
+                NormalExpr::Add(left, right)
+                | NormalExpr::Sub(left, right)
+                | NormalExpr::Mul(left, right) => {
+                    pending.extend([Node::Normal(left), Node::Normal(right)]);
+                    continue;
+                }
+                _ => continue,
+            },
+        };
+        apply(name);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -303,6 +429,7 @@ impl fmt::Display for ParamKind {
 /// Resolved type — the canonical representation after resolving declared type names against declarations.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
+    Proposition(Box<ProofProposition>),
     Named {
         instance: NamedTypeInstance,
         name: Intern<String>,
@@ -339,6 +466,9 @@ pub enum Ty {
     Ptr {
         inner: Box<Ty>,
     },
+    OwnedStorage {
+        inner: Box<Ty>,
+    },
     /// Address-taking before an expected named raw-pointer type is selected.
     Address {
         pointee: Box<Ty>,
@@ -368,28 +498,9 @@ pub enum Ty {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RowTypeElement {
-    pub name: Intern<String>,
-    pub name_span: SpanId,
-    pub ty: Box<Ty>,
-    pub ty_span: SpanId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SequenceTypeElement {
     pub name: Option<Intern<String>>,
     pub ty: Box<Ty>,
-}
-
-impl RowTypeElement {
-    pub fn new(name: Intern<String>, name_span: SpanId, ty: Ty, ty_span: SpanId) -> Self {
-        Self {
-            name,
-            name_span,
-            ty: Box::new(ty),
-            ty_span,
-        }
-    }
 }
 
 impl Ty {
@@ -489,12 +600,12 @@ impl Ty {
 
     pub fn anonymous_integer_width(&self) -> Option<u8> {
         match self {
-            Ty::AnonymousInteger { validity } => crate::integer::resolve_representation(
-                validity,
-                &crate::integer::IntegerRepresentationRule::InferFromValidity,
-            )
-            .ok()
-            .and_then(|representation| u8::try_from(representation.width().get()).ok()),
+            Ty::AnonymousInteger { validity } => validity
+                .resolve_representation(
+                    &crate::integer::IntegerRepresentationRule::InferFromValidity,
+                )
+                .ok()
+                .and_then(|representation| u8::try_from(representation.width().get()).ok()),
             _ => None,
         }
     }
@@ -509,7 +620,7 @@ impl Ty {
 
     pub fn address_space(&self) -> Option<u32> {
         match self {
-            Ty::Ptr { .. } => Some(0),
+            Ty::Ptr { .. } | Ty::OwnedStorage { .. } => Some(0),
             Ty::Address { address_space, .. } => Some(*address_space),
             _ => None,
         }
@@ -517,7 +628,9 @@ impl Ty {
 
     pub fn pointee_ty(&self) -> Option<&Ty> {
         match self {
-            Ty::Ptr { inner } | Ty::Address { pointee: inner, .. } => Some(inner),
+            Ty::Ptr { inner } | Ty::OwnedStorage { inner } | Ty::Address { pointee: inner, .. } => {
+                Some(inner)
+            }
             _ => None,
         }
     }
@@ -538,18 +651,6 @@ impl Ty {
         matches!(self, Ty::Union { .. })
     }
 
-    /// Union declared as `'a' | 'b'` or a site [`Ty::Literal`].
-    pub fn is_literal_shape(&self) -> bool {
-        matches!(self, Ty::Literal(_))
-            || matches!(
-                self,
-                Ty::Union {
-                    literal_values: Some(_),
-                    ..
-                }
-            )
-    }
-
     /// Discriminant-order literal members for a literal-only union.
     pub fn union_literal_values(&self) -> Option<&[ConstValue]> {
         match self {
@@ -561,11 +662,25 @@ impl Ty {
         }
     }
 
-    pub fn as_literal_const(&self) -> Option<&ConstValue> {
-        match self {
-            Ty::Literal(v) => Some(v),
-            _ => None,
+    pub fn union_discriminant_domain(&self) -> Option<crate::integer::IntegerDomain> {
+        let Ty::Union { variants, .. } = self else {
+            return None;
+        };
+        if variants.is_empty()
+            || variants.iter().any(|variant| {
+                variant.kind != UnionVariantKind::Constructor
+                    || !variant.fields.is_empty()
+                    || variant.discriminant.is_none()
+            })
+        {
+            return None;
         }
+        Some(crate::integer::IntegerDomain::union(variants.iter().map(
+            |variant| {
+                let value = variant.discriminant.unwrap();
+                crate::integer::IntegerDomain::bounded(value, value).unwrap()
+            },
+        )))
     }
 
     pub fn union_named(name: Intern<String>, variants: Vec<UnionVariant>) -> Self {
@@ -597,6 +712,7 @@ impl Ty {
     /// Format this type for hover display.
     pub fn format_for_hover(&self) -> String {
         match self {
+            Ty::Proposition(predicate) => predicate.to_string(),
             Ty::Named { instance, name, .. } => {
                 if instance.arguments.is_empty() {
                     name.as_str().to_string()
@@ -615,18 +731,11 @@ impl Ty {
                 .storage_hull()
                 .map(|hull| format!("integer in {} to {}", hull.min(), hull.max()))
                 .unwrap_or_else(|| "integer".to_string()),
-            Ty::ResultFamily {
-                owner,
-                alternatives,
-            } => format!(
-                "result {:?}({})",
-                owner,
-                alternatives
-                    .iter()
-                    .map(|alternative| alternative.label.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" or ")
-            ),
+            Ty::ResultFamily { alternatives, .. } => alternatives
+                .iter()
+                .map(|alternative| alternative.label.as_str())
+                .collect::<Vec<_>>()
+                .join(" or "),
             Ty::UnresolvedLiteral(LiteralKind::Integer) => "integer literal".to_string(),
             Ty::UnresolvedLiteral(LiteralKind::Text) => "text literal".to_string(),
             Ty::UnresolvedSequence { element, length } => match element {
@@ -653,6 +762,7 @@ impl Ty {
             Ty::Union { name, .. } => format!("Union({})", name.as_str()),
             Ty::Opaque(name) => name.as_str().to_string(),
             Ty::Array { elem, size } => format!("[{}; {}]", elem.format_for_hover(), size),
+            Ty::OwnedStorage { inner } => format!("own {}", inner.format_for_hover()),
             Ty::Ptr { inner } => format!("*{}", inner.format_for_hover()),
             Ty::Address {
                 pointee,
@@ -741,137 +851,40 @@ impl Ty {
     /// Substitute type variables, replacing only [`Ty::Opaque`] leaves that match an
     /// entry in `subst`.
     pub fn substitute(&self, subst: &HashMap<Intern<String>, Ty>) -> Ty {
-        match self {
-            Ty::Named { instance, name } => Ty::Named {
-                instance: NamedTypeInstance {
-                    declaration: instance.declaration,
-                    arguments: instance
-                        .arguments
-                        .iter()
-                        .map(|(name, arg)| {
-                            let arg = match arg {
-                                TyArg::Type(ty) => TyArg::Type(Box::new(ty.substitute(subst))),
-                                TyArg::Const(expr) => TyArg::Const(expr.clone()),
-                            };
-                            (*name, arg)
-                        })
-                        .collect(),
-                },
-                name: *name,
-            },
-            Ty::AnonymousInteger { validity } => Ty::AnonymousInteger {
-                validity: validity.clone(),
-            },
-            Ty::Ref { inner, mutable } => Ty::Ref {
-                inner: Box::new(inner.substitute(subst)),
-                mutable: *mutable,
-            },
-            Ty::Opaque(name) => subst.get(name).cloned().unwrap_or(Ty::Opaque(*name)),
-            Ty::Record {
-                name,
-                fields,
-                resolved_params,
-            } => Ty::Record {
-                name: *name,
-                fields: fields
-                    .iter()
-                    .map(|(n, t)| (*n, Box::new(t.substitute(subst))))
-                    .collect(),
-                resolved_params: resolved_params.as_ref().map(|params| {
-                    params
-                        .iter()
-                        .map(|(name, arg)| {
-                            let arg = match arg {
-                                TyArg::Type(ty) => TyArg::Type(Box::new(ty.substitute(subst))),
-                                TyArg::Const(expr) => TyArg::Const(expr.clone()),
-                            };
-                            (*name, arg)
-                        })
-                        .collect()
-                }),
-            },
-            Ty::Union {
-                name,
-                variants,
-                literal_values,
-                resolved_params,
-            } => Ty::Union {
-                name: *name,
-                variants: variants
-                    .iter()
-                    .map(|v| {
-                        let new_fields = v
-                            .fields
-                            .iter()
-                            .map(|(n, t)| (*n, Box::new(t.substitute(subst))))
-                            .collect();
-                        UnionVariant {
-                            kind: v.kind,
-                            name: v.name,
-                            fields: new_fields,
-                            result_ty: v.result_ty.as_ref().map(|rt| rt.substitute(subst)),
-                        }
-                    })
-                    .collect(),
-                literal_values: literal_values.clone(),
-                resolved_params: resolved_params.clone(),
-            },
-            Ty::Literal(v) => Ty::Literal(v.clone()),
-            Ty::Sequence(elements) => Ty::Sequence(
-                elements
-                    .iter()
-                    .map(|element| SequenceTypeElement {
-                        name: element.name,
-                        ty: Box::new(element.ty.substitute(subst)),
-                    })
-                    .collect(),
-            ),
-            Ty::Array { elem, size } => Ty::Array {
-                elem: Box::new(elem.substitute(subst)),
-                size: size.clone(),
-            },
-            Ty::Ptr { inner } => Ty::Ptr {
-                inner: Box::new(inner.substitute(subst)),
-            },
-            Ty::Address {
-                pointee,
-                address_space,
-            } => Ty::Address {
-                pointee: Box::new(pointee.substitute(subst)),
-                address_space: *address_space,
-            },
-            _ => self.clone(),
+        struct Subst<'a> {
+            map: &'a HashMap<Intern<String>, Ty>,
         }
+        impl TyChildMapper for Subst<'_> {
+            fn map_ty(&mut self, ty: &Ty) -> Ty {
+                ty.substitute(self.map)
+            }
+            fn map_arg(&mut self, arg: &TyArg) -> TyArg {
+                match arg {
+                    TyArg::Type(ty) => TyArg::Type(Box::new(ty.substitute(self.map))),
+                    TyArg::Const(expr) => TyArg::Const(expr.clone()),
+                }
+            }
+            fn map_constant(&mut self, expr: &NormalExpr) -> NormalExpr {
+                expr.clone()
+            }
+        }
+        if let Ty::Opaque(name) = self {
+            return subst.get(name).cloned().unwrap_or(Ty::Opaque(*name));
+        }
+        self.map_children(&mut Subst { map: subst })
     }
 
-    /// If this type is an array or aggregate row, return the element type.
-    /// Otherwise, look up the `List` type in `tag_types` and extract its `pointer` field.
-    pub fn list_elem_ty(&self, tag_types: &HashMap<Intern<String>, Ty>) -> Option<Ty> {
-        if let Some(instance) = self.named_instance()
-            && let Some((_, TyArg::Type(elem))) = instance
-                .arguments
-                .iter()
-                .find(|(name, _)| name.as_str() == "x")
-        {
-            return Some((**elem).clone());
-        }
+    pub fn sequence_element_type(&self) -> Option<Ty> {
         match self {
-            Ty::Array { elem, .. } => Some(*elem.clone()),
-            _ => tag_types
-                .get(&Intern::from_ref("List"))
-                .and_then(|list_ty| {
-                    if let Ty::Record { fields, .. } = list_ty {
-                        fields
-                            .iter()
-                            .find(|(n, _)| n.as_str() == "pointer")
-                            .map(|(_, t)| match t.as_ref() {
-                                Ty::Ptr { inner } => inner.as_ref().clone(),
-                                other => other.clone(),
-                            })
-                    } else {
-                        None
-                    }
-                }),
+            Ty::Array { elem, .. } => Some((**elem).clone()),
+            Ty::Sequence(elements) => {
+                let first = elements.first()?;
+                elements
+                    .iter()
+                    .all(|element| element.ty == first.ty)
+                    .then(|| (*first.ty).clone())
+            }
+            _ => None,
         }
     }
 }

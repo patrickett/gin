@@ -8,17 +8,10 @@ use parser::query::SourceParseExt;
 use resolve::{GinPackageExt, ParsedFile, resolve_imports};
 use test_fixtures::TempPackage;
 
-use typecheck::FileId;
-use typecheck::transform::{TransformCtx, transform_package};
+use typecheck::transform::{PackageTransformOptions, transform_package_with_shared_context};
 
-fn unknown_symbol_names(typed: &typecheck::TypedFileAst) -> Vec<String> {
-    typed
-        .all_flaws()
-        .into_iter()
-        .filter(|&(_, flaw)| flaw.code.slug() == "type-unknown-symbol")
-        .map(|(_, flaw)| flaw.arg("name").unwrap_or("").to_string())
-        .collect()
-}
+mod support;
+use support::unknown_symbol_names;
 
 fn transform_resolved_package(files: Vec<(PathBuf, String)>) -> Vec<typecheck::TypedFileAst> {
     let mut deps = HashMap::new();
@@ -41,47 +34,31 @@ fn transform_resolved_package(files: Vec<(PathBuf, String)>) -> Vec<typecheck::T
             .symptoms
             .extend(typecheck::prepare_parse_ast(&mut file.output.ast, &entry));
     }
-    let mut compile_time_eval_ast = ast::FileAst::default();
-    for file in &resolved {
-        compile_time_eval_ast.merge_from(file.output.ast.clone());
-    }
-    let ctx = TransformCtx::with_package_compile_time(compile_time_eval_ast);
-    let file_asts: Vec<(ast::FileAst, FileId)> = resolved
-        .into_iter()
-        .enumerate()
-        .map(|(i, f)| (f.output.ast, FileId(i as u32)))
-        .collect();
-    transform_package(
-        &file_asts,
-        &ctx,
-        typecheck::transform::PackageTransformOptions::FULL,
+    transform_package_with_shared_context(
+        resolved.into_iter().map(|file| file.output.ast).collect(),
+        PackageTransformOptions::FULL,
     )
+    .typed_asts
 }
 
 #[test]
 fn core_bundle_import_types_like_target_gin() {
     let pkg = TempPackage::new("target_bundle_types");
-    pkg.write_flask_with_deps("core", r#"{"core":{"path":"."}}"#);
-    pkg.write("default/default.gin", "Default(value) has default value\n");
-    pkg.write("target/arch/arch.gin", "Architecture is 'x86_64'\n");
-    pkg.write("target/os/os.gin", "OperatingSystem is 'linux'\n");
-    pkg.write("target/vendor/vendor.gin", "Vendor is 'unknown'\n");
-    const TARGET: &str = "\
-use core default.Default, target.arch.Architecture, target.os.OperatingSystem, target.vendor.Vendor
-
-Target has Default
-    arch Architecture
-    vendor Vendor
-    os OperatingSystem
-    Default.default: [arch: 'x86_64', vendor: 'unknown', os: 'unknown']
-
-target := Target.default
-";
+    pkg.write_flask_with_deps(
+        "core",
+        r#"core: "./."
+"#,
+    );
+    pkg.write("default/default.gin", "Default has default() Self\n");
+    pkg.write("target/arch/arch.gin", "Architecture is X86 or Arm\n");
+    pkg.write("target/os/os.gin", "OperatingSystem is Linux or Darwin\n");
+    pkg.write("target/vendor/vendor.gin", "Vendor is Unknown or Apple\n");
+    const TARGET: &str = "use core default.Default, target.arch.Architecture, target.os.OperatingSystem, target.vendor.Vendor\n\nTarget has Default\n    finish(self):\n        return\n    arch Architecture\n    vendor Vendor\n    os OperatingSystem\n    default() Self: return Self(arch: Architecture.X86, vendor: Vendor.Unknown, os: OperatingSystem.Linux)\n\ntarget := Target.default\n";
     let target_path = pkg.write("target/target.gin", TARGET);
-    let default_path = pkg.write("default/default.gin", "Default(value) has default value\n");
-    let arch_path = pkg.write("target/arch/arch.gin", "Architecture is 'x86_64'\n");
-    let os_path = pkg.write("target/os/os.gin", "OperatingSystem is 'linux'\n");
-    let vendor_path = pkg.write("target/vendor/vendor.gin", "Vendor is 'unknown'\n");
+    let default_path = pkg.write("default/default.gin", "Default has default() Self\n");
+    let arch_path = pkg.write("target/arch/arch.gin", "Architecture is X86 or Arm\n");
+    let os_path = pkg.write("target/os/os.gin", "OperatingSystem is Linux or Darwin\n");
+    let vendor_path = pkg.write("target/vendor/vendor.gin", "Vendor is Unknown or Apple\n");
 
     let files = vec![
         (

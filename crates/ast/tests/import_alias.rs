@@ -25,7 +25,7 @@ fn assert_alias_fn_call(expr: &Expr, expected_root: &str, expected_segments: &[&
 
 #[test]
 fn rewrites_function_call_alias() {
-    let mut out = ("main:\n    true\nreturn\n").parse_source_full();
+    let mut out = ("main:\n    true\n    return\n").parse_source_full();
     add_symbol_alias(&mut out.ast, "true", "core", "true");
 
     out.ast.apply_symbol_aliases();
@@ -57,4 +57,33 @@ fn rewrites_anonymous_tag_alias() {
         "expected AnonymousTag(Range), got {:?}",
         expr,
     );
+}
+
+#[test]
+fn rewrites_constraint_constants_and_preserves_parameter_shadowing() {
+    let mut parsed = "bounded(value Count and value <= limit): return\nshadow(limit Count and limit > 0): return\n".parse_source_full();
+    assert!(parsed.symptoms.is_empty(), "{:?}", parsed.symptoms);
+    add_symbol_alias(&mut parsed.ast, "limit", "core", "limit");
+    parsed.ast.apply_symbol_aliases();
+    let bounded = &parsed.ast.defs[&Intern::from_ref("bounded")];
+    assert_eq!(bounded.param_refinements[&Intern::from_ref("value")], constraint("value <= core.limit"));
+    let shadow = &parsed.ast.defs[&Intern::from_ref("shadow")];
+    assert_eq!(shadow.param_refinements[&Intern::from_ref("limit")], constraint("limit > 0"));
+}
+
+#[test]
+fn qualifies_module_constants_inside_parameter_constraints() {
+    let parsed = "limit := 7\nbounded(value Count and value <= limit): return\nshadow(limit Count and limit > 0): return\n".parse_source_full();
+    assert!(parsed.symptoms.is_empty(), "{:?}", parsed.symptoms);
+    let ast = parsed.ast.qualify_module_defs("numbers");
+    let bounded = &ast.defs[&Intern::from_ref("numbers.bounded")];
+    assert_eq!(bounded.param_refinements[&Intern::from_ref("value")], constraint("value <= numbers.limit"));
+    let shadow = &ast.defs[&Intern::from_ref("numbers.shadow")];
+    assert_eq!(shadow.param_refinements[&Intern::from_ref("limit")], constraint("limit > 0"));
+}
+
+fn constraint(proposition: &str) -> ast::PredicateExpr {
+    let parsed = format!("check(value Count and {proposition}): return\n").parse_source_full();
+    assert!(parsed.symptoms.is_empty(), "{:?}", parsed.symptoms);
+    parsed.ast.defs[&Intern::from_ref("check")].param_refinements[&Intern::from_ref("value")].clone()
 }

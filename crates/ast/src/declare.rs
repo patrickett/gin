@@ -16,101 +16,13 @@ use crate::span::Spanned;
 use i256::I256;
 use indexmap::IndexMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ReflectionRole {
-    Type,
-    TypeNamed,
-    TypeAnonymous,
-    Bits,
-    Address,
-    Product,
-    Sum,
-    Array,
-    Integer,
-    Record,
-    Union,
-    Unit,
-    Signed,
-    Unsigned,
-    Trait,
-    Shape,
-    RawPointer,
-    SafeReference,
-    Observe,
-    Mutate,
-    TypeArgument,
-    ConstArgument,
-    DeclarationKey,
-    RecursiveReference,
-    Opaque,
-    Unsupported,
-    TypeFormer,
-}
-
-impl ReflectionRole {
-    pub fn resolve(name: &str) -> Option<Self> {
-        match name {
-            "ReflectionType" => Some(Self::Type),
-            "ReflectionNamed" => Some(Self::TypeNamed),
-            "ReflectionAnonymous" => Some(Self::TypeAnonymous),
-            "ReflectionBits" => Some(Self::Bits),
-            "ReflectionAddress" => Some(Self::Address),
-            "ReflectionProduct" => Some(Self::Product),
-            "ReflectionSum" => Some(Self::Sum),
-            "ReflectionArray" => Some(Self::Array),
-            "ReflectionInteger" => Some(Self::Integer),
-            "ReflectionRecord" => Some(Self::Record),
-            "ReflectionUnion" => Some(Self::Union),
-            "ReflectionUnit" => Some(Self::Unit),
-            "ReflectionSigned" => Some(Self::Signed),
-            "ReflectionUnsigned" => Some(Self::Unsigned),
-            "ReflectionTrait" => Some(Self::Trait),
-            "ReflectionShape" => Some(Self::Shape),
-            "ReflectionRawPointer" => Some(Self::RawPointer),
-            "ReflectionSafeReference" => Some(Self::SafeReference),
-            "ReflectionObserve" => Some(Self::Observe),
-            "ReflectionMutate" => Some(Self::Mutate),
-            "ReflectionTypeArgument" => Some(Self::TypeArgument),
-            "ReflectionConstArgument" => Some(Self::ConstArgument),
-            "ReflectionDeclarationKey" => Some(Self::DeclarationKey),
-            "ReflectionRecursiveReference" => Some(Self::RecursiveReference),
-            "ReflectionOpaque" => Some(Self::Opaque),
-            "ReflectionUnsupported" => Some(Self::Unsupported),
-            "ReflectionTypeFormer" => Some(Self::TypeFormer),
-            _ => None,
+fn attribute_identifier(arg: &Typed<Expr>) -> Option<Intern<String>> {
+    match &arg.value {
+        Expr::AnonymousTag(name) => Some(*name),
+        Expr::FnCall(call) if call.args.is_none() && call.path.value.segments.is_empty() => {
+            Some(call.path.value.root)
         }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Type => "ReflectionType",
-            Self::TypeNamed => "ReflectionNamed",
-            Self::TypeAnonymous => "ReflectionAnonymous",
-            Self::Bits => "ReflectionBits",
-            Self::Address => "ReflectionAddress",
-            Self::Product => "ReflectionProduct",
-            Self::Sum => "ReflectionSum",
-            Self::Array => "ReflectionArray",
-            Self::Integer => "ReflectionInteger",
-            Self::Record => "ReflectionRecord",
-            Self::Union => "ReflectionUnion",
-            Self::Unit => "ReflectionUnit",
-            Self::Signed => "ReflectionSigned",
-            Self::Unsigned => "ReflectionUnsigned",
-            Self::Trait => "ReflectionTrait",
-            Self::Shape => "ReflectionShape",
-            Self::RawPointer => "ReflectionRawPointer",
-            Self::SafeReference => "ReflectionSafeReference",
-            Self::Observe => "ReflectionObserve",
-            Self::Mutate => "ReflectionMutate",
-            Self::TypeArgument => "ReflectionTypeArgument",
-            Self::ConstArgument => "ReflectionConstArgument",
-            Self::DeclarationKey => "ReflectionDeclarationKey",
-            Self::RecursiveReference => "ReflectionRecursiveReference",
-            Self::Opaque => "ReflectionOpaque",
-            Self::Unsupported => "ReflectionUnsupported",
-            Self::TypeFormer => "ReflectionTypeFormer",
-        }
+        _ => None,
     }
 }
 
@@ -148,6 +60,8 @@ pub struct HasProperty {
     pub name: Intern<String>,
     pub name_span: SpanId,
     pub ty: Option<Box<Spanned<Expr>>>,
+    pub owned_storage: bool,
+    pub attributes: crate::expr::BindAttributes,
     pub body: Option<HasMemberBody>,
     pub doc_comment: Option<DocComment>,
     pub refinement: Option<PredicateExpr>,
@@ -159,6 +73,8 @@ impl Hash for HasProperty {
         self.name.hash(state);
         self.name_span.hash(state);
         self.ty.hash(state);
+        self.owned_storage.hash(state);
+        self.attributes.hash(state);
         self.body.hash(state);
         self.doc_comment.hash(state);
         self.refinement.hash(state);
@@ -182,13 +98,50 @@ pub struct HasFunction {
     pub param_groups: Box<IndexMap<Intern<String>, crate::GroupPath>>,
     pub param_refinements: Box<IndexMap<Intern<String>, PredicateExpr>>,
     pub return_ty: Option<Box<Spanned<Expr>>>,
-    pub error_ty: Option<Box<Spanned<Expr>>>,
     pub anonymous_result_alternatives: Vec<Spanned<crate::ResultAlternative>>,
+    pub payload_postconditions: Vec<crate::PayloadPostcondition>,
     pub body: Option<HasMemberBody>,
     pub doc_comment: Option<DocComment>,
     pub refinement: Option<PredicateExpr>,
     pub kind: HasFunctionKind,
     pub attributes: crate::expr::BindAttributes,
+}
+
+impl HasFunction {
+    pub fn implementation(&self, receiver: Spanned<Expr>) -> Option<crate::Bind> {
+        let Some(body) = &self.body else {
+            return None;
+        };
+        let value = match body {
+            crate::HasMemberBody::Overrideable(value) | crate::HasMemberBody::Final(value) => {
+                value.clone()
+            }
+        };
+        let bind_name = self.qualifier.as_ref().map_or(self.name, |qualifier| {
+            Intern::new(format!(
+                "{}.{}",
+                qualifier.name.as_str(),
+                self.name.as_str()
+            ))
+        });
+        let mut bind = crate::Bind::new(bind_name, self.name_span, value)
+            .with_params(Some(self.params.as_ref().clone()))
+            .with_receiver_type(Some(Box::new(receiver)))
+            .with_doc(self.doc_comment.clone())
+            .with_attributes(self.attributes.clone());
+        bind.param_conventions = self.conventions.as_ref().clone();
+        bind.param_groups = self.param_groups.as_ref().clone();
+        bind.param_refinements = self.param_refinements.as_ref().clone();
+        bind.return_tag = self.return_ty.clone();
+        bind.anonymous_result_alternatives = self.anonymous_result_alternatives.clone();
+        bind.payload_postconditions = self.payload_postconditions.clone();
+        bind.operator = if matches!(body, crate::HasMemberBody::Final(_)) {
+            crate::BindOperator::FreshImmutable
+        } else {
+            crate::BindOperator::FreshMutable
+        };
+        Some(bind)
+    }
 }
 
 impl Hash for HasFunction {
@@ -213,8 +166,8 @@ impl Hash for HasFunction {
             refinement.hash(state);
         }
         self.return_ty.hash(state);
-        self.error_ty.hash(state);
         self.anonymous_result_alternatives.hash(state);
+        self.payload_postconditions.hash(state);
         self.body.hash(state);
         self.doc_comment.hash(state);
         self.refinement.hash(state);
@@ -226,7 +179,7 @@ impl Hash for HasFunction {
 /// A member of a `has` body — either a property/field or a function (method).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HasMember {
-    Property(HasProperty),
+    Property(Box<HasProperty>),
     Function(Box<HasFunction>),
 }
 
@@ -246,6 +199,9 @@ impl std::fmt::Display for HasProperty {
             write!(f, "{}.", qualifier.name.as_str())?;
         }
         write!(f, "{}", self.name.as_str())?;
+        if self.owned_storage {
+            write!(f, " own")?;
+        }
         if let Some(ty) = &self.ty {
             write!(f, " {:?}", ty.value)?;
         }
@@ -275,6 +231,7 @@ impl std::fmt::Display for HasFunction {
                     ParameterKind::Inferred { ty } => write!(f, " {:?}: ?", ty.value)?,
                     ParameterKind::Default(expr) => write!(f, ": {:?}", expr)?,
                     ParameterKind::Generic => {}
+                    ParameterKind::Proposition(predicate) => write!(f, " is {predicate}")?,
                 }
                 if let Some(conv) = self.conventions.get(k) {
                     match conv {
@@ -304,9 +261,6 @@ impl std::fmt::Display for HasFunction {
         if let Some(rt) = &self.return_ty {
             write!(f, " {:?}", rt.value)?;
         }
-        if let Some(et) = &self.error_ty {
-            write!(f, " or {:?}", et.value)?;
-        }
         Ok(())
     }
 }
@@ -326,12 +280,8 @@ pub struct DeclareAttributes {
     pub invalid_fixed_array: Option<Intern<String>>,
     pub sequence_builder: Option<Box<SequenceBuilderContract>>,
     pub invalid_sequence_builder: Option<Intern<String>>,
-    pub sequence_view: Option<Box<SequenceViewContract>>,
-    pub invalid_sequence_view: Option<Intern<String>>,
     pub bits: Option<Box<Typed<Expr>>>,
     pub bits_span: Option<SpanId>,
-    pub reflection_roles: Vec<ReflectionRole>,
-    pub invalid_reflection_roles: Vec<(Intern<String>, SpanId)>,
     pub raw_attributes: Option<Vec<AttributeItem>>,
 }
 
@@ -350,12 +300,6 @@ pub struct SequenceBuilderContract {
     pub span: SpanId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SequenceViewContract {
-    pub element_parameter: Intern<String>,
-    pub span: SpanId,
-}
-
 impl DeclareAttributes {
     pub fn phantom_parameters(&self) -> Vec<Intern<String>> {
         self.raw_attributes
@@ -366,15 +310,7 @@ impl DeclareAttributes {
                 _ => None,
             })
             .flatten()
-            .filter_map(|argument| match &argument.value {
-                Expr::AnonymousTag(name) => Some(*name),
-                Expr::FnCall(call)
-                    if call.args.is_none() && call.path.value.segments.is_empty() =>
-                {
-                    Some(call.path.value.root)
-                }
-                _ => None,
-            })
+            .filter_map(attribute_identifier)
             .collect()
     }
 
@@ -390,34 +326,16 @@ impl DeclareAttributes {
 
         for item in items {
             match item {
-                AttributeItem::Flag { name, span } => {
-                    if let Some(role) = ReflectionRole::resolve(name.as_str()) {
-                        self.reflection_roles.push(role);
-                    } else if name.as_str().starts_with("Reflection") {
-                        // Keep all malformed reflection declarations so diagnostics can point
-                        // to every attribute site.
-                        self.invalid_reflection_roles.push((*name, *span));
-                    }
-                }
                 AttributeItem::Call {
                     name,
                     name_span,
                     args,
                 } if name.as_str() == "fixed_array" => {
-                    let identifier = |arg: &Typed<Expr>| match &arg.value {
-                        Expr::AnonymousTag(name) => Some(*name),
-                        Expr::FnCall(call)
-                            if call.args.is_none() && call.path.value.segments.is_empty() =>
-                        {
-                            Some(call.path.value.root)
-                        }
-                        _ => None,
-                    };
                     match args
                         .as_slice()
                         .first()
-                        .and_then(identifier)
-                        .zip(args.as_slice().get(1).and_then(identifier))
+                        .and_then(attribute_identifier)
+                        .zip(args.as_slice().get(1).and_then(attribute_identifier))
                     {
                         Some((element_parameter, length_parameter)) => {
                             self.fixed_array = Some(Box::new(FixedArrayContract {
@@ -434,19 +352,10 @@ impl DeclareAttributes {
                     name_span,
                     args,
                 } if name.as_str() == "sequence_builder" => {
-                    let identifier = |arg: &Typed<Expr>| match &arg.value {
-                        Expr::AnonymousTag(name) => Some(*name),
-                        Expr::FnCall(call)
-                            if call.args.is_none() && call.path.value.segments.is_empty() =>
-                        {
-                            Some(call.path.value.root)
-                        }
-                        _ => None,
-                    };
                     match (
-                        args.first().and_then(identifier),
-                        args.get(1).and_then(identifier),
-                        args.get(2).and_then(identifier),
+                        args.first().and_then(attribute_identifier),
+                        args.get(1).and_then(attribute_identifier),
+                        args.get(2).and_then(attribute_identifier),
                     ) {
                         (Some(element_parameter), Some(empty_member), Some(push_member)) => {
                             self.sequence_builder = Some(Box::new(SequenceBuilderContract {
@@ -457,33 +366,6 @@ impl DeclareAttributes {
                             }));
                         }
                         _ => self.invalid_sequence_builder = Some(*name),
-                    }
-                }
-                AttributeItem::Call {
-                    name,
-                    name_span,
-                    args,
-                } if name.as_str() == "sequence_view" => {
-                    let Some(argument) = args.first() else {
-                        self.invalid_sequence_view = Some(*name);
-                        continue;
-                    };
-                    let element_parameter = match &argument.value {
-                        Expr::AnonymousTag(name) => Some(*name),
-                        Expr::FnCall(call)
-                            if call.args.is_none() && call.path.value.segments.is_empty() =>
-                        {
-                            Some(call.path.value.root)
-                        }
-                        _ => None,
-                    };
-                    if let Some(element_parameter) = element_parameter {
-                        self.sequence_view = Some(Box::new(SequenceViewContract {
-                            element_parameter,
-                            span: *name_span,
-                        }));
-                    } else {
-                        self.invalid_sequence_view = Some(*name);
                     }
                 }
                 AttributeItem::Call {
@@ -503,13 +385,16 @@ impl DeclareAttributes {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeclareValue {
     Alias(Box<Spanned<Expr>>),
-    Union { variants: Vec<Variant> },
+    Union {
+        variants: Vec<Variant>,
+    },
     When(Box<WhenExpr>),
     Set(/* TODO */),
     Range(I256, I256),
     // DiceThrow is in 1 to 6 (element of range)
     InRange(I256, I256),
     Refinement(Box<crate::ty::PredicateExpr>),
+    /// A bond: a type's data, behavior, and requirements declared together.
     Has(Vec<HasMember>),
 }
 
@@ -591,6 +476,7 @@ impl Hash for DeclareValue {
 pub struct ProvidedTrait {
     pub trait_name: Intern<String>,
     pub trait_name_span: SpanId,
+    pub args: Vec<Typed<Expr>>,
     /// Field definitions for the provided trait.
     /// e.g. `is_empty: self.count > 0` → `(is_empty, <expr>)`.
     pub fields: Vec<(Intern<String>, Typed<Expr>)>,
@@ -600,6 +486,7 @@ impl Hash for ProvidedTrait {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.trait_name.hash(state);
         self.trait_name_span.hash(state);
+        self.args.hash(state);
         for (k, v) in &self.fields {
             k.hash(state);
             v.hash(state);
@@ -612,6 +499,7 @@ pub struct Declare {
     pub doc_comment: Option<DocComment>,
     pub name: Intern<String>,
     pub name_span: SpanId,
+    pub keyword_span: SpanId,
     /// Full declaration site from the tag name through the `is`/`has` value.
     pub span: SpanId,
     pub params: Option<Parameters>,
@@ -619,20 +507,43 @@ pub struct Declare {
     pub attributes: DeclareAttributes,
     pub value: DeclareValue,
     pub provided_traits: Vec<ProvidedTrait>,
+    pub provided_traits_span: Option<SpanId>,
+    pub extensions: Vec<Declare>,
 }
 
 impl Declare {
+    pub fn receiver_surface(&self) -> Spanned<Expr> {
+        let receiver = if let Some(params) = &self.params {
+            Expr::TagCall(crate::TagCall {
+                name: self.name,
+                qual_path: None,
+                args: params
+                    .iter()
+                    .map(|(name, parameter)| {
+                        Typed::infer(Expr::AnonymousTag(*name), parameter.name_span)
+                    })
+                    .collect(),
+            })
+        } else {
+            Expr::AnonymousTag(self.name)
+        };
+        Spanned::new(receiver, self.span)
+    }
+
     pub fn new(name: Intern<String>, name_span: SpanId, value: DeclareValue) -> Self {
         Declare {
             doc_comment: None,
             name,
             name_span,
+            keyword_span: name_span,
             span: name_span,
             params: None,
             resolved_type: None,
             attributes: DeclareAttributes::default(),
             value,
             provided_traits: Vec::new(),
+            provided_traits_span: None,
+            extensions: Vec::new(),
         }
     }
 
@@ -675,5 +586,7 @@ impl Hash for Declare {
         }
         self.value.hash(state);
         self.provided_traits.hash(state);
+        self.provided_traits_span.hash(state);
+        self.extensions.hash(state);
     }
 }

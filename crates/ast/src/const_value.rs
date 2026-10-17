@@ -1,4 +1,4 @@
-//! Compile-time constant values and type constraint representations.
+//! Compile-time constant values.
 //!
 //! These are pure value/data types (no analysis logic). They live in `ast` so that
 //! `typecheck::ty::Ty::Literal` can reference them without creating a circular dependency
@@ -10,47 +10,12 @@ use internment::Intern;
 use std::borrow::Cow;
 use std::sync::Arc;
 
-/// Represents a narrowed type constraint on a variable.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum TypeConstraint {
-    IsVariant(Intern<String>, Intern<String>),
-    IsNotVariant(Intern<String>, Intern<String>),
-}
-
-impl TypeConstraint {
-    pub fn contradicts(&self, other: &TypeConstraint) -> bool {
-        match (self, other) {
-            (TypeConstraint::IsVariant(u1, v1), TypeConstraint::IsVariant(u2, v2)) => {
-                u1 == u2 && v1 != v2
-            }
-            (TypeConstraint::IsVariant(_, v1), TypeConstraint::IsNotVariant(_, v2)) => v1 == v2,
-            (TypeConstraint::IsNotVariant(_, v1), TypeConstraint::IsVariant(_, v2)) => v1 == v2,
-            _ => false,
-        }
-    }
-
-    /// Negate this constraint (for after-loop / else-branch reasoning).
-    pub fn negate(&self) -> Self {
-        match self {
-            TypeConstraint::IsVariant(u, v) => TypeConstraint::IsNotVariant(*u, *v),
-            TypeConstraint::IsNotVariant(u, v) => TypeConstraint::IsVariant(*u, *v),
-        }
-    }
-
-    pub fn display_suffix(&self) -> String {
-        match self {
-            TypeConstraint::IsVariant(_, variant) => variant.as_str().to_string(),
-            TypeConstraint::IsNotVariant(union, excluded) => {
-                format!("not {}.{}", union.as_str(), excluded.as_str())
-            }
-        }
-    }
-}
-
 /// A compile-time known constant value tracked through flow analysis.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConstValue {
+    Proposition(bool),
     Int(I256),
+    Domain(Arc<crate::integer::IntegerDomain>),
     Float(HashFloat),
     Text(String),
     Tag {
@@ -112,89 +77,20 @@ impl ConstValue {
             {
                 Some(n.as_i128())
             }
-            ConstValue::Tag { name, args, .. } if name.as_str() == "Const" => {
-                args.first()?.as_const_size_int()
-            }
             _ => None,
-        }
-    }
-
-    pub fn const_size_tag(n: i128) -> ConstValue {
-        ConstValue::Tag {
-            name: Intern::from_ref("Const"),
-            qual_path: None,
-            args: vec![ConstValue::Int(I256::from(n))].into(),
-        }
-    }
-
-    pub fn dynamic_size_tag() -> ConstValue {
-        ConstValue::Tag {
-            name: Intern::from_ref("Dynamic"),
-            qual_path: None,
-            args: vec![].into(),
         }
     }
 
     pub fn eval_binop(&self, op: &crate::BinOp, rhs: &ConstValue) -> Option<ConstValue> {
         use crate::BinOp;
-        if *op == BinOp::Equal {
-            return Some(ConstValue::Tag {
-                name: Intern::from_ref(if self == rhs { "True" } else { "False" }),
-                qual_path: None,
-                args: vec![].into(),
-            });
-        }
-        // Only wrap in `Const` tag when at least one operand already is a `Const`
-        // size tag. Plain `Int` values should stay as `Int` (unwrapped).
-        let is_const_size = matches!(
-            (self, rhs),
-            (
-                ConstValue::Tag { name, .. },
-                ConstValue::Tag { name: rn, .. }
-            ) if name.as_str() == "Const" || rn.as_str() == "Const"
-        ) || matches!(self, ConstValue::Tag { name, .. } if name.as_str() == "Const")
-            || matches!(rhs, ConstValue::Tag { name, .. } if name.as_str() == "Const");
-        if is_const_size
-            && let (Some(a), Some(b)) = (self.as_const_size_int(), rhs.as_const_size_int())
-            && let Some(cv) = match op {
-                BinOp::Add => Some(ConstValue::const_size_tag(a.wrapping_add(b))),
-                BinOp::Subtract => Some(ConstValue::const_size_tag(a.wrapping_sub(b))),
-                BinOp::Multiply => Some(ConstValue::const_size_tag(a.wrapping_mul(b))),
-                BinOp::Divide if b != 0 => Some(ConstValue::const_size_tag(a / b)),
-                _ => None,
-            }
+        if let Some(relation) = crate::ProofRelation::for_bin_op(op)
+            && let (Self::Int(left), Self::Int(right)) = (self, rhs)
         {
-            return Some(cv);
-        }
-        if matches!(
-            (self, rhs),
-            (
-                ConstValue::Tag { name, .. },
-                ConstValue::Tag { name: rhs_name, .. }
-            ) if name.as_str() == "Dynamic" || rhs_name.as_str() == "Dynamic"
-        ) {
-            return Some(ConstValue::dynamic_size_tag());
+            return Some(Self::Proposition(relation.holds(*left, *right)));
         }
         match (self, rhs) {
             (ConstValue::Text(a), ConstValue::Text(b)) if *op == BinOp::Add => {
                 Some(ConstValue::Text(format!("{a}{b}")))
-            }
-            (ConstValue::Tag { name: lhs_name, .. }, ConstValue::Tag { name: rhs_name, .. })
-                if matches!(lhs_name.as_str(), "True" | "False")
-                    && matches!(rhs_name.as_str(), "True" | "False") =>
-            {
-                let lhs = lhs_name.as_str() == "True";
-                let rhs = rhs_name.as_str() == "True";
-                let result = match op {
-                    BinOp::LogicalAnd => Some(lhs && rhs),
-                    BinOp::LogicalOr => Some(lhs || rhs),
-                    _ => None,
-                }?;
-                Some(ConstValue::Tag {
-                    name: Intern::from_ref(if result { "True" } else { "False" }),
-                    qual_path: None,
-                    args: vec![].into(),
-                })
             }
             (ConstValue::Int(a), ConstValue::Int(b)) => match op {
                 BinOp::Add => Some(ConstValue::Int(a.wrapping_add(*b))),
@@ -237,6 +133,8 @@ impl ConstValue {
 
     pub fn to_hover_string(&self) -> String {
         match self {
+            ConstValue::Proposition(true) => "holds".to_string(),
+            ConstValue::Proposition(false) => "does not hold".to_string(),
             ConstValue::Int(i) => i.to_string(),
             ConstValue::Float(HashFloat(f)) => f.to_string(),
             ConstValue::Text(s) => format!("\"{s}\""),
@@ -257,6 +155,7 @@ impl ConstValue {
                     format!("{tag_name}({})", args.join(", "))
                 }
             }
+            ConstValue::Domain(domain) => format!("domain({:?})", domain.predicate()),
             ConstValue::ResultAlternative { label, .. } => label.as_str().to_string(),
             ConstValue::Record { fields } => {
                 let fields: Vec<String> = fields
@@ -293,10 +192,12 @@ impl ConstValue {
     /// Return a display name for this constant value (used for variant labels).
     pub fn display_name(&self) -> Intern<String> {
         match self {
+            ConstValue::Proposition(_) => Intern::from_ref("proposition"),
             ConstValue::Text(s) => Intern::new(s.clone()),
             ConstValue::Int(i) => Intern::new(i.to_string()),
             ConstValue::Float(HashFloat(f)) => Intern::new(f.to_string()),
             ConstValue::Tag { name, .. } => *name,
+            ConstValue::Domain(_) => Intern::from_ref("domain"),
             ConstValue::ResultAlternative { label, .. } => *label,
             ConstValue::Record { .. } => Intern::new(String::from("Record")),
             ConstValue::ResultRow(_) => Intern::new(String::from("ResultRow")),

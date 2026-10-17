@@ -39,6 +39,14 @@ pub struct Parameter {
     /// Span for the declaration identifier.
     pub name_span: SpanId,
     pub constraints: Vec<ProvidedTrait>,
+    pub range_pattern: Option<RangeParameterPattern>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RangeParameterPattern {
+    pub start: Intern<String>,
+    pub end: Intern<String>,
+    pub end_span: SpanId,
 }
 
 impl Parameter {
@@ -47,6 +55,7 @@ impl Parameter {
             kind,
             name_span,
             constraints: Vec::new(),
+            range_pattern: None,
         }
     }
 
@@ -67,6 +76,7 @@ impl Parameter {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ParameterKind {
     Generic,
+    Proposition(Box<crate::ProofProposition>),
     /// Type annotation for this parameter (`name Type` with no value).
     Tagged(Box<Spanned<Expr>>),
     Default(Box<Typed<Expr>>),
@@ -84,6 +94,7 @@ impl std::fmt::Display for ParameterKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ParameterKind::Generic => Ok(()),
+            ParameterKind::Proposition(predicate) => write!(f, " is {predicate}"),
             ParameterKind::Tagged(sp) => {
                 write!(f, " {:?}", sp.value)
             }
@@ -92,14 +103,6 @@ impl std::fmt::Display for ParameterKind {
             ParameterKind::Inferred { ty } => write!(f, " {:?}: ?", ty.value),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ParamInfo {
-    /// Represents a type tag for the parameter, e.g. `(p Person)`.
-    Tag(Box<Spanned<Expr>>),
-    /// Represents a default value expression for the parameter, e.g. `(p: 123)`.
-    Default(Box<Typed<Expr>>),
 }
 
 pub type Parameters = IndexMap<Intern<String>, Parameter>;

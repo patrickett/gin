@@ -2,22 +2,6 @@ use crate::expr::Typed;
 use crate::expr::{Condition, Expr};
 use crate::span::SubSpan;
 
-/// For-in loop: iterate over a range or collection
-///
-/// Example:
-/// ```gin
-/// main:
-///     for item in items
-///     loop
-/// return
-/// ```
-/// OR like a range
-/// ```gin
-/// main:
-///     for i in 1 to 50
-///     loop
-/// return
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ForInLoop {
     /// Loop binder: a `for`-pattern-shaped [`Expr`] (see [`crate::pattern`]).
@@ -29,14 +13,6 @@ pub struct ForInLoop {
     pub keyword_span: SubSpan,
 }
 
-/// While loop: loop while a condition holds.
-///
-/// ```gin
-/// main:
-///     while x < 10
-///     loop
-/// return
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WhileLoop {
     pub condition: Condition,

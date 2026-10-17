@@ -1,12 +1,11 @@
 //! Bounds helpers for `in N to M` scalar types and range-value tags.
 //!
-//! Provides [`InclusiveBounds`] and associated methods on [`Ty`] and [`DeclareValue`]
+//! Provides [`InclusiveBounds`] and associated methods on [`Ty`]
 //! so that bound-related queries live on the types they inspect.
 
 use i256::I256;
 use internment::Intern;
 
-use crate::declare::DeclareValue;
 use crate::ty::Ty;
 
 /// Inclusive range endpoints (closed interval `[min, max]`).
@@ -17,22 +16,8 @@ pub struct InclusiveBounds {
 }
 
 impl InclusiveBounds {
-    pub fn from_i256(min: I256, max: I256) -> Option<Self> {
-        let min = min.as_i128();
-        let max = max.as_i128();
-        if min > max {
-            return None;
-        }
-        Some(Self { min, max })
-    }
-
     pub fn contains(&self, value: i128) -> bool {
         value >= self.min && value <= self.max
-    }
-
-    /// `inner` ⊆ `outer` (subset for subtyping).
-    pub fn contains_bounds(&self, inner: &InclusiveBounds) -> bool {
-        self.min <= inner.min && inner.max <= self.max
     }
 }
 
@@ -47,36 +32,6 @@ impl Ty {
             min: hull.min().as_i128(),
             max: hull.max().as_i128(),
         })
-    }
-
-    /// Check a known value against this type's bounded-int expectations.
-    ///
-    /// Returns `Ok(())` when the value is within bounds, or `Err(bounds)` on
-    /// a violation.
-    pub fn check_int_in_bounds(&self, value: i128) -> Result<(), InclusiveBounds> {
-        let bounds = self
-            .int_bounds()
-            .ok_or(InclusiveBounds { min: 0, max: 0 })?;
-        if bounds.contains(value) {
-            Ok(())
-        } else {
-            Err(bounds)
-        }
-    }
-
-    /// Whether `self` is assignable to a parameter typed as `expected`
-    /// (subset subtyping for bounded ints).
-    pub fn int_assignable_to(&self, expected: &Ty) -> bool {
-        if let (Some(actual), Some(expected)) = (self.type_id(), expected.type_id())
-            && actual != expected
-        {
-            return false;
-        }
-        match (self.int_bounds(), expected.int_bounds()) {
-            (Some(a), Some(e)) => e.contains_bounds(&a),
-            (None, Some(_)) => false,
-            (_, None) => self == expected,
-        }
     }
 
     /// Build a bounded anonymous integer from `is in` / `is N to M` bounds.
@@ -122,18 +77,5 @@ impl Ty {
         matches!(self, Ty::Record { fields, .. } if fields.len() == 2
             && fields.iter().any(|(n, _)| n.as_str() == "start")
             && fields.iter().any(|(n, _)| n.as_str() == "end"))
-    }
-}
-
-impl DeclareValue {
-    /// Bounds from a tag declaration (`is in` or `is N to M`).
-    pub fn bounds(&self) -> Option<InclusiveBounds> {
-        match self {
-            DeclareValue::InRange(start, end) | DeclareValue::Range(start, end) => {
-                InclusiveBounds::from_i256(*start, *end)
-            }
-            DeclareValue::Refinement(_) => None,
-            _ => None,
-        }
     }
 }

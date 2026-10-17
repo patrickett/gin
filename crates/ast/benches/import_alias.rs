@@ -10,7 +10,7 @@ fn fixture(occurrences: usize, path_depth: usize, alias: &str) -> FileAst {
     for _ in 0..occurrences {
         source.push_str("    imported_symbol\n");
     }
-    source.push_str("return\n");
+    source.push_str("    return\n");
 
     let mut ast = source.parse_source_full().ast;
     let segments = (0..path_depth)

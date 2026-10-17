@@ -12,7 +12,7 @@ use internment::Intern;
 /// within qualified paths (e.g. which segment of `core.maybe.Some` is under the cursor).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModPath {
-    /// The root of a path can be a name mapped in `flask.jsonc` or
+    /// The root of a path can be a name mapped in `mod.flask` or
     /// a child folder in the current directory.
     ///
     /// NOTE: If there is a name conflict it will error.
@@ -55,11 +55,6 @@ impl ModPath {
         }
     }
 
-    /// Return the number of segments (excluding root).
-    pub fn num_segments(&self) -> usize {
-        self.segments.len()
-    }
-
     /// Return true if there are no segments (bare root-only path).
     pub fn is_bare(&self) -> bool {
         self.segments.is_empty()
@@ -67,11 +62,16 @@ impl ModPath {
 
     /// Build the qualified string for this path, e.g. `"core.maybe.Some"`.
     pub fn to_qualified_string(&self) -> String {
-        let mut s = self.root.to_string();
-        for seg in &self.segments {
-            s.push('.');
-            s.push_str(seg.as_str());
-        }
-        s
+        join_dotted(self.root, &self.segments)
     }
+}
+
+/// Join a root name and dot-separated segments into a single name (e.g. `"io.print"`).
+pub(crate) fn join_dotted(root: Intern<String>, segments: &[Intern<String>]) -> String {
+    let mut joined = root.to_string();
+    for segment in segments {
+        joined.push('.');
+        joined.push_str(segment.as_str());
+    }
+    joined
 }

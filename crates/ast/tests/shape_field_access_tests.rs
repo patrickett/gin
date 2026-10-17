@@ -5,32 +5,12 @@
 
 mod support;
 
-use internment::Intern;
-use typecheck::TypedFileAst;
 use typecheck::ty::Ty;
-use typecheck::{BindBody, DefId, ExprId};
 
-use support::transform_source;
-
-/// Helper: extract the body expression ID from a bind.
-fn body_expr_id(typed: &TypedFileAst, def_name: &str) -> Option<ExprId> {
-    let def_id = DefId(Intern::new(def_name.to_string()));
-    let bind = typed.defs.get(&def_id).expect("def exists");
-    match &bind.body {
-        BindBody::Expr(eid) => Some(*eid),
-        BindBody::Body { exprs, ret } => {
-            if let Some(ret_id) = ret {
-                Some(*ret_id)
-            } else {
-                exprs.last().copied()
-            }
-        }
-        BindBody::Unlowered => None,
-    }
-}
+use support::{body_expr_id, transform_source};
 
 /// Prepend `Int is in 1 to 400\n\n` for integer literal support.
-const INT_TAG: &str = "Int is in 1 to 400\n\n";
+const INT_TAG: &str = "Int is in 1 to 400\nInt has\n    finish(self):\n        return\n\n";
 
 // The `p` expression resolves to the correct Record type, and `p.x` resolves
 // to the correct field type. However, cascading through binary operators uses
@@ -41,10 +21,7 @@ const INT_TAG: &str = "Int is in 1 to 400\n\n";
 #[test]
 fn field_read_dot_access() {
     let src = format!(
-        "{INT_TAG}\
-Coord has x Int, y Int, z Int
-p := Coord(x: 1, y: 2, z: 3)
-"
+        "{INT_TAG}\nCoord has\n    x Int, y Int, z Int\n    finish(self):\n        return\np := Coord(x: 1, y: 2, z: 3)\n"
     );
     let typed = transform_source(&src);
     let flaws = typed.all_flaws();
@@ -68,11 +45,7 @@ p := Coord(x: 1, y: 2, z: 3)
 #[test]
 fn field_write_dot_setter() {
     let src = format!(
-        "{INT_TAG}\
-Coord has x Int, y Int, z Int
-p: Coord(x: 1, y: 2, z: 3)
-p.x:: 10
-"
+        "{INT_TAG}\nCoord has\n    x Int, y Int, z Int\n    finish(self):\n        return\np: Coord(x: 1, y: 2, z: 3)\np.x:: 10\n"
     );
     let typed = transform_source(&src);
     let flaws = typed.all_flaws();
@@ -106,33 +79,9 @@ coord_ty := NamedTy(name: 1, ty: Primitive(width: 64, signed: 1))
 }
 
 #[test]
-fn field_write_changes_value() {
-    let src = format!(
-        "{INT_TAG}\
-Coord has x Int, y Int, z Int
-p: Coord(x: 1, y: 2, z: 3)
-p.x:: 10
-"
-    );
-    let typed = transform_source(&src);
-    let flaws = typed.all_flaws();
-    assert!(
-        flaws.is_empty(),
-        "expected no flaws on field write (12.1), got: {flaws:?}"
-    );
-}
-
-#[test]
 fn field_write_with_expression() {
     let src = format!(
-        "{INT_TAG}
-Coord has x Int, y Int, z Int
-p: Coord(x: 1, y: 2, z: 3)
-#infix('+')
-#inline
-plus(left Int, right Int) Int: left + right
-p.x:: p.x + 1
-"
+        "{INT_TAG}\nCoord has\n    x Int, y Int, z Int\n    finish(self):\n        return\np: Coord(x: 1, y: 2, z: 3)\n#infix('+')\n#inline\nplus(left Int, right Int) Int: return left + right\np.x:: p.x + 1\n"
     );
     let typed = transform_source(&src);
     let flaws = typed.all_flaws();
@@ -145,11 +94,7 @@ p.x:: p.x + 1
 #[test]
 fn cannot_write_non_existent_field() {
     let src = format!(
-        "{INT_TAG}\
-Coord has x Int, y Int, z Int
-p: Coord(x: 1, y: 2, z: 3)
-p.w:: 5
-"
+        "{INT_TAG}\nCoord has\n    x Int, y Int, z Int\n    finish(self):\n        return\np: Coord(x: 1, y: 2, z: 3)\np.w:: 5\n"
     );
     let typed = transform_source(&src);
     let flaws = typed.all_flaws();

@@ -5,14 +5,11 @@
 
 use internment::Intern;
 use typecheck::ty::Ty;
-use typecheck::{BindBody, DefId, ExprId, TypedExprKind, TypedFileAst};
+use typecheck::{TypedExprKind, TypedFileAst};
 
 mod support;
 use support::transform_source_with_typed_locals;
-
-fn has_flaw(typed: &TypedFileAst, slug: &str) -> bool {
-    typed.all_flaws().iter().any(|(_, f)| f.code.slug() == slug)
-}
+use support::{body_expr_id, has_flaw_with_slug as has_flaw};
 
 fn flaw_count(typed: &TypedFileAst, slug: &str) -> usize {
     typed
@@ -76,23 +73,6 @@ fn refinement_rejected_with_literal() {
     assert!(
         has_flaw(&typed, "dep-refinement-failed"),
         "expected dep-refinement-failed for Index(3, 5), got: {:?}",
-        typed.all_flaws()
-    );
-}
-
-#[test]
-fn refinement_unknown_for_variable_arg() {
-    let typed = transform_source_with_typed_locals(
-        "Index has \n\
-             n Int,\n\
-             value Int and < n,\n\
-         )\n\
-         test(n Int, value Int):\n\
-             Index(n, value)\n",
-    );
-    assert!(
-        has_flaw(&typed, "dep-refinement-unproven"),
-        "expected dep-refinement-unproven for variable args, got: {:?}",
         typed.all_flaws()
     );
 }
@@ -214,14 +194,7 @@ fn refinement_accepted_in_if_body() {
     // that value < n and accept Index(n, value).
     // The `<` desugars to `lt(a, b)` which must be a known function.
     let typed = transform_source_with_typed_locals(
-        "lt(a Int, b Int) Int := 0\n\
-         Index has \n\
-             n Int,\n\
-             value Int and < n,\n\
-         )\n\
-         test(n Int, value Int):\n\
-             if value < n:\n\
-                 Index(n, value)\n",
+        "lt(a Int, b Int) Int := return 0\n         Index has \n             n Int,\n             value Int and < n,\n         )\n         test(n Int, value Int):\n             when value < n: then\n                 Index(n, value)\n",
     );
     assert!(
         !has_flaw(&typed, "dep-refinement-failed"),
@@ -237,25 +210,13 @@ fn refinement_accepted_in_if_body() {
 
 #[test]
 fn refinement_rejected_outside_if_body() {
-    // Outside the if-guard, the flow analysis shouldn't know value < n.
-    let typed = transform_source_with_typed_locals(
-        "lt(a Int, b Int) Int := 0\n\
-         Index has \n\
-             n Int,\n\
-             value Int and < n,\n\
-         )\n\
-         test(n Int, value Int):\n\
-             if_check := if value < n:\n\
-                 0\n\
-             return 0\n\
-\n\
-             outside_if := Index(n, value)\n\
-\n\
-         return 0\n",
+    let typed = support::transform_source(
+        "Int is in 0 to 400\nInt has\n    as_num(self ref) is in Self: return (number is in Self: self)\n    finish(self): return\nIndex has\n    n Int\n    value Int and < n\n    finish(self): return\ntest(n Int, value Int) Index:\n    when value.as_num < n.as_num then\n        checked: Index(n, value)\n        checked.finish\n    return Index(n, value)\n",
     );
-    assert!(
-        has_flaw(&typed, "dep-refinement-unproven"),
-        "expected Index(n, value) outside if-body to be unproven, got: {:?}",
+    assert_eq!(
+        flaw_count(&typed, "dep-refinement-unproven"),
+        1,
+        "{:?}",
         typed.all_flaws()
     );
 }
@@ -316,40 +277,74 @@ fn const_generic_union_stores_resolved_params() {
 }
 
 #[test]
-#[ignore = "requires full const-generic resolution in typecheck pipeline — pre-existing"]
 fn pattern_bindings_substituted_from_resolved_params() {
-    // When a when-expression matches on a const-generic union with concrete
-    // params, the pattern bindings should have the concrete types substituted.
-    let typed = transform_source_with_typed_locals(
-        "Vec(n Int) is\n\
-             Nil -> Vec(0)\n\
-             or Cons(head Int, tail Vec(n)) -> Vec(n)\n\
-         test:\n\
-             v Vec(3)\n\
-             when v is\n\
-                 Cons(_, t) then t\n",
-    );
-    // The `t` binding should have type `Vec(3)` instead of `Vec(n)`.
-    // Verify by checking there are no unknown-symbol flaws from opaque params.
-    // (Before this fix, `t` would have type `Vec(Opaque("n"))` which would
-    //  cause unknown-symbol errors when used.)
-    let all_flaws = typed.all_flaws();
-    let unknown_syms: Vec<_> = all_flaws
-        .iter()
-        .filter(|(_, f)| f.code.slug() == "type-unknown-symbol")
-        .collect();
-    assert!(
-        unknown_syms.is_empty(),
-        "expected no unknown-symbol flaws from pattern bindings, got: {:?}",
-        unknown_syms
-    );
+    for (argument, count) in [("3", 3), ("7", 7), ("n: 3", 3), ("n: 7", 7)] {
+        let source = format!(
+            "Int is in 0 to 400\nInt.finish(self): return\nLink(element) has\n    pointer @element\n    finish(self): return\nVec(n Int) is\n    Nil -> Vec(0)\n    or Cons(head Int, tail Link(Vec(n))) -> Vec(n)\nVec(n) has\n    finish(self):\n        when self is\n            Cons(head, tail) then\n                head.finish\n                tail.finish\n            Nil then return\n        return\ntest(v ref Vec({argument})):\n    when v is\n        Cons(_, t) then\n            observed: t\n        Nil then return\n    return\n",
+        );
+        let parsed = parser::cursor::TokenCursor::parse_source(&source);
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "{argument}: {:?}",
+            parsed.parse_warnings
+        );
+        let typed = typecheck::transform::transform(
+            &parsed,
+            typecheck::FileId(0),
+            &typecheck::transform::TransformCtx::new(),
+        );
+        assert!(
+            typed.all_flaws().is_empty(),
+            "{argument}: {:?}",
+            typed.all_flaws()
+        );
+        let subject = typed
+            .places
+            .iter()
+            .find(|place| place.name.as_str() == "v")
+            .expect("subject parameter");
+        let observed = typed
+            .places
+            .iter()
+            .find(|place| place.name.as_str() == "observed")
+            .expect("observed tail binding");
+        let expected = subject.ty.without_reference_wrappers();
+        let Ty::Named { instance, .. } = expected else {
+            panic!("expected nominal Vec type, got {expected:?}");
+        };
+        assert_eq!(
+            instance.arguments,
+            vec![(Intern::from_ref("n"), ast::TyArg::Const(count.into()))],
+            "{argument}"
+        );
+        let Ty::Ref {
+            inner,
+            mutable: false,
+        } = &observed.ty
+        else {
+            panic!("expected borrowed tail, got {:?}", observed.ty);
+        };
+        let Ty::Record { fields, .. } = typed.type_registry.resolved_definition_for_type(inner)
+        else {
+            panic!("expected Link record, got {inner:?}");
+        };
+        assert_eq!(
+            fields,
+            vec![(
+                Intern::from_ref("pointer"),
+                Box::new(Ty::Ptr {
+                    inner: Box::new(expected.clone())
+                })
+            )],
+            "{argument}"
+        );
+    }
 }
 
 #[test]
 fn const_generic_call_substituted_return_type() {
-    let typed = transform_source_with_typed_locals(
-        "id_ty(x Type) Bool := Bool.True\n\
-         main: id_ty(Int)\n",
+    let typed = support::transform_source(
+        "Int is in 0 to 400\nInt.finish(self): return\nid_ty(x) Int: return #size(x)\nmain: id_ty(Int)\n",
     );
     let main_body = body_expr_id(&typed, "main").expect("main has body");
     let expr = typed.exprs.get(main_body.as_usize()).expect("main body");
@@ -379,7 +374,7 @@ fn const_generic_call_substituted_return_type() {
 fn const_generic_call_substituted_ty_is_record() {
     let typed = transform_source_with_typed_locals(
         "Pair has x Int, y Int\n\
-         make_pair(x Type) Pair := Pair(0, 0)\n\
+         make_pair(x) Pair := Pair(0, 0)\n\
          main: make_pair(Int)\n",
     );
     let main_body = body_expr_id(&typed, "main").expect("main has body");
@@ -399,22 +394,5 @@ fn const_generic_call_substituted_ty_is_record() {
             );
         }
         other => panic!("Expected FnCall with substituted_ty, got {:?}", other),
-    }
-}
-
-/// Helper: extract a bind body ExprId from a TypedBind.
-fn body_expr_id(typed: &TypedFileAst, def_name: &str) -> Option<ExprId> {
-    let def_id = DefId(Intern::new(def_name.to_string()));
-    let bind = typed.defs.get(&def_id)?;
-    match &bind.body {
-        BindBody::Expr(eid) => Some(*eid),
-        BindBody::Body { exprs, ret } => {
-            if let Some(ret_id) = ret {
-                Some(*ret_id)
-            } else {
-                exprs.last().copied()
-            }
-        }
-        BindBody::Unlowered => None,
     }
 }

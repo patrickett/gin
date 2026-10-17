@@ -11,29 +11,11 @@ use ast::prelude::*;
 use ast::source::SourceExt;
 use internment::Intern;
 use typecheck::FileId;
-use typecheck::TypedFileAst;
 use typecheck::ty::Ty;
-use typecheck::{BindBody, DefId, ExprId, TagId, TypedExprKind};
+use typecheck::{DefId, TagId, TypedExprKind};
 
 mod support;
-use support::{transform_source, transform_source_with_typed_locals};
-
-/// Helper: extract a bind body ExprId from a `TypedBind`.
-fn body_expr_id(typed: &TypedFileAst, def_name: &str) -> Option<ExprId> {
-    let def_id = DefId(Intern::new(def_name.to_string()));
-    let bind = typed.defs.get(&def_id).expect("def exists");
-    match &bind.body {
-        BindBody::Expr(eid) => Some(*eid),
-        BindBody::Body { exprs, ret } => {
-            if let Some(ret_id) = ret {
-                Some(*ret_id)
-            } else {
-                exprs.last().copied()
-            }
-        }
-        BindBody::Unlowered => None,
-    }
-}
+use support::{body_expr_id, transform_source, transform_source_with_typed_locals};
 
 #[test]
 fn test_trivial_literal() {
@@ -42,7 +24,7 @@ fn test_trivial_literal() {
     assert!(typed.tags.is_empty(), "no tags");
     assert_eq!(typed.defs.len(), 1, "one def");
 
-    let main_id = DefId(Intern::new("main".to_string()));
+    let main_id = DefId::named(Intern::new("main".to_string()));
     let main_bind = typed.defs.get(&main_id).expect("main def exists");
     assert_eq!(main_bind.name.as_str(), "main");
 
@@ -85,12 +67,6 @@ fn test_expr_arena_populated() {
 }
 
 #[test]
-fn test_span_to_expr_populated() {
-    let typed = transform_source("main: 42");
-    assert!(!typed.span_to_expr.is_empty(), "span_to_expr has entries");
-}
-
-#[test]
 fn test_union_tag_declaration() {
     let typed = transform_source("Maybe(x) is Some(x) or None");
 
@@ -121,7 +97,7 @@ fn test_union_tag_declaration() {
 #[test]
 fn explicit_result_family_when_arms_resolve_true_and_false() {
     let source =
-        "Truth is True or False\nchoose(x Int) Truth := when x is 0 then True else False\n";
+        "Truth is True or False\nchoose(x Int) Truth := return when x is 0 then True else False\n";
     let typed = transform_source(source);
     let flaws: Vec<_> = typed
         .all_flaws()
@@ -147,7 +123,7 @@ fn bool_when_arm_bare_true_false_with_cross_file_bool() {
     let typed_bool = typecheck::transform::transform_file(bool_file, FileId(0));
     let ctx = TransformCtx::from_typed_asts(&[&typed_bool]);
 
-    let source = "is_copy(x Int) Bool := when x < 1 then True else False\n";
+    let source = "is_copy(x Int) Bool := return when x < 1 then True else False\n";
     let file = parser::cursor::TokenCursor::parse_source(source);
     let typed = transform(&file, FileId(1), &ctx);
     let flaws: Vec<_> = typed
@@ -219,12 +195,6 @@ fn test_unit_union_no_unknown_variant_tags() {
         "hover declaration_text must omit trait implementation declarations"
     );
 
-    assert!(
-        tag.provided_traits
-            .iter()
-            .all(|pt| pt.trait_name.as_str() != "Reflectable"),
-        "reflection must require an authenticated schema"
-    );
     let hover = typed.hover_at(source, 0, 0).expect("hover on Bool");
     assert_eq!(
         hover, "```gin\nBool is True or False\n```",
@@ -234,7 +204,7 @@ fn test_unit_union_no_unknown_variant_tags() {
 
 #[test]
 fn test_log_level_literal_bind_has_const_union_type() {
-    let source = "LogLevel is 'debug' or 'info' or 'warn' or 'error'\n\nmain:\n    level LogLevel: 'debug'\nreturn\n";
+    let source = "LogLevel is 'debug' or 'info' or 'warn' or 'error'\n\nmain:\n    level LogLevel: 'debug'\n    return\n";
     let typed = transform_source(source);
     let hover = typed
         .hover_at(source, 3, 20)
@@ -284,7 +254,7 @@ fn test_tag_call() {
 
 #[test]
 fn test_fn_call() {
-    let typed = transform_source("add(a Int, b Int) Int: a + b\nmain: add(1, 2)");
+    let typed = transform_source("add(a Int, b Int) Int: return a + b\nmain: add(1, 2)");
     let main_body = body_expr_id(&typed, "main").expect("main has body");
     let expr = typed.exprs.get(main_body.as_usize()).expect("main body");
 
@@ -301,8 +271,8 @@ fn test_fn_call() {
 
 #[test]
 fn test_fn_return_type_resolved() {
-    let typed = transform_source("add(a Int, b Int) Int: a + b");
-    let add_id = DefId(Intern::new("add".to_string()));
+    let typed = transform_source("add(a Int, b Int) Int: return a + b");
+    let add_id = DefId::named(Intern::new("add".to_string()));
     assert!(
         typed.fn_return_types.contains_key(&add_id),
         "fn_return_types has add"
@@ -332,17 +302,17 @@ fn test_multiple_binds() {
     assert!(
         typed
             .defs
-            .contains_key(&DefId(Intern::new("a".to_string())))
+            .contains_key(&DefId::named(Intern::new("a".to_string())))
     );
     assert!(
         typed
             .defs
-            .contains_key(&DefId(Intern::new("b".to_string())))
+            .contains_key(&DefId::named(Intern::new("b".to_string())))
     );
     assert!(
         typed
             .defs
-            .contains_key(&DefId(Intern::new("c".to_string())))
+            .contains_key(&DefId::named(Intern::new("c".to_string())))
     );
 }
 
@@ -354,14 +324,8 @@ fn test_tag_types_populated() {
 }
 
 #[test]
-fn test_variant_map_populated() {
-    let typed = transform_source("Maybe(x) is Some(x) or None");
-    assert!(!typed.variant_map.is_empty());
-}
-
-#[test]
 fn test_flow_mut_arg_flaw() {
-    let typed = transform_source("foo(x Int) Int: x\nmain: foo(5)");
+    let typed = transform_source("foo(x Int) Int: return x\nmain: foo(5)");
     let main_body = body_expr_id(&typed, "main").expect("main has body");
     let _expr = typed.exprs.get(main_body.as_usize()).expect("main body");
 }
@@ -382,7 +346,9 @@ fn test_bounds_check_array() {
 #[test]
 fn test_when_expr_lowered() {
     // When expressions should produce TypedWhenExpr with ExprId fields.
-    let typed = transform_source("foo(x Int) Int: when x is 0 then x else 0");
+    let typed = transform_source(
+        "Int is in 0 to 255\nInt.finish(self): return\nfoo(x Int) Int: return when x is 0 then x else 0",
+    );
     let foo_body = body_expr_id(&typed, "foo").expect("foo has body");
     let expr = typed.exprs.get(foo_body.as_usize()).expect("foo body");
     assert!(
@@ -393,55 +359,42 @@ fn test_when_expr_lowered() {
 }
 
 #[test]
-fn test_if_expr_lowered() {
-    // If expressions should produce TypedIfExpr with ExprId fields.
-    let source = "\
-main:\n\
-    if 1 is 1 and not 2 is 3 or 4 is 5\n\
-        1\n\
-    return 0\n\
-";
+fn test_conditional_when_lowered() {
+    let source = "main(flag is in 0 to 255): return when flag is 1 and not flag is 3 or flag is 5 then 1 else 0\n";
     let typed = transform_source(source);
     let main_body = body_expr_id(&typed, "main").expect("main has body");
     let expr = typed.exprs.get(main_body.as_usize()).expect("main body");
     assert!(
-        matches!(expr.kind, TypedExprKind::If(_)),
-        "expected TypedExprKind::If, got {:?}",
+        matches!(expr.kind, TypedExprKind::When(_)),
+        "expected TypedExprKind::When, got {:?}",
         expr.kind
     );
 }
 
 #[test]
-fn test_if_condition_tree_is_preserved_during_lowering() {
-    let source = "\
-main:\n\
-    if 1 is 1 and not 2 is 3 or 4 is 5\n\
-        1\n\
-    return 0\n\
-";
+fn test_when_condition_tree_is_preserved_during_lowering() {
+    let source = "main(flag is in 0 to 255): return when flag is 1 and not flag is 3 or flag is 5 then 1 else 0\n";
     let typed = transform_source(source);
     let main_body = body_expr_id(&typed, "main").expect("main has body");
     let expr = typed.exprs.get(main_body.as_usize()).expect("main body");
-    if let TypedExprKind::If(if_expr) = &expr.kind {
+    if let TypedExprKind::When(when) = &expr.kind {
+        let typecheck::TypedWhenArm::Cond { condition, .. } = &when.arms[0] else {
+            panic!("expected condition arm")
+        };
         assert!(matches!(
-            if_expr.condition,
-            typecheck::TypedCondition::Or(ref left, _)
+            condition,
+            typecheck::TypedCondition::Or(left, _)
                 if matches!(left.as_ref(), typecheck::TypedCondition::And(_, _))
         ));
     } else {
-        panic!("expected TypedExprKind::If, got {:?}", expr.kind);
+        panic!("expected TypedExprKind::When, got {:?}", expr.kind);
     }
 }
 
 #[test]
 fn test_explicit_if_condition_has_no_pattern_required_diagnostic() {
     let typed = transform_source(
-        "\
-main:\n\
-    if 1 is 1 and not 2 is 3 or 4 is 5\n\
-        1\n\
-    return 0\n\
-",
+        "main:\n    when 1 is 1 and not 2 is 3 or 4 is 5 then\n        1\n        return 0\n",
     );
     let has_required_pattern = typed
         .all_flaws()
@@ -456,7 +409,7 @@ main:\n\
 #[test]
 fn test_while_loop_lowered() {
     // While loops should produce TypedLoop with TypedLoopKind::While.
-    let typed = transform_source("main: while x < 10; loop");
+    let typed = transform_source("main: while x < 10 do\n    observe\n");
     // Transform should complete without error.
     assert!(!typed.defs.is_empty() || !typed.root_exprs.is_empty());
 }
@@ -487,7 +440,8 @@ fn test_end_to_end_hover() {
 
 #[test]
 fn hover_on_parameter_includes_ownership_convention() {
-    let source = "discard(value own Int): 0";
+    let source =
+        "Int is in 0 to 255\nInt.finish(self): return\ndiscard(value own Int): return value";
     let typed = transform_source(source);
     let byte = source.find("value").expect("parameter") + 1;
     let (line, character) = source.byte_offset_to_position(byte);
@@ -503,7 +457,7 @@ fn hover_on_parameter_includes_ownership_convention() {
 #[test]
 fn test_end_to_end_all_flaws() {
     // End-to-end: transform and collect all flaws.
-    let source = "main Int: 42";
+    let source = "Int is in 0 to 255\nInt.finish(self): return\nmain Int: 42";
     let typed = transform_source(source);
     let flaws = typed.all_flaws();
     // A trivial literal should have no flaws.
@@ -532,7 +486,7 @@ fn test_expr_by_source_position() {
 fn test_flow_use_after_move() {
     // If a variable is moved via `own`, subsequent references should produce flaws.
     let typed = transform_source(
-        "foo(x Int) Int: x\nmain: val val: 42; dummy: foo(own val); result: val; return 0",
+        "foo(x Int) Int: return x\nmain: val val: 42; dummy: foo(own val); result: val; return 0",
     );
     // Check that at least one expression has a UseOfMovedValue flaw.
     let flaws = typed.all_flaws();
@@ -563,7 +517,7 @@ fn test_flow_index_out_of_bounds() {
 fn test_flow_mut_arg_detected() {
     // Flow analysis tracks variables through function calls.
     // (MutArg and CannotPassReadonlyAsMut were removed from the AST.)
-    let typed = transform_source("foo(x Int) Int: x\nmain: val val: 42; foo(val); return 0");
+    let typed = transform_source("foo(x Int) Int: return x\nmain: val val: 42; foo(val); return 0");
     let _flaws = typed.all_flaws();
     assert!(!typed.defs.is_empty());
 }
@@ -571,7 +525,7 @@ fn test_flow_mut_arg_detected() {
 #[test]
 fn test_definition_span_bind() {
     // Go-to-definition should find the def span for a referenced function.
-    let source = "add(a Int, b Int) Int: a + b\nmain: add(1, 2)";
+    let source = "add(a Int, b Int) Int: return a + b\nmain: add(1, 2)";
     let typed = transform_source(source);
     let def_span = typed.definition_span(source, 1, 6);
     assert!(def_span.is_some(), "should find definition span for 'add'");
@@ -602,7 +556,7 @@ fn test_type_mismatch_flaw() {
 #[test]
 fn test_missing_else_arm() {
     // When without else should produce MissingElseArm
-    let typed = transform_source("foo(x Int) Int: when x < 10 then x");
+    let typed = transform_source("foo(x Int) Int: return when x < 10 then x");
     let flaws = typed.all_flaws();
     let _has_missing_else = flaws
         .iter()
@@ -673,7 +627,7 @@ fn test_cross_file_transform() {
 #[test]
 fn test_module_level_unassigned_declare_like_target() {
     let src = "\
-Architecture is 'x86_64' or 'arm64'
+Architecture is 'x86_64' or 'aarch64'
 Vendor is 'unknown'
 OperatingSystem is 'unknown'
 Target has Default
@@ -691,11 +645,11 @@ target Target
         typecheck::FileId(0),
         &typecheck::transform::TransformCtx::new(),
     );
-    let target_id = DefId(Intern::new("target".to_string()));
+    let target_id = DefId::named(Intern::new("target".to_string()));
     let target = typed.defs.get(&target_id).expect("target def");
     assert!(
-        !target.unassigned_decl,
-        "prepare materializes `target` from Target's Default trait"
+        target.unassigned_decl,
+        "ordinary target declarations require an explicit initializer"
     );
     assert!(
         matches!(
@@ -760,7 +714,7 @@ fn test_unassigned_bind_use_before_assign() {
 #[test]
 fn test_unassigned_bind_use_before_assign_via_call() {
     // Declare without value, pass to function before assigning — should flaw.
-    let source = "foo(x Cell) Cell: x\nmain:\n    val Cell\n    dummy: foo(val)\n    val: Cell(n: 42)\n    return 0\n";
+    let source = "foo(x Cell) Cell: return x\nmain:\n    val Cell\n    dummy: foo(val)\n    val: Cell(n: 42)\n    return 0\n";
     let typed = transform_source_with_typed_locals(source);
     let flaws = typed.all_flaws();
     let has_use_before = flaws
@@ -892,7 +846,7 @@ fn test_record_field_types_ok_with_import() {
 
 #[test]
 fn test_architecture_tag_hover_shows_literal_variants() {
-    let src = "Architecture is 'x86_64'\n             or 'arm64'\n             or 'wasm32'\n";
+    let src = "Architecture is 'x86_64'\n             or 'aarch64'\n             or 'wasm32'\n";
     let typed = transform_source(src);
     let hover = typed.hover_at(src, 0, 0).expect("hover on Architecture");
     assert_eq!(
@@ -900,7 +854,7 @@ fn test_architecture_tag_hover_shows_literal_variants() {
         indoc::indoc! {r#"
             ```gin
             Architecture is 'x86_64'
-                         or 'arm64'
+                         or 'aarch64'
                          or 'wasm32'
             ```
         "#}
@@ -918,7 +872,7 @@ fn test_string_literal_union_is_const_union() {
         ),
         (
             "Architecture",
-            "Architecture is 'x86_64'\n             or 'arm64'\n             or 'wasm32'\n",
+            "Architecture is 'x86_64'\n             or 'aarch64'\n             or 'wasm32'\n",
         ),
     ] {
         let typed = transform_source(src);

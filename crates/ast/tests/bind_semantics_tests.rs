@@ -3,19 +3,15 @@
 use flask::CompileTarget;
 use internment::Intern;
 use parser::cursor::TokenCursor;
-use typecheck::FileId;
 use typecheck::prepare_parse_ast;
-use typecheck::transform::{TransformCtx, transform};
+
+mod support;
+use support::transform_prepared;
 
 fn prepare(source: &str) -> ast::FileAst {
     let mut ast = TokenCursor::parse_source(source);
     let _ = prepare_parse_ast(&mut ast, &CompileTarget::Library);
     ast
-}
-
-fn transform_prepared(source: &str) -> typecheck::TypedFileAst {
-    let file_ast = prepare(source);
-    transform(&file_ast, FileId(0), &TransformCtx::new())
 }
 
 #[test]
@@ -52,21 +48,18 @@ fn explicit_rebind_of_immutable_binding_is_rejected() {
 }
 
 #[test]
-fn colon_creates_a_fresh_shadow() {
+fn colon_rejects_a_visible_binding() {
     let typed = transform_prepared("main:\n  x := 1\n  x: 2\n  return x\n");
-    assert!(
-        !typed
-            .all_flaws()
-            .iter()
-            .any(|(_, flaw)| flaw.code.slug() == "type-reassign-constant")
-    );
+    assert!(typed.all_flaws().iter().any(|(_, flaw)| {
+        flaw.code.slug() == "type-binding-shadows-visible-name" && flaw.arg("name") == Some("x")
+    }));
 }
 
 #[test]
-fn fresh_shadow_initializer_resolves_before_new_place() {
-    let typed = transform_prepared("main:\n  value: 1\n  value: value\n  return value\n");
+fn fresh_initializer_resolves_an_existing_distinct_binding() {
+    let typed = transform_prepared("main:\n  value: 1\n  next: value\n  return next\n");
     let typecheck::BindBody::Body { exprs, .. } =
-        &typed.defs[&typecheck::DefId(Intern::from_ref("main"))].body
+        &typed.defs[&typecheck::DefId::named(Intern::from_ref("main"))].body
     else {
         panic!("expected function body");
     };
@@ -95,7 +88,7 @@ fn explicit_rebind_creates_a_new_version_of_the_same_place() {
     let typecheck::BindBody::Body {
         exprs,
         ret: Some(returned),
-    } = &typed.defs[&typecheck::DefId(Intern::from_ref("main"))].body
+    } = &typed.defs[&typecheck::DefId::named(Intern::from_ref("main"))].body
     else {
         panic!("expected function body");
     };
@@ -126,12 +119,13 @@ fn explicit_rebind_creates_a_new_version_of_the_same_place() {
 }
 
 #[test]
-fn conditional_rebind_joins_incoming_and_written_versions() {
+fn conditional_return_preserves_the_incoming_version_after_the_branch() {
     let typed = transform_prepared(
-        "main(flag Int):\n  value: 0\n  if flag is 0\n    value:: 1\n  return\n  observed: value\n  return observed\n",
+        "main(flag is in 0 to 255):\n  value: 0\n  when flag is 0 then\n    value:: 1\n    return value\n  observed: value\n  return observed\n",
     );
+    assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
     let typecheck::BindBody::Body { exprs, .. } =
-        &typed.defs[&typecheck::DefId(Intern::from_ref("main"))].body
+        &typed.defs[&typecheck::DefId::named(Intern::from_ref("main"))].body
     else {
         panic!("expected function body");
     };
@@ -142,29 +136,46 @@ fn conditional_rebind_joins_incoming_and_written_versions() {
     else {
         panic!("expected observed bind");
     };
-    let joined = typed.exprs.facts.ownership_facts.place_version[observed.as_usize()]
-        .expect("joined version");
-    let typecheck::PlaceVersionOrigin::Join(predecessors) =
-        &typed.place_versions[joined.0 as usize].origin
-    else {
-        panic!("expected join version");
+    assert_eq!(
+        typed.exprs.facts.ownership_facts.place_version[observed.as_usize()],
+        Some(initial)
+    );
+    let typecheck::TypedExprKind::When(branch) = &typed.exprs.kind[exprs[1].as_usize()] else {
+        panic!("expected conditional return");
     };
-
-    assert_eq!(predecessors.len(), 2);
-    assert!(predecessors.contains(&initial));
-    assert!(predecessors.iter().any(|version| matches!(
-        typed.place_versions[version.0 as usize].origin,
-        typecheck::PlaceVersionOrigin::Rebind { .. }
-    )));
+    let typecheck::TypedWhenArm::Is { body, .. } = &branch.arms[0] else {
+        panic!("expected pattern arm");
+    };
+    let typecheck::TypedExprKind::Block {
+        statements,
+        value: None,
+    } = &typed.exprs.kind[body.as_usize()]
+    else {
+        panic!("expected branch block");
+    };
+    let typecheck::TypedExprKind::Return {
+        value: Some(returned),
+        ..
+    } = &typed.exprs.kind[statements[1].as_usize()]
+    else {
+        panic!("expected branch return");
+    };
+    let replacement = typed.exprs.facts.ownership_facts.place_version[statements[0].as_usize()]
+        .expect("replacement version");
+    assert_ne!(replacement, initial);
+    assert_eq!(
+        typed.exprs.facts.ownership_facts.place_version[returned.as_usize()],
+        Some(replacement)
+    );
 }
 
 #[test]
 fn loop_rebind_creates_zero_iteration_phi() {
     let typed = transform_prepared(
-        "main(flag Int):\n  value: 0\n  while flag is 0\n    value:: 1\n  loop\n  observed: value\n  return observed\n",
+        "main(flag is in 0 to 255):\n  value: 0\n  while flag is 0 do\n    value:: 1\n  observed: value\n  return observed\n",
     );
     let typecheck::BindBody::Body { exprs, .. } =
-        &typed.defs[&typecheck::DefId(Intern::from_ref("main"))].body
+        &typed.defs[&typecheck::DefId::named(Intern::from_ref("main"))].body
     else {
         panic!("expected function body");
     };
@@ -187,13 +198,17 @@ fn loop_rebind_creates_zero_iteration_phi() {
     };
     assert_eq!(*incoming, initial);
     assert_eq!(backedges.len(), 1);
-    assert!(matches!(
-        typed.place_versions[backedges[0].0 as usize].origin,
-        typecheck::PlaceVersionOrigin::Rebind {
-            predecessor: Some(version),
-            ..
-        } if version == phi
-    ));
+    let typecheck::PlaceVersionOrigin::Rebind {
+        predecessor: Some(predecessor),
+        ..
+    } = typed.place_versions[backedges[0].0 as usize].origin
+    else {
+        panic!("expected loop rebind");
+    };
+    assert!(
+        matches!(&typed.place_versions[predecessor.0 as usize].origin,
+        typecheck::PlaceVersionOrigin::Join(versions) if versions.as_slice() == [phi])
+    );
     let component = typed
         .place_version_components
         .iter()
@@ -227,7 +242,7 @@ fn acyclic_unannotated_place_contract_unions_all_write_domains() {
 #[test]
 fn unannotated_loop_carried_place_requires_explicit_contract() {
     let typed = transform_prepared(
-        "main(flag Int):\n  value: 0\n  while flag is 0\n    value:: 1\n  loop\n  return value\n",
+        "main(flag is in 0 to 255):\n  value: 0\n  while flag is 0 do\n    value:: 1\n  return value\n",
     );
 
     assert!(typed.all_flaws().iter().any(|(_, flaw)| {
@@ -239,7 +254,7 @@ fn unannotated_loop_carried_place_requires_explicit_contract() {
 #[test]
 fn explicitly_bounded_loop_carried_place_is_accepted() {
     let typed = transform_prepared(
-        "Small is in 0 to 2\nmain(flag Int):\n  value Small: 0\n  while flag is 0\n    value:: 1\n  loop\n  return value\n",
+        "Small is in 0 to 2\nmain(flag is in 0 to 255):\n  value Small: 0\n  while flag is 0 do\n    value:: 1\n  return value\n",
     );
 
     assert!(
@@ -252,10 +267,10 @@ fn explicitly_bounded_loop_carried_place_is_accepted() {
 #[test]
 fn projected_rebind_resolves_a_child_place_and_version() {
     let typed = transform_prepared(
-        "Int is in 0 to 255\nCoord has x Int, y Int\nmain:\n  point: Coord(x: 1, y: 2)\n  point.x:: 10\n  observed: point.x\n  return observed\n",
+        "Int is in 0 to 255\nCoord has\n    x Int, y Int\n    finish(self):\n      return\nmain:\n  point: Coord(x: 1, y: 2)\n  point.x:: 10\n  observed: point.x\n  return observed\n",
     );
     let typecheck::BindBody::Body { exprs, .. } =
-        &typed.defs[&typecheck::DefId(Intern::from_ref("main"))].body
+        &typed.defs[&typecheck::DefId::named(Intern::from_ref("main"))].body
     else {
         panic!("expected function body");
     };
@@ -294,7 +309,7 @@ fn projected_rebind_resolves_a_child_place_and_version() {
 #[test]
 fn projected_rebind_cannot_write_through_immutable_root() {
     let typed = transform_prepared(
-        "Int is in 0 to 255\nCoord has x Int\nmain:\n  point := Coord(x: 1)\n  point.x:: 2\n  return 0\n",
+        "Int is in 0 to 255\nCoord has\n    x Int\n    finish(self):\n      return\nmain:\n  point := Coord(x: 1)\n  point.x:: 2\n  return 0\n",
     );
 
     assert!(typed.all_flaws().iter().any(|(_, flaw)| {
@@ -315,37 +330,56 @@ fn projected_rebind_must_discharge_non_discardable_old_value() {
 }
 
 #[test]
-fn conditional_projected_rebind_joins_the_child_versions() {
+fn conditional_return_preserves_the_incoming_field_version_after_the_branch() {
     let typed = transform_prepared(
-        "Int is in 0 to 255\nCoord has x Int\nmain(flag Int):\n  point: Coord(x: 1)\n  if flag is 0\n    point.x:: 2\n  return\n  observed: point.x\n  return observed\n",
+        "Coord(t) has\n    x t\n    finish(self):\n      return\nmain(flag is in 0 to 255):\n  point: Coord(x: 2)\n  when flag is 0 then\n    point.x:: 1\n    return point.x\n  observed: point.x\n  return observed\n",
     );
+    assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
     let typecheck::BindBody::Body { exprs, .. } =
-        &typed.defs[&typecheck::DefId(Intern::from_ref("main"))].body
+        &typed.defs[&typecheck::DefId::named(Intern::from_ref("main"))].body
     else {
         panic!("expected function body");
     };
+    let initial = typed.exprs.facts.ownership_facts.place_version[exprs[0].as_usize()]
+        .expect("initial root version");
     let typecheck::TypedExprKind::Bind { body: observed, .. } =
         typed.exprs.kind[exprs[2].as_usize()]
     else {
         panic!("expected observed bind");
     };
-    let joined =
-        typed.exprs.facts.ownership_facts.place_version[observed.as_usize()].expect("field join");
-    let typecheck::PlaceVersionOrigin::Join(predecessors) =
-        &typed.place_versions[joined.0 as usize].origin
-    else {
-        panic!("expected field join");
+    let version = typed.exprs.facts.ownership_facts.place_version[observed.as_usize()]
+        .expect("field version");
+    assert!(matches!(
+        typed.place_versions[version.0 as usize].origin,
+        typecheck::PlaceVersionOrigin::Projection { base } if base == initial
+    ));
+    let typecheck::TypedExprKind::When(branch) = &typed.exprs.kind[exprs[1].as_usize()] else {
+        panic!("expected conditional return");
     };
-
-    assert_eq!(predecessors.len(), 2);
-    assert!(predecessors.iter().any(|version| matches!(
-        typed.place_versions[version.0 as usize].origin,
-        typecheck::PlaceVersionOrigin::Projection { .. }
-    )));
-    assert!(predecessors.iter().any(|version| matches!(
-        typed.place_versions[version.0 as usize].origin,
-        typecheck::PlaceVersionOrigin::Rebind { .. }
-    )));
+    let typecheck::TypedWhenArm::Is { body, .. } = &branch.arms[0] else {
+        panic!("expected pattern arm");
+    };
+    let typecheck::TypedExprKind::Block {
+        statements,
+        value: None,
+    } = &typed.exprs.kind[body.as_usize()]
+    else {
+        panic!("expected branch block");
+    };
+    let typecheck::TypedExprKind::Return {
+        value: Some(returned),
+        ..
+    } = &typed.exprs.kind[statements[1].as_usize()]
+    else {
+        panic!("expected branch return");
+    };
+    let replacement = typed.exprs.facts.ownership_facts.place_version[statements[0].as_usize()]
+        .expect("replacement version");
+    assert_ne!(replacement, version);
+    assert_eq!(
+        typed.exprs.facts.ownership_facts.place_version[returned.as_usize()],
+        Some(replacement)
+    );
 }
 
 #[test]
@@ -355,10 +389,10 @@ fn compound_name_rebind_uses_ordinary_dispatch_and_old_version() {
 add_bits(a Word, b Word) Word:
     left is in 0 to 255: a
     right is in 0 to 255: b
-return (left + right) as Word
+    return ((left + right) & 255) as Word
 #infix('+')
 #inline
-word_add(a Word, b Word) Word: add_bits(a, b)
+word_add(a Word, b Word) Word: return add_bits(a, b)
 main(input Word):
   value Word: input
   value+: 2
@@ -366,7 +400,7 @@ main(input Word):
 "#,
     );
     let typecheck::BindBody::Body { exprs, .. } =
-        &typed.defs[&typecheck::DefId(Intern::from_ref("main"))].body
+        &typed.defs[&typecheck::DefId::named(Intern::from_ref("main"))].body
     else {
         panic!("expected function body");
     };
@@ -409,18 +443,10 @@ fn const_bind_after_declare_warning() {
 }
 
 #[test]
-fn compile_time_bind_rejects_runtime_call() {
-    let source = "\
-runtime(value Type) Type: value
-bad(ty Type) Type := runtime(ty)
-";
-    let typed = transform_prepared(source);
-    assert!(
-        typed
-            .all_flaws()
-            .iter()
-            .any(|(_, flaw)| flaw.code.slug() == "compile-time-runtime-call"),
-        "expected runtime-call diagnostic, got {:?}",
-        typed.all_flaws()
+fn constant_callable_accepts_runtime_arguments() {
+    let typed = transform_prepared(
+        "runtime(value): return value\nconstant(value) := return runtime(value)\nmain(input is in 0 to 255): return constant(input)\n",
     );
+    assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
+    assert!(typed.defs[&typecheck::DefId::named(Intern::from_ref("constant"))].is_constant);
 }

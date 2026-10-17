@@ -8,14 +8,11 @@ use std::path::PathBuf;
 use diagnostic::Diagnostic;
 use parser::query::SourceParseExt;
 use resolve::{GinPackageExt, ParsedFile, resolve_imports};
+use support::has_flaw_matching as has_flaw;
 use support::transform_source;
 use test_fixtures::TempPackage;
 use typecheck::FileId;
 use typecheck::transform::{PackageTransformOptions, TransformCtx, transform_package};
-
-fn has_flaw(typed: &typecheck::TypedFileAst, pred: fn(&Diagnostic) -> bool) -> bool {
-    typed.all_flaws().iter().any(|(_, f)| pred(f))
-}
 
 fn has_parse_warning(typed: &typecheck::TypedFileAst) -> bool {
     !typed.parse_warnings.is_empty()
@@ -65,7 +62,8 @@ fn transform_resolved_package(files: Vec<(PathBuf, String)>) -> Vec<typecheck::T
     for file in &resolved {
         compile_time_eval_ast.merge_from(file.output.ast.clone());
     }
-    let ctx = TransformCtx::with_package_compile_time(compile_time_eval_ast);
+    let ctx =
+        TransformCtx::with_package_compile_time_arc(std::sync::Arc::new(compile_time_eval_ast));
     let file_asts: Vec<_> = resolved
         .into_iter()
         .enumerate()
@@ -78,9 +76,13 @@ fn transform_resolved_package(files: Vec<(PathBuf, String)>) -> Vec<typecheck::T
 fn maybe_exhaustive_without_else() {
     let source = r#"
 Int is in 0 to 1000
+Int has
+    finish(self):
+        return
 Maybe(x) is Some(x) or None
-pick(m Maybe(Int)) Int: when m is Some(x) then x
-                              is None then 0
+pick(m Maybe(Int)) Int: return when m is
+                              Some(x) then x
+                              None then 0
 "#;
     let typed = transform_source(source);
     assert!(
@@ -95,8 +97,11 @@ pick(m Maybe(Int)) Int: when m is Some(x) then x
 fn maybe_non_exhaustive_without_else() {
     let source = r#"
 Int is in 0 to 1000
+Int has
+    finish(self):
+        return
 Maybe(x) is Some(x) or None
-pick(m Maybe(Int)) Int: when m is Some(x) then x
+pick(m Maybe(Int)) Int: return when m is Some(x) then x
 "#;
     let typed = transform_source(source);
     assert!(
@@ -109,9 +114,13 @@ pick(m Maybe(Int)) Int: when m is Some(x) then x
 fn maybe_unreachable_else_hint() {
     let source = r#"
 Int is in 0 to 1000
+Int has
+    finish(self):
+        return
 Maybe(x) is Some(x) or None
-pick(m Maybe(Int)) Int: when m is Some(x) then x
-                              is None then 0
+pick(m Maybe(Int)) Int: return when m is
+                              Some(x) then x
+                              None then 0
                               else 99
 "#;
     let typed = transform_source(source);
@@ -124,12 +133,11 @@ pick(m Maybe(Int)) Int: when m is Some(x) then x
 
 #[test]
 fn nonexhaustive_subject_when_still_requires_else() {
-    let source =
-        "Bool is True or False\nInt is in 0 to 1000\nfoo(x Int) Int: when x is 10 then x else 0";
+    let source = "Bool is True or False\nInt is in 0 to 1000\nInt has\n    finish(self):\n        return\nfoo(x Int) Int: return when x is 10 then x else 0";
     let typed = transform_source(source);
     assert!(!has_flaw(&typed, is_missing_else));
 
-    let source = "Bool is True or False\nInt is in 0 to 1000\nfoo(x Int) Int: when x is 10 then x";
+    let source = "Bool is True or False\nInt is in 0 to 1000\nInt has\n    finish(self):\n        return\nfoo(x Int) Int: return when x is 10 then x";
     let typed = transform_source(source);
     assert!(has_flaw(&typed, is_missing_else));
 }
@@ -139,8 +147,12 @@ fn bool_union_exhaustive_without_else() {
     let source = r#"
 Bool is True or False
 Int is in 0 to 1000
-pick(b Bool) Int: when b is True then 1
-                         is False then 0
+Int has
+    finish(self):
+        return
+pick(b Bool) Int: return when b is
+                         True then 1
+                         False then 0
 "#;
     let typed = transform_source(source);
     assert!(
@@ -155,7 +167,10 @@ fn bool_union_partial_requires_else() {
     let source = r#"
 Bool is True or False
 Int is in 0 to 1000
-pick(b Bool) Int: when b is True then 1
+Int has
+    finish(self):
+        return
+pick(b Bool) Int: return when b is True then 1
 "#;
     let typed = transform_source(source);
     assert!(has_flaw(&typed, is_missing_else));
@@ -168,7 +183,10 @@ Bool is True or False
 false Bool: False
 true Bool: True
 Int is in 0 to 1000
-pick(b Bool) Int: when b is value then 1
+Int has
+    finish(self):
+        return
+pick(b Bool) Int: return when b is value then 1
 "#;
     let typed = transform_source(source);
     assert!(
@@ -185,24 +203,9 @@ Bool is True or False
 false Bool: False
 true Bool: True
 Int is in 0 to 1000
-something() Int:
-    b: false
-    x: when b is true then 1
-                    else 2
-    return x
-"#;
-    let typed = transform_source(source);
-    assert!(!has_flaw(&typed, is_missing_else));
-    assert!(has_flaw(&typed, is_unreachable_else));
-}
-
-#[test]
-fn lowercase_binding_matches_known_subject_value() {
-    let source = r#"
-Bool is True or False
-false Bool: False
-true Bool: True
-Int is in 0 to 1000
+Int has
+    finish(self):
+        return
 something() Int:
     b: false
     x: when b is true then 1
@@ -216,12 +219,10 @@ something() Int:
 
 #[test]
 fn arm_after_else_is_rejected() {
-    let source = "Bool is True or False\nInt is in 0 to 1000\npick(b Bool) Int: when b is True then 1\n                         else 0\n                         is False then 2\n";
+    let source = "Bool is True or False\nInt is in 0 to 1000\nInt has\n    finish(self):\n        return\npick(b Bool) Int: return when b is\n    True then 1\n    else 0\n    False then 2\n";
     let typed = transform_source(source);
     assert!(
-        typed.all_flaws().iter().any(|(_, flaw)| {
-            flaw.code.slug() == "type-unknown-symbol" && flaw.arg("name") == Some("__parse_error")
-        }),
+        has_parse_warning(&typed),
         "arm after else should be rejected: {:?}",
         typed.all_flaws()
     );
@@ -231,7 +232,10 @@ fn arm_after_else_is_rejected() {
 fn range_pattern_matches_compile_time() {
     let source = r#"
 Int is in 0 to 1000
-classify(n Int) String: when n is in 0 to 9 then 'small'
+Int has
+    finish(self):
+        return
+classify(n Int) String: return when n is in 0 to 9 then 'small'
                                else 'large'
 "#;
     let typed = transform_source(source);
@@ -243,8 +247,12 @@ fn range_pattern_exhaustive_for_literal_union() {
     let source = r#"
 Digit is 0 or 1 or 2 or 3
 Int is in 0 to 1000
-parse(d Digit) Int: when d is in 0 to 2 then 1
-                          is 3 then 0
+Int has
+    finish(self):
+        return
+parse(d Digit) Int: return when d is
+                          in 0 to 2 then 1
+                          3 then 0
 "#;
     let typed = transform_source(source);
     assert!(
@@ -258,14 +266,18 @@ parse(d Digit) Int: when d is in 0 to 2 then 1
 fn list_fixed_length_plus_cons_catch_all_exhaustive() {
     let source = r#"
 Int is in 0 to 1000
-List(x) is [] or [x, ..List(x)]
-len(xs List(Int)) Int: when xs is [] then 0
-                            is [h, ..tail] then 1
+Int has
+    finish(self):
+        return
+List(x) is [] or [x, ...List(x)]
+len(xs List(Int)) Int: return when xs is
+    [] then 0
+    [h, ...tail] then 1
 "#;
     let typed = transform_source(source);
     assert!(
         !has_flaw(&typed, is_missing_else),
-        "[] + [h, ..tail] should be exhaustive: {:?}",
+        "[] + [h, ...tail] should be exhaustive: {:?}",
         typed.all_flaws()
     );
 }
@@ -275,7 +287,10 @@ fn range_pattern_partial_requires_else() {
     let source = r#"
 Digit is 0 or 1 or 2
 Int is in 0 to 1000
-parse(d Digit) Int: when d is in 0 to 1 then 1
+Int has
+    finish(self):
+        return
+parse(d Digit) Int: return when d is in 0 to 1 then 1
 "#;
     let typed = transform_source(source);
     assert!(has_flaw(&typed, is_missing_else));
@@ -291,9 +306,13 @@ true Bool: True
 x Bool: False
 y Bool: False
 Int is in 0 to 1000
-pick(b Bool) Int: when b is x then 1
-                         is y then 2
-                         is true then 3
+Int has
+    finish(self):
+        return
+pick(b Bool) Int: return when b is
+                         x then 1
+                         y then 2
+                         true then 3
 "#;
     let typed = transform_source(source);
     assert!(
@@ -310,6 +329,9 @@ Bool is True or False
 false Bool: False
 true Bool: True
 Int is in 0 to 1000
+Int has
+    finish(self):
+        return
 something() Int:
     b: false
     x: when b is false then 1
@@ -329,7 +351,11 @@ something() Int:
 #[test]
 fn imported_lowercase_name_still_binds_in_pattern_position() {
     let pkg = TempPackage::new("when_imported_bool_values");
-    pkg.write_flask_with_deps("app", r#"{"core":{"path":"."}}"#);
+    pkg.write_flask_with_deps(
+        "app",
+        r#"core: "./."
+"#,
+    );
     let bool_path = pkg.write(
         "primitive/bool.gin",
         "Bool is True or False\nfalse Bool: False\ntrue Bool: True\n",
@@ -338,6 +364,9 @@ fn imported_lowercase_name_still_binds_in_pattern_position() {
 use core.primitive Bool, true, false
 
 Int is in 0 to 1000
+Int has
+    finish(self):
+        return
 something() Int:
     b: false
     x: when b is true then 1
@@ -371,15 +400,22 @@ something() Int:
 #[test]
 fn imported_qualified_variant_pattern_is_detected_as_duplicate() {
     let pkg = TempPackage::new("when_imported_qualified_variant");
-    pkg.write_flask_with_deps("app", r#"{"core":{"path":"."}}"#);
+    pkg.write_flask_with_deps(
+        "app",
+        r#"core: "./."
+"#,
+    );
     let bool_path = pkg.write(
         "primitive/bool.gin",
         "Bool is True or False\nfalse Bool: False\ntrue Bool: True\n",
     );
     let main_src = r#"
-use core.primitive Bool
+use core.primitive Bool, false
 
 Int is in 0 to 1000
+Int has
+    finish(self):
+        return
 something() Int:
     b: false
     x: when b is Bool.True then 1
@@ -414,7 +450,11 @@ something() Int:
 fn imported_qualified_variant_duplicate_of_nominal() {
     // Bool.True and True should be detected as duplicates via semantic resolution
     let pkg = TempPackage::new("when_imported_qualified_dup");
-    pkg.write_flask_with_deps("app", r#"{"core":{"path":"."}}"#);
+    pkg.write_flask_with_deps(
+        "app",
+        r#"core: "./."
+"#,
+    );
     let bool_path = pkg.write(
         "primitive/bool.gin",
         "Bool is True or False\nfalse Bool: False\ntrue Bool: True\n",
@@ -423,8 +463,12 @@ fn imported_qualified_variant_duplicate_of_nominal() {
 use core.primitive Bool
 
 Int is in 0 to 1000
-pick(b Bool) Int: when b is True then 1
-                         is Bool.True then 2
+Int has
+    finish(self):
+        return
+pick(b Bool) Int: return when b is
+                         True then 1
+                         Bool.True then 2
                          else 0
 "#;
     let main_path = pkg.write("app/main.gin", main_src);
@@ -449,10 +493,14 @@ pick(b Bool) Int: when b is True then 1
 #[test]
 fn literal_union_exhaustive_without_else() {
     let source = r#"
-Arch is 'x86_64' or 'arm64' or 'wasm32'
+Arch is 'x86_64' or 'aarch64' or 'wasm32'
 Int is in 0 to 1000
-ptr(a Arch) Int: when a is 'x86_64' or 'arm64' then 8
-                       is 'wasm32' then 4
+Int has
+    finish(self):
+        return
+ptr(a Arch) Int: return when a is
+                       'x86_64' or 'aarch64' then 8
+                       'wasm32' then 4
 "#;
     let typed = transform_source(source);
     assert!(
@@ -465,9 +513,12 @@ ptr(a Arch) Int: when a is 'x86_64' or 'arm64' then 8
 #[test]
 fn literal_union_partial_requires_else() {
     let source = r#"
-Arch is 'x86_64' or 'arm64' or 'wasm32'
+Arch is 'x86_64' or 'aarch64' or 'wasm32'
 Int is in 0 to 1000
-ptr(a Arch) Int: when a is 'x86_64' or 'arm64' then 8
+Int has
+    finish(self):
+        return
+ptr(a Arch) Int: return when a is 'x86_64' or 'aarch64' then 8
 "#;
     let typed = transform_source(source);
     assert!(has_flaw(&typed, is_missing_else));
@@ -478,7 +529,10 @@ fn wildcard_pattern_is_prohibited_use_else_instead() {
     let source = r#"
 Bool is True or False
 Int is in 0 to 1000
-pick(b Bool) Int: when b is _ then 1
+Int has
+    finish(self):
+        return
+pick(b Bool) Int: return when b is _ then 1
 "#;
     let typed = transform_source(source);
     assert!(has_flaw(&typed, is_wildcard_pattern));
@@ -489,7 +543,10 @@ fn lowercase_pattern_is_a_catch_all() {
     let source = r#"
 Bool is True or False
 Int is in 0 to 1000
-pick(b Bool) Int: when b is value then 1
+Int has
+    finish(self):
+        return
+pick(b Bool) Int: return when b is value then 1
 "#;
     let typed = transform_source(source);
     assert!(!has_flaw(&typed, is_missing_else));
@@ -499,9 +556,13 @@ pick(b Bool) Int: when b is value then 1
 fn list_empty_and_cons_catch_all_are_exhaustive_without_else() {
     let source = r#"
 Int is in 0 to 1000
-List(x) is [] or [x, ..List(x)]
-len(xs List(Int)) Int: when xs is [] then 0
-                            is [head, ..tail] then 1
+Int has
+    finish(self):
+        return
+List(x) is [] or [x, ...List(x)]
+len(xs List(Int)) Int: return when xs is
+    [] then 0
+    [head, ...tail] then 1
 "#;
     let typed = transform_source(source);
     assert!(
@@ -515,8 +576,11 @@ len(xs List(Int)) Int: when xs is [] then 0
 fn list_only_empty_requires_else() {
     let source = r#"
 Int is in 0 to 1000
-List(x) is [] or [x, ..List(x)]
-len(xs List(Int)) Int: when xs is [] then 0
+Int has
+    finish(self):
+        return
+List(x) is [] or [x, ...List(x)]
+len(xs List(Int)) Int: return when xs is [] then 0
 "#;
     let typed = transform_source(source);
     assert!(has_flaw(&typed, is_missing_else));
@@ -527,7 +591,10 @@ fn else_is_allowed_when_union_is_partial() {
     let source = r#"
 Bool is True or False
 Int is in 0 to 1000
-pick(b Bool) Int: when b is True then 1
+Int has
+    finish(self):
+        return
+pick(b Bool) Int: return when b is True then 1
                          else 0
 "#;
     let typed = transform_source(source);
@@ -540,35 +607,49 @@ fn duplicate_pattern_arm_is_unreachable() {
     let source = r#"
 Bool is True or False
 Int is in 0 to 1000
-pick(b Bool) Int: when b is True then 1
-                         is True then 2
-                         is False then 0
+Int has
+    finish(self):
+        return
+pick(b Bool) Int: return when b is
+                         True then 1
+                         True then 2
+                         False then 0
 "#;
     let typed = transform_source(source);
     assert!(has_flaw(&typed, is_unreachable_arm));
 }
 
 #[test]
-fn condition_arm_without_explicit_pattern_is_rejected() {
+fn boolean_condition_arm_requires_an_explicit_pattern() {
     let source = r#"
 Bool is True or False
 Int is in 0 to 1000
-pick(b Bool) Int: when b is True then 1
-                         b then 2
-                         is False then 0
+Int has
+    finish(self):
+        return
+pick(b Bool) Int: return when
+    b then 2
+    else 0
 "#;
     let typed = transform_source(source);
-    assert!(typed.all_flaws().iter().any(|(_, flaw)| {
-        flaw.code.slug() == "type-unknown-symbol" && flaw.arg("name") == Some("__parse_error")
-    }));
+    assert!(
+        typed
+            .all_flaws()
+            .iter()
+            .any(|(_, flaw)| { flaw.code.slug() == "type-condition-requires-proposition" })
+    );
 }
 
 #[test]
 fn bounded_int_fully_covered_by_ranges_no_else() {
     let source = r#"
 Int is in 0 to 5
-parse(n Int) Int: when n is in 0 to 2 then 1
-                         is in 3 to 5 then 2
+Int has
+    finish(self):
+        return
+parse(n Int) Int: return when n is
+    in 0 to 2 then 1
+    in 3 to 5 then 2
 "#;
     let typed = transform_source(source);
     assert!(
@@ -582,7 +663,10 @@ parse(n Int) Int: when n is in 0 to 2 then 1
 fn bounded_int_partially_covered_by_range_requires_else() {
     let source = r#"
 Int is in 0 to 5
-parse(n Int) Int: when n is in 0 to 2 then 1
+Int has
+    finish(self):
+        return
+parse(n Int) Int: return when n is in 0 to 2 then 1
 "#;
     let typed = transform_source(source);
     assert!(
@@ -598,8 +682,12 @@ Bool is True or False
 false Bool: False
 true Bool: True
 Int is in 0 to 1000
-pick(b Bool) Int: when b is true then 1
-                         is Bool.True then 2
+Int has
+    finish(self):
+        return
+pick(b Bool) Int: return when b is
+                         true then 1
+                         Bool.True then 2
                          else 0
 "#;
     let typed = transform_source(source);
@@ -615,8 +703,12 @@ fn qualified_variant_pattern_duplicate_of_nominal_variant() {
     let source = r#"
 Bool is True or False
 Int is in 0 to 1000
-pick(b Bool) Int: when b is True then 1
-                         is Bool.True then 2
+Int has
+    finish(self):
+        return
+pick(b Bool) Int: return when b is
+                         True then 1
+                         Bool.True then 2
                          else 0
 "#;
     let typed = transform_source(source);
@@ -634,6 +726,9 @@ Bool is True or False
 false Bool: False
 true Bool: True
 Int is in 0 to 1000
+Int has
+    finish(self):
+        return
 something() Int:
     b: false
     x: when b is true then 1
@@ -646,36 +741,19 @@ something() Int:
 }
 
 #[test]
-fn known_subject_matching_is_arm_makes_else_unreachable() {
-    let source = r#"
-Bool is True or False
-false Bool: False
-true Bool: True
-Int is in 0 to 1000
-something() Int:
-    b: false
-    x: when b is false then 1
-                    else 2
-    return x
-"#;
-    let typed = transform_source(source);
-    assert!(
-        has_flaw(&typed, is_unreachable_else),
-        "else should be unreachable when `is false` matches subject b:false: {:?}",
-        typed.all_flaws()
-    );
-}
-
-#[test]
 fn else_not_last_in_pattern_when_parses_safely() {
     // Arms after `else` are not parsed (parser breaks after else).
     // The `else` effectively becomes the last arm.
     let source = r#"
 Bool is True or False
 Int is in 0 to 1000
-pick(b Bool) Int: when b is True then 1
-                         else 0
-                         is False then 2
+Int has
+    finish(self):
+        return
+pick(b Bool) Int: return when b is
+    True then 1
+    else 0
+    False then 2
 "#;
     // Should produce a parse warning that `else` must be last.
     let typed = transform_source(source);

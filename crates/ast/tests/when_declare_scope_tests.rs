@@ -5,16 +5,15 @@ use parser::cursor::TokenCursor;
 use typecheck::FileId;
 use typecheck::transform::{TransformCtx, transform};
 
+mod support;
+use support::transform_prepared;
+
 fn transform_parsed(source: &str, prepare: bool) -> typecheck::TypedFileAst {
     let mut file_ast = TokenCursor::parse_source(source);
     if prepare {
         let _ = typecheck::prepare_parse_ast(&mut file_ast, &CompileTarget::Library);
     }
     transform(&file_ast, FileId(0), &TransformCtx::new())
-}
-
-fn transform_prepared(source: &str) -> typecheck::TypedFileAst {
-    transform_parsed(source, true)
 }
 
 #[test]

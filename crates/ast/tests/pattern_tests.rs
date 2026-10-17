@@ -1,8 +1,5 @@
 use ast::ParameterKind;
-use ast::{
-    Expr, FnCall, HashFloat, Literal, ModPath, Pattern, SpanId, Spanned, TypeExpr,
-    ty::{Ty, VariantMap},
-};
+use ast::{Expr, FnCall, HashFloat, Literal, ModPath, Pattern, SpanId, Spanned, TypeExpr, ty::Ty};
 use internment::Intern;
 use std::collections::HashMap;
 
@@ -13,6 +10,8 @@ fn intern(s: &str) -> Intern<String> {
 fn simple_var(name: &str) -> Expr {
     let n = intern(name);
     Expr::FnCall(FnCall {
+        syntax: ast::CallSyntax::Path,
+        definition: None,
         path: Spanned::new(ModPath::new(n, Vec::new()), SpanId::new(0)),
         args: None,
     })
@@ -44,6 +43,8 @@ fn for_loop_pattern_cases() {
         (
             "rejects_calls",
             vec![Expr::FnCall(FnCall {
+                syntax: ast::CallSyntax::Path,
+                definition: None,
                 path: Spanned::new(ModPath::new(intern("f"), Vec::new()), SpanId::new(0)),
                 args: Some(vec![]),
             })],
@@ -139,82 +140,32 @@ fn surface_mangle_name_cases() {
     ];
 
     for (expected, expr) in cases {
+        let pattern = Pattern::from(expr);
         assert_eq!(
-            expr.surface_mangle_name(),
+            pattern.surface_mangle_name(),
             expected,
-            "surface_mangle_name({expr:?})"
+            "surface_mangle_name({pattern:?})"
         );
     }
 }
 
 #[test]
 fn pattern_binding_types_list_cons() {
-    // pattern: [item, ...rest]
-    let pat = list_cons_pat("item", "rest");
-
-    // Subject type: List(NamedTy) = Record { pointer: Ptr(NamedTy), length: ... }
-    let named_ty = Ty::Record {
-        name: intern("NamedTy"),
-        resolved_params: None,
-        fields: vec![
-            (intern("name"), Box::new(Ty::Opaque(intern("String")))),
-            (intern("ty"), Box::new(Ty::Opaque(intern("Type")))),
-        ],
+    let pattern = list_cons_pat("item", "rest");
+    let subject = Ty::Array {
+        elem: Box::new(Ty::u8()),
+        size: 3.into(),
     };
-    let list_record_fields: Vec<(Intern<String>, Box<Ty>)> = vec![
-        (
-            intern("pointer"),
-            Box::new(Ty::Ptr {
-                inner: Box::new(named_ty.clone()),
-            }),
-        ),
-        (
-            intern("length"),
-            Box::new(Ty::Opaque(intern("PointerSize"))),
-        ),
-    ];
-    let list_record = Ty::Record {
-        name: intern("List"),
-        resolved_params: None,
-        fields: list_record_fields,
-    };
-    let mut tag_types = HashMap::new();
-    tag_types.insert(intern("List"), list_record);
-    let variant_map: VariantMap = HashMap::new();
-
-    let subject_ty = Some(Ty::Record {
-        name: intern("List"),
-        resolved_params: None,
-        fields: vec![
-            (
-                intern("pointer"),
-                Box::new(Ty::Ptr {
-                    inner: Box::new(named_ty.clone()),
-                }),
-            ),
-            (
-                intern("length"),
-                Box::new(Ty::Opaque(intern("PointerSize"))),
-            ),
-        ],
-    });
-
-    let bindings = pat.pattern_binding_types(subject_ty.as_ref(), &variant_map, &tag_types);
-
-    assert_eq!(bindings.len(), 2, "should bind both item and rest");
-
-    // item should have the element type (extracted from Ptr)
-    let item_ty = bindings.get(&intern("item")).expect("item binding");
-    assert_eq!(item_ty, &named_ty, "item should have element type");
-
-    // rest should have List(NamedTy) type
-    let rest_ty = bindings.get(&intern("rest")).expect("rest binding");
-    match rest_ty {
-        Ty::Record { name, fields, .. } => {
-            assert_eq!(name.as_str(), "List", "rest should be a List");
-            let has_pointer = fields.iter().any(|(n, _)| n.as_str() == "pointer");
-            assert!(has_pointer, "rest List should have pointer field");
-        }
-        other => panic!("rest should be Record, got {:?}", other),
-    }
+    let bindings = pattern.pattern_binding_types(
+        Some(&subject),
+        &HashMap::new(),
+        &HashMap::new(),
+        &Ty::sequence_element_type,
+    );
+    assert_eq!(bindings.len(), 2);
+    assert_eq!(bindings[&intern("item")], Ty::u8());
+    assert!(
+        matches!(&bindings[&intern("rest")], Ty::Array { elem, size }
+        if **elem == Ty::u8() && size.as_const_int() == Some(2))
+    );
 }

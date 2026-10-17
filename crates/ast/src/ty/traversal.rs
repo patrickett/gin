@@ -1,7 +1,17 @@
 use std::ops::ControlFlow;
 
-use super::{Ty, TyArg};
+use super::{SequenceTypeElement, Ty, TyArg, UnionVariant};
 use crate::NormalExpr;
+
+/// Provides the replacement for each direct child while rebuilding a [`Ty`].
+///
+/// Implementations decide leaf policy; the structural match lives once in
+/// [`Ty::map_children`].
+pub trait TyChildMapper {
+    fn map_ty(&mut self, ty: &Ty) -> Ty;
+    fn map_arg(&mut self, arg: &TyArg) -> TyArg;
+    fn map_constant(&mut self, expr: &NormalExpr) -> NormalExpr;
+}
 
 #[derive(Clone, Copy)]
 pub enum TyChild<'a> {
@@ -21,6 +31,115 @@ impl<'a> TyChild<'a> {
 }
 
 impl Ty {
+    /// Rebuilds this type with every direct child passed through `mapper`.
+    ///
+    /// The match is exhaustive: adding a [`Ty`] variant fails compilation here,
+    /// keeping all structural rewrites in one place.
+    pub fn map_children<M: TyChildMapper + ?Sized>(&self, mapper: &mut M) -> Ty {
+        match self {
+            Self::Named { instance, name } => Ty::Named {
+                instance: instance.clone().with_arguments(
+                    instance
+                        .arguments
+                        .iter()
+                        .map(|(name, arg)| (*name, mapper.map_arg(arg)))
+                        .collect(),
+                ),
+                name: *name,
+            },
+            Self::Record {
+                name,
+                fields,
+                resolved_params,
+            } => Ty::Record {
+                name: *name,
+                fields: fields
+                    .iter()
+                    .map(|(n, t)| (*n, Box::new(mapper.map_ty(t))))
+                    .collect(),
+                resolved_params: resolved_params.as_ref().map(|params| {
+                    params
+                        .iter()
+                        .map(|(n, arg)| (*n, mapper.map_arg(arg)))
+                        .collect()
+                }),
+            },
+            Self::Union {
+                name,
+                variants,
+                literal_values,
+                resolved_params,
+            } => Ty::Union {
+                name: *name,
+                variants: variants
+                    .iter()
+                    .map(|variant| UnionVariant {
+                        kind: variant.kind,
+                        discriminant: variant.discriminant,
+                        name: variant.name,
+                        fields: variant
+                            .fields
+                            .iter()
+                            .map(|(n, t)| (*n, Box::new(mapper.map_ty(t))))
+                            .collect(),
+                        result_ty: variant.result_ty.as_ref().map(|t| mapper.map_ty(t)),
+                    })
+                    .collect(),
+                literal_values: literal_values.clone(),
+                resolved_params: resolved_params.as_ref().map(|params| {
+                    params
+                        .iter()
+                        .map(|(n, arg)| (*n, mapper.map_arg(arg)))
+                        .collect()
+                }),
+            },
+            Self::Sequence(elements) => Ty::Sequence(
+                elements
+                    .iter()
+                    .map(|element| SequenceTypeElement {
+                        name: element.name,
+                        ty: Box::new(mapper.map_ty(&element.ty)),
+                    })
+                    .collect(),
+            ),
+            Self::Array { elem, size } => Ty::Array {
+                elem: Box::new(mapper.map_ty(elem)),
+                size: mapper.map_constant(size),
+            },
+            Self::UnresolvedSequence { element, length } => Ty::UnresolvedSequence {
+                element: element
+                    .as_deref()
+                    .map(|element| Box::new(mapper.map_ty(element))),
+                length: mapper.map_constant(length),
+            },
+            Self::Ref { inner, mutable } => Ty::Ref {
+                inner: Box::new(mapper.map_ty(inner)),
+                mutable: *mutable,
+            },
+            Self::Ptr { inner } => Ty::Ptr {
+                inner: Box::new(mapper.map_ty(inner)),
+            },
+            Self::OwnedStorage { inner } => Ty::OwnedStorage {
+                inner: Box::new(mapper.map_ty(inner)),
+            },
+            Self::Address {
+                pointee,
+                address_space,
+            } => Ty::Address {
+                pointee: Box::new(mapper.map_ty(pointee)),
+                address_space: *address_space,
+            },
+            Self::Proposition(_)
+            | Self::Opaque(_)
+            | Self::AnonymousInteger { .. }
+            | Self::ResultFamily { .. }
+            | Self::Float { .. }
+            | Self::Unit
+            | Self::Literal(_)
+            | Self::UnresolvedLiteral(_) => self.clone(),
+        }
+    }
+
     pub fn any_child(&self, mut predicate: impl FnMut(TyChild<'_>) -> bool) -> bool {
         self.walk_children(&mut |child| {
             if predicate(child) {
@@ -69,6 +188,7 @@ impl Ty {
             }
             Self::Ref { inner, .. }
             | Self::Ptr { inner }
+            | Self::OwnedStorage { inner }
             | Self::Address { pointee: inner, .. } => {
                 visit(TyChild::Type(inner))?;
             }
@@ -77,7 +197,8 @@ impl Ty {
                     visit(TyChild::Type(&element.ty))?;
                 }
             }
-            Self::Opaque(_)
+            Self::Proposition(_)
+            | Self::Opaque(_)
             | Self::AnonymousInteger { .. }
             | Self::ResultFamily { .. }
             | Self::Float { .. }

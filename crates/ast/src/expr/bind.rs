@@ -21,6 +21,13 @@ pub enum BindOperator {
     Compound(BinOp),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PayloadPostcondition {
+    pub name: Intern<String>,
+    pub ty: Box<Spanned<Expr>>,
+    pub proposition: crate::ProofProposition,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bind {
     pub doc_comment: Option<DocComment>,
@@ -46,6 +53,7 @@ pub struct Bind {
     pub return_tag: Option<Box<Spanned<Expr>>>,
     pub return_refinement: Option<PredicateExpr>,
     pub anonymous_result_alternatives: Vec<Spanned<ResultAlternative>>,
+    pub payload_postconditions: Vec<PayloadPostcondition>,
     pub operator: BindOperator,
     /// Resolved/progressive return type. Populated during analysis.
     /// Replaces `return_type_name` + `return_tag` + the `fn_return_types` side-table.
@@ -78,6 +86,7 @@ impl Bind {
             return_tag: None,
             return_refinement: None,
             anonymous_result_alternatives: Vec::new(),
+            payload_postconditions: Vec::new(),
             operator: BindOperator::FreshMutable,
             return_type: TyState::Infer,
             type_annotation: None,
@@ -157,18 +166,6 @@ impl Bind {
             .collect()
     }
 
-    /// Return the resolved receiver type variables.
-    /// Empty if not a method or not yet resolved.
-    pub fn resolved_typevars(&self) -> HashMap<Intern<String>, Ty> {
-        self.receiver_typevars
-            .iter()
-            .filter_map(|(k, tv)| match tv {
-                crate::TyState::Resolved(ty) => Some((*k, ty.clone())),
-                _ => None,
-            })
-            .collect()
-    }
-
     pub fn receiver_type_surface(&self) -> Option<&Spanned<Expr>> {
         self.receiver_type.as_deref()
     }
@@ -200,6 +197,7 @@ impl std::hash::Hash for Bind {
         self.return_tag.hash(state);
         self.return_refinement.hash(state);
         self.anonymous_result_alternatives.hash(state);
+        self.payload_postconditions.hash(state);
         self.return_type_name.hash(state);
         self.named_results.hash(state);
         self.type_annotation.hash(state);
@@ -285,21 +283,6 @@ pub enum Complexity {
 }
 
 impl Complexity {
-    /// Render the complexity as `Variant(expr)` format (e.g. `Linear(len)`,
-    /// `Quadratic(rows * cols)`).
-    pub fn display_label(&self) -> String {
-        match self {
-            Complexity::Constant => "Constant".to_string(),
-            Complexity::Logarithmic(expr) => format!("Logarithmic({})", expr.render()),
-            Complexity::Linear(expr) => format!("Linear({})", expr.render()),
-            Complexity::LogLinear(expr) => format!("LogLinear({})", expr.render()),
-            Complexity::Quadratic(expr) => format!("Quadratic({})", expr.render()),
-            Complexity::Cubic(expr) => format!("Cubic({})", expr.render()),
-            Complexity::Exponential(expr) => format!("Exponential({})", expr.render()),
-            Complexity::Factorial(expr) => format!("Factorial({})", expr.render()),
-        }
-    }
-
     /// Render the complexity as standard big-O notation (e.g. `O(len)`,
     /// `O(rows * cols)`, `O((rows * cols)²)`). Compound expressions are
     /// wrapped in parens where needed by the variant's notation.
@@ -336,29 +319,33 @@ pub enum AttributeItem {
 }
 
 pub const COMPILER_QUERY_NAMES: &[&str] = &[
-    "asm",
     "bits",
     "complexity",
     "debug",
+    "emit",
+    "entry",
     "fixed_array",
+    "sequence_builder",
+    "private",
     "infix",
     "inline",
-    "machine",
     "size",
     "alignment",
     "index_bits",
     "phantom",
     "reflection",
+    "target",
     "test",
+    "todo",
 ];
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BindAttributes {
+    pub entry: bool,
     /// Always run in tests (`#[test]`).
     pub test: bool,
     /// Always inline (`#[inline]`).
     pub inline_always: bool,
-    pub machine: bool,
     /// Strip in release builds (`#[debug]`).
     pub debug_only: bool,
     /// Time complexity annotation (`#complexity(...)`). `None` means unannotated.
@@ -371,6 +358,17 @@ pub struct BindAttributes {
 }
 
 impl BindAttributes {
+    pub fn is_private(&self) -> bool {
+        self.raw_attributes
+            .iter()
+            .flatten()
+            .any(|attribute| match attribute {
+                AttributeItem::Flag { name, .. } | AttributeItem::Call { name, .. } => {
+                    name.as_str() == "private"
+                }
+            })
+    }
+
     /// Extract compiler-known intrinsic attributes from `raw_attributes` into typed fields.
     /// Leaves unknown attributes in `raw_attributes` for tooling to consume.
     /// Should be called after parsing.
@@ -385,9 +383,7 @@ impl BindAttributes {
         for item in items {
             match item {
                 AttributeItem::Call { name, args, .. } => {
-                    if name.as_str() == "machine" {
-                        self.machine = true;
-                    } else if name.as_str() == "complexity" {
+                    if name.as_str() == "complexity" {
                         self.complexity = Complexity::extract(args);
                     } else if name.as_str() == "infix"
                         && let Some(Typed {
@@ -400,10 +396,10 @@ impl BindAttributes {
                     }
                 }
                 AttributeItem::Flag { name, .. } => match name.as_str() {
+                    "entry" => self.entry = true,
                     "debug" => self.debug_only = true,
                     "test" => self.test = true,
                     "inline" => self.inline_always = true,
-                    "machine" => self.machine = true,
                     _ => {}
                 },
             }

@@ -1,6 +1,6 @@
 use crate::expr::Expr;
 use crate::expr::Typed;
-use strum::{EnumString, IntoStaticStr};
+use strum::IntoStaticStr;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Binary {
@@ -108,7 +108,7 @@ impl BinOp {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OperatorRole {
     Add,
     Subtract,

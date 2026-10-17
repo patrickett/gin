@@ -33,7 +33,7 @@ pub struct Typed<T> {
     pub ty: TyState,
     /// Compile-time constant value, when this expression can be folded to a
     /// known value (e.g., a literal, or a constant-folded binary op).
-    pub const_value: Option<crate::ConstValue>,
+    pub const_value: Option<Box<crate::ConstValue>>,
     /// Source location for diagnostics and LSP.
     pub span_id: SpanId,
 }
@@ -49,16 +49,6 @@ impl<T> Typed<T> {
         }
     }
 
-    /// Create a new typed node with a known constant value.
-    pub fn with_value(value: T, ty: TyState, cv: crate::ConstValue, span_id: SpanId) -> Self {
-        Self {
-            value,
-            ty,
-            const_value: Some(cv),
-            span_id,
-        }
-    }
-
     /// Create a typed node in the [`TyState::Infer`] state (pre-typecheck).
     /// This is the typical starting state for parser output.
     pub fn infer(value: T, span_id: SpanId) -> Self {
@@ -67,71 +57,6 @@ impl<T> Typed<T> {
             ty: TyState::Infer,
             const_value: None,
             span_id,
-        }
-    }
-
-    /// Create a typed node with a resolved concrete type.
-    pub fn resolved(value: T, ty: Ty, span_id: SpanId) -> Self {
-        Self {
-            value,
-            ty: TyState::Resolved(ty),
-            const_value: None,
-            span_id,
-        }
-    }
-
-    /// Create a typed node with a narrowed type (control-flow refinement).
-    /// `current` is the narrowed type; `original` is the type before narrowing.
-    pub fn narrowed(value: T, current: Ty, original: Ty, span_id: SpanId) -> Self {
-        Self {
-            value,
-            ty: TyState::Narrowed {
-                current,
-                original: Box::new(original),
-            },
-            const_value: None,
-            span_id,
-        }
-    }
-
-    /// Returns `true` if this node has been type-resolved (not [`TyState::Infer`]).
-    pub fn is_resolved(&self) -> bool {
-        !matches!(self.ty, TyState::Infer)
-    }
-
-    /// Returns the concrete type if resolved, stripping any narrowing.
-    ///
-    /// For [`TyState::Resolved(ty)`] returns `Some(ty)`.
-    /// For [`TyState::Narrowed { original, .. }`] returns `Some(original)`.
-    /// For [`TyState::Infer`] returns `None`.
-    pub fn resolved_ty(&self) -> Option<&Ty> {
-        self.ty.resolved_ty()
-    }
-
-    /// Returns the current (possibly narrowed) type if resolved.
-    ///
-    /// For [`TyState::Resolved(ty)`] returns `Some(ty)`.
-    /// For [`TyState::Narrowed { current, .. }`] returns `Some(current)`.
-    /// For [`TyState::Infer`] returns `None`.
-    pub fn current_ty(&self) -> Option<&Ty> {
-        self.ty.current_ty()
-    }
-
-    /// Map the inner node from `T` to `U`, preserving type info and span.
-    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Typed<U> {
-        Typed {
-            value: f(self.value),
-            ty: self.ty,
-            const_value: self.const_value,
-            span_id: self.span_id,
-        }
-    }
-
-    /// Convert to a [`Spanned<T>`], discarding type information.
-    pub fn into_spanned(self) -> Spanned<T> {
-        Spanned {
-            value: self.value,
-            span_id: self.span_id,
         }
     }
 }
@@ -151,7 +76,10 @@ impl<T> DerefMut for Typed<T> {
 
 impl<T> From<Typed<T>> for Spanned<T> {
     fn from(typed: Typed<T>) -> Self {
-        typed.into_spanned()
+        Spanned {
+            value: typed.value,
+            span_id: typed.span_id,
+        }
     }
 }
 
@@ -201,12 +129,6 @@ pub mod when;
 pub use when::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct AsmOperandBinding {
-    pub name: Intern<String>,
-    pub value: Typed<Expr>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SequenceElement {
     pub name: Option<Intern<String>>,
     pub expr: Typed<Expr>,
@@ -215,11 +137,6 @@ pub struct SequenceElement {
 impl SequenceElement {
     pub fn new(expr: Typed<Expr>) -> Self {
         Self { name: None, expr }
-    }
-
-    pub fn with_name(mut self, name: Intern<String>) -> Self {
-        self.name = Some(name);
-        self
     }
 }
 
@@ -248,14 +165,22 @@ pub enum SequenceLiteral {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
+    Todo,
+    Import(Import),
     Loop(Loop),
     Binary(Binary),
     FnCall(FnCall),
     Lit(Literal),
     FormatString(FormatString),
     Range(Range),
+    IntegerDomain(Box<Typed<Expr>>),
+    DomainOf(Box<Typed<Expr>>),
+    DomainValue(std::sync::Arc<crate::integer::IntegerDomain>),
+    TypeValue(std::sync::Arc<Ty>),
     Bind(Box<Bind>),
     When(WhenExpr),
+    Block(Vec<Typed<Expr>>),
+    Return(r#return::Return),
     If(IfExpr),
     SelfRef,
     /// A capitalized variant constructor with arguments, e.g. `Some(5)`.
@@ -290,17 +215,21 @@ pub enum Expr {
         operand: crate::TypeReference,
     },
     Target,
-    Register(Box<Typed<Expr>>),
-    Asm {
-        specification: Box<Typed<Expr>>,
-        operands: Vec<AsmOperandBinding>,
+    Emit {
+        code: Box<Typed<Expr>>,
+        arguments: Box<Typed<Expr>>,
     },
-    /// Dynamic buffer element read: `buf.(i)` — emits GEP(i * elem_bytes) + load.
+    SliceGet {
+        buf: Box<Typed<Expr>>,
+        start: Box<Typed<Expr>>,
+        length: Box<Typed<Expr>>,
+    },
+    /// Dynamic buffer element read: `buf.[i]` — emits GEP(i * elem_bytes) + load.
     BufGet {
         buf: Box<Typed<Expr>>,
         index: Box<Typed<Expr>>,
     },
-    /// Dynamic buffer element write: `buf.(i):: val` — emits GEP(i * elem_bytes) + store.
+    /// Dynamic buffer element write: `buf.[i]:: val` — emits GEP(i * elem_bytes) + store.
     BufSet {
         buf: Box<Typed<Expr>>,
         index: Box<Typed<Expr>>,

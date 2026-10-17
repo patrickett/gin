@@ -1,136 +1,14 @@
 use crate::path::ModPath;
 use crate::prelude::*;
 use crate::span::{SpanId, SpanTable, Spanned};
-use indexmap::IndexMap;
+use diagnostic::DiagnosticCode;
 use std::{
     collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
-    path::PathBuf,
 };
 
 pub type TagMap = HashMap<Intern<String>, Declare>;
-/// Method name → single bind (impl blocks, etc.).
-pub type MethodMap = HashMap<Intern<String>, Bind>;
-/// Top-level def name → one bind.
-pub type DefMap = IndexMap<Intern<String>, Bind>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum SymbolKind {
-    /// A tag/type definition (e.g., `Person ::= ...`)
-    Tag(Intern<String>),
-    /// A function definition (e.g., `foo : { ... }`)
-    Function(Intern<String>),
-    /// A value binding (e.g., `x : 42`)
-    Bind(Intern<String>),
-}
-
-/// Compile-time symbol with source information.
-///
-/// This tracks symbol metadata at compile time, separate from runtime
-/// MLIR values which are tracked during codegen.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Symbol {
-    /// The symbol name (e.g., "http.web.handle" or "foo")
-    pub name: Intern<String>,
-
-    pub source_file: PathBuf,
-
-    pub kind: SymbolKind,
-}
-
-/// Compile-time symbol table.
-///
-/// This tracks all visible symbols at compile time, enabling:
-/// - Cross-file symbol resolution
-/// - Duplicate detection
-/// - Import validation
-///
-/// Runtime MLIR values are tracked separately during codegen.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SymbolTable {
-    pub symbols: HashMap<Intern<String>, Symbol>,
-}
-
-impl SymbolTable {
-    pub fn new() -> Self {
-        Self {
-            symbols: HashMap::new(),
-        }
-    }
-
-    pub fn insert(&mut self, symbol: Symbol) {
-        self.symbols.insert(symbol.name, symbol);
-    }
-
-    pub fn get(&self, name: &Intern<String>) -> Option<&Symbol> {
-        self.symbols.get(name)
-    }
-
-    pub fn contains(&self, name: &Intern<String>) -> bool {
-        self.symbols.contains_key(name)
-    }
-
-    /// Returns conflicting symbols (names that exist in both).
-    pub fn merge(&mut self, other: SymbolTable) -> Vec<Symbol> {
-        let mut conflicts = Vec::new();
-
-        for (name, symbol) in other.symbols {
-            if let std::collections::hash_map::Entry::Vacant(e) = self.symbols.entry(name) {
-                e.insert(symbol);
-            } else {
-                conflicts.push(symbol);
-            }
-        }
-
-        conflicts
-    }
-
-    pub fn from_file(file: &FileAst, source_path: PathBuf) -> Self {
-        Self::from_file_filtered(file, source_path, false)
-    }
-
-    pub fn from_file_public(file: &FileAst, source_path: PathBuf) -> Self {
-        Self::from_file_filtered(file, source_path, true)
-    }
-
-    fn from_file_filtered(file: &FileAst, source_path: PathBuf, public_only: bool) -> Self {
-        let mut table = Self::new();
-
-        for tag_name in file.tags.keys() {
-            if public_only && file.private_tags.contains(tag_name) {
-                continue;
-            }
-            table.insert(Symbol {
-                name: *tag_name,
-                source_file: source_path.to_path_buf(),
-                kind: SymbolKind::Tag(*tag_name),
-            });
-        }
-
-        for (def_name, bind) in &file.defs {
-            if public_only && file.private_defs.contains(def_name) {
-                continue;
-            }
-            let source_path = source_path.clone();
-            let symbol = if bind.params.is_some() {
-                Symbol {
-                    name: *def_name,
-                    source_file: source_path,
-                    kind: SymbolKind::Function(*def_name),
-                }
-            } else {
-                Symbol {
-                    name: *def_name,
-                    source_file: source_path,
-                    kind: SymbolKind::Bind(*def_name),
-                }
-            };
-            table.insert(symbol);
-        }
-
-        table
-    }
-}
+pub use crate::definitions::DefMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SymbolAlias {
@@ -161,11 +39,29 @@ pub struct FileAst {
     pub symbol_alias_spans: Vec<SpanId>,
     /// Span table mapping SpanId → Span (byte ranges).
     pub span_table: SpanTable,
+    pub line_breaks: Vec<usize>,
+    pub blank_lines: Vec<usize>,
     /// Parse-time warnings (e.g. `name Ty` then `name := expr`).
     pub parse_warnings: Vec<diagnostic::Diagnostic>,
+    pub todo_holes: Vec<diagnostic::Span>,
 }
 
 impl FileAst {
+    pub fn hole_diagnostics(&self, category: diagnostic::Category) -> Vec<diagnostic::Diagnostic> {
+        self.todo_holes
+            .iter()
+            .map(|span| {
+                // unfilled-hole
+                diagnostic::Diagnostic::new(DiagnosticCode::UnfilledHole, "unfilled #todo hole")
+                    .with_category(category)
+                    .with_help(
+                        "replace #todo with an implementation before materializing or compiling",
+                    )
+                    .at_span(*span)
+            })
+            .collect()
+    }
+
     pub fn with_semantic_origin(mut self, semantic_origin: FileSemanticOrigin) -> Self {
         self.semantic_origin = Some(semantic_origin);
         self
@@ -192,16 +88,17 @@ impl FileAst {
         let mut names: Vec<_> = self
             .defs
             .keys()
-            .filter(|n| !self.private_defs.contains(n))
-            .copied()
+            .filter(|n| !self.private_defs.contains(&n.0))
+            .map(|id| id.0)
             .collect();
         names.sort();
+        names.dedup();
         names
     }
 
     pub fn contains_public_symbol(&self, name: &Intern<String>) -> bool {
         (self.tags.contains_key(name) && !self.private_tags.contains(name))
-            || (self.defs.contains_key(name) && !self.private_defs.contains(name))
+            || (self.defs.groups().contains_key(name) && !self.private_defs.contains(name))
     }
 
     pub fn public_symbol_names(&self) -> Vec<Intern<String>> {
@@ -215,7 +112,7 @@ impl FileAst {
     /// Remove `private` tags and defs so importers only see the public API (after [`crate::qualify_module_defs`]).
     pub fn strip_private_for_importer(mut self) -> Self {
         self.tags.retain(|k, _| !self.private_tags.contains(k));
-        self.defs.retain(|k, _| !self.private_defs.contains(k));
+        self.defs.retain(|k, _| !self.private_defs.contains(&k.0));
         self.private_tags.clear();
         self.private_defs.clear();
         self
@@ -277,20 +174,14 @@ impl Hash for FileAst {
         for k in def_keys {
             k.hash(state);
             self.defs[k].hash(state);
-            self.private_defs.contains(k).hash(state);
+            self.private_defs.contains(&k.0).hash(state);
         }
         self.exprs.hash(state);
         self.symbol_aliases.hash(state);
         self.symbol_alias_spans.hash(state);
         self.span_table.hash(state);
+        self.todo_holes.hash(state);
     }
-}
-
-/// Duplicate top-level name when merging compilation units.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MergeConflict {
-    Tag { name: Intern<String> },
-    Def { name: Intern<String> },
 }
 
 impl FileAst {
@@ -309,27 +200,7 @@ impl FileAst {
             self.defs.insert(name, bind);
         }
         self.parse_warnings.extend(other.parse_warnings);
-    }
-
-    /// Like [`merge_from`], but returns an error if `other` introduces a tag or def that already exists.
-    pub fn merge_from_checked(&mut self, other: FileAst) -> Result<(), MergeConflict> {
-        for name in other.tags.keys() {
-            if self.tags.contains_key(name) {
-                return Err(MergeConflict::Tag { name: *name });
-            }
-        }
-        for name in other.defs.keys() {
-            if self.defs.contains_key(name) {
-                return Err(MergeConflict::Def { name: *name });
-            }
-        }
-        for (name, declare) in other.tags {
-            self.tags.insert(name, declare);
-        }
-        for (name, bind) in other.defs {
-            self.defs.insert(name, bind);
-        }
-        Ok(())
+        self.todo_holes.extend(other.todo_holes);
     }
 }
 
@@ -343,7 +214,7 @@ impl FileAst {
             return Some(span.start()..span.end());
         }
         self.defs.iter().find_map(|(k, bind)| {
-            let s = k.as_str();
+            let s = k.0.as_str();
             if s == name || (s.contains('.') && s.split('.').next_back() == Some(name)) {
                 let span = span_table.get(bind.name_span);
                 Some(span.start()..span.end())
@@ -460,7 +331,7 @@ impl FileAst {
                         | crate::ParameterKind::Inferred { ty } => {
                             Self::collect_refs_expr(&ty.value, name, span_table, out);
                         }
-                        crate::ParameterKind::Generic => {}
+                        crate::ParameterKind::Generic | crate::ParameterKind::Proposition(_) => {}
                     }
                 }
             }
@@ -541,13 +412,6 @@ impl FileAst {
         }
     }
 
-    pub fn compute_content_hash(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.hash(&mut hasher);
-        hasher.finish()
-    }
-
     /// Returns the most deeply nested expression containing `byte_pos`.
     /// Searches top-level expressions and all bind bodies.
     pub fn expr_at_byte(&self, byte_pos: usize) -> Option<(&Expr, SpanId)> {
@@ -562,6 +426,25 @@ impl FileAst {
             let result = self.find_expr_in_bind_value(&bind.value, byte_pos);
             if result.is_some() {
                 return result;
+            }
+        }
+        for decl in self.tags.values() {
+            let crate::DeclareValue::Has(members) = &decl.value else {
+                continue;
+            };
+            for member in members {
+                let body = match member {
+                    crate::HasMember::Function(function) => &function.body,
+                    crate::HasMember::Property(property) => &property.body,
+                };
+                let Some(body) = body else { continue };
+                let value = match body {
+                    crate::HasMemberBody::Overrideable(value)
+                    | crate::HasMemberBody::Final(value) => value,
+                };
+                if let Some(expr) = self.find_expr_in_bind_value(value, byte_pos) {
+                    return Some(expr);
+                }
             }
         }
         None
@@ -593,23 +476,9 @@ impl FileAst {
                 if span.contains(byte_pos) {
                     let path_text = span.extract(source);
                     let rel_pos = byte_pos - span.start();
-                    let bytes = path_text.as_bytes();
-                    let mut start = rel_pos;
-                    let mut end = rel_pos;
-                    fn is_word_char(b: u8) -> bool {
-                        (b as char).is_alphanumeric() || b == b'_'
-                    }
-                    while start > 0 && is_word_char(bytes[start - 1]) {
-                        start -= 1;
-                    }
-                    while end < bytes.len() && is_word_char(bytes[end]) {
-                        end += 1;
-                    }
-                    if start < end {
-                        Some(path_text[start..end].to_string())
-                    } else {
-                        None
-                    }
+                    path_text
+                        .word_byte_range(rel_pos)
+                        .map(|(start, end)| path_text[start..end].to_string())
                 } else {
                     None
                 }

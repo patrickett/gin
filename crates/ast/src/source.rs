@@ -23,13 +23,9 @@ impl LineIndex {
     ///
     /// Time: O(n) where n is the number of bytes in source.
     pub fn new(source: &str) -> Self {
-        let mut line_starts = vec![0];
-        for (i, b) in source.bytes().enumerate() {
-            if b == b'\n' {
-                line_starts.push(i + 1);
-            }
+        Self {
+            line_starts: source.compute_line_starts(),
         }
-        Self { line_starts }
     }
 
     /// Return the number of lines in the source (1 + newline count).
@@ -109,19 +105,6 @@ impl LineIndex {
             None
         }
     }
-
-    /// Convert a byte range into an LSP-compatible (start, end) position pair.
-    pub fn byte_range_to_positions(
-        &self,
-        source: &str,
-        start: usize,
-        end: usize,
-    ) -> ((u32, u32), (u32, u32)) {
-        (
-            self.byte_to_position(source, start),
-            self.byte_to_position(source, end),
-        )
-    }
 }
 
 /// Extension trait providing source-text utility methods on `str`.
@@ -140,9 +123,6 @@ pub trait SourceExt {
     /// Column is interpreted as UTF-16 code units (LSP specification).
     fn position_to_byte_offset(&self, line: u32, character: u32) -> Option<usize>;
 
-    /// Check whether the given (line, character) position falls inside a `--` line comment.
-    fn is_in_comment(&self, line: u32, character: u32) -> bool;
-
     /// Extract the identifier word at `byte_pos`.
     fn word_at_byte_offset(&self, byte_pos: usize) -> Option<String>;
 
@@ -152,9 +132,6 @@ pub trait SourceExt {
     /// Return the (start, end) byte range of the identifier word at `byte_pos`.
     /// Returns `None` when the cursor is not on an identifier character.
     fn word_byte_range(&self, byte_pos: usize) -> Option<(usize, usize)>;
-
-    /// Get the character at a (line, character) position.
-    fn get_char_at_position(&self, line: u32, character: u32) -> Option<char>;
 
     /// Check whether `byte_pos` falls on a line that already has `--` before it.
     fn is_comment_at(&self, byte_pos: usize) -> bool;
@@ -256,13 +233,6 @@ impl SourceExt for str {
         (utf16_units == character).then_some(line_start + self[line_start..].len())
     }
 
-    fn is_in_comment(&self, line: u32, character: u32) -> bool {
-        let Some(byte_pos) = self.position_to_byte_offset(line, character) else {
-            return false;
-        };
-        self.is_comment_at(byte_pos)
-    }
-
     fn word_at_byte_offset(&self, byte_pos: usize) -> Option<String> {
         let (start, end) = self.word_byte_range(byte_pos)?;
         Some(self[start..end].to_string())
@@ -294,11 +264,6 @@ impl SourceExt for str {
             return None;
         }
         Some((start, end))
-    }
-
-    fn get_char_at_position(&self, line: u32, character: u32) -> Option<char> {
-        let byte_idx = self.position_to_byte_offset(line, character)?;
-        self.as_bytes().get(byte_idx).map(|&b| b as char)
     }
 }
 

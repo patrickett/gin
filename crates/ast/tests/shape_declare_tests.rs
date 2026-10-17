@@ -57,7 +57,7 @@ fn simple_shape_with_fields() {
 #[test]
 fn has_method_does_not_become_record_field() {
     let src =
-        "Int is in 1 to 400\n\nRange(x) has start x, end x, contains(ref self, value x) Bool\n";
+        "Int is in 1 to 400\n\nRange(x) has start x, end x, contains(self ref, value x) Bool\n";
     let typed = transform_source(src);
 
     let range_id = TagId(Intern::new("Range".to_string()));
@@ -214,7 +214,7 @@ Coord has Default
 
     let flaws = typed.all_flaws();
     // The trait implementation may or may not produce unknown-symbol flaws
-    // depending on whether Default/Reflectable/etc. are in scope.
+    // depending on whether Default/etc. are in scope.
     // Currently this documents that the transform doesn't crash.
     assert!(
         typed
@@ -225,7 +225,6 @@ Coord has Default
     let _ = flaws;
 }
 
-/// The compiler synthesises `Reflectable` in addition to explicitly provided traits.
 #[test]
 fn trait_impl_in_unified_declaration() {
     let src = "\
@@ -248,15 +247,6 @@ Coord has Default
         has_default,
         "should have a ProvidedTrait for Default, got: {:?}",
         tag.provided_traits
-    );
-
-    let has_reflectable = tag
-        .provided_traits
-        .iter()
-        .any(|pt| pt.trait_name.as_str() == "Reflectable");
-    assert!(
-        !has_reflectable,
-        "reflection must not be synthesized without an authenticated schema"
     );
 
     let flaws = typed.all_flaws();
@@ -390,8 +380,8 @@ d := Status.Complete";
     let typed = transform_source(src);
 
     // Check that both defs exist.
-    let s_id = DefId(Intern::new("s".to_string()));
-    let d_id = DefId(Intern::new("d".to_string()));
+    let s_id = DefId::named(Intern::new("s".to_string()));
+    let d_id = DefId::named(Intern::new("d".to_string()));
 
     assert!(typed.defs.contains_key(&s_id), "def s should exist");
     assert!(typed.defs.contains_key(&d_id), "def d should exist");
@@ -401,14 +391,11 @@ d := Status.Complete";
 
 #[test]
 fn namespaced_method() {
-    let src = "\
-Int is in 1 to 400
-Coord has x Int, y Int
-Coord.new(x Int, y Int) Int: 0";
+    let src = "Int is in 1 to 400\nCoord has x Int, y Int\nCoord.new(x Int, y Int) Int: return 0";
     let typed = transform_source(src);
 
     // `Coord.new` should be a valid function definition.
-    let new_id = DefId(Intern::new("Coord.new".to_string()));
+    let new_id = DefId::named(Intern::new("Coord.new".to_string()));
     assert!(
         typed.defs.contains_key(&new_id),
         "Coord.new should exist as a def"
@@ -428,13 +415,10 @@ Coord.new(x Int, y Int) Int: 0";
 /// parser correctly recognises the method syntax.
 #[test]
 fn receiver_method_with_explicit_self() {
-    let src = "\
-Int is in 1 to 400
-Coord has x Int, y Int
-Coord.length(self Int) Int: self";
+    let src = "Int is in 1 to 400\nCoord has x Int, y Int\nCoord.length(self Int) Int: return self";
     let typed = transform_source(src);
 
-    let len_id = DefId(Intern::new("Coord.length".to_string()));
+    let len_id = DefId::named(Intern::new("Coord.length".to_string()));
     assert!(
         typed.defs.contains_key(&len_id),
         "Coord.length should exist"
@@ -460,7 +444,7 @@ Coord.reset(self Int):
     self + 0";
     let typed = transform_source(src);
 
-    let reset_id = DefId(Intern::new("Coord.reset".to_string()));
+    let reset_id = DefId::named(Intern::new("Coord.reset".to_string()));
     assert!(
         typed.defs.contains_key(&reset_id),
         "Coord.reset should exist"

@@ -2,22 +2,7 @@ use crate::Pattern;
 use crate::expr::{Condition, Expr, Typed};
 use crate::span::{Spanned, SubSpan};
 
-/// Exhaustive conditional expression.
-///
-/// Boolean condition form:
-/// ```gin
-/// when n % 15 = 0 then print("FizzBuzz")
-///      n % 05 = 0 then print("Fizz")
-///      n % 03 = 0 then print("Buzz")
-///      else print(n)
-/// ```
-///
-/// Pattern matching form:
-/// ```gin
-/// when value
-///     is Some(x) then x
-///     is None    then 0
-/// ```
+/// Ordered conditional cases with an optional shared subject.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WhenExpr {
     /// Subject expression for pattern matching (e.g., `when self`)
@@ -35,7 +20,7 @@ pub enum WhenArm {
         body: Box<Typed<Expr>>,
         arm_span: SubSpan,
     },
-    /// Pattern match: `is <pattern> then <body>` — a dedicated [`Pattern`] node.
+    /// Shared-subject pattern: `<pattern> then <body>`.
     Is {
         pattern: Box<Spanned<Pattern>>,
         body: Box<Typed<Expr>>,

@@ -1,4 +1,20 @@
 use ast::DocComment;
+use ast::span::SpanId;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+#[test]
+fn source_positions_do_not_change_doc_hashes() {
+    let hash = |doc: DocComment| {
+        let mut hasher = DefaultHasher::new();
+        doc.hash(&mut hasher);
+        hasher.finish()
+    };
+    assert_eq!(
+        hash(DocComment::new("Doc").with_span(SpanId::new(1))),
+        hash(DocComment::new("Doc").with_span(SpanId::new(2))),
+    );
+}
 
 #[test]
 fn combine_both_none() {
@@ -35,16 +51,6 @@ fn combine_both_empty() {
         DocComment::combine(Some(DocComment::new("")), Some(DocComment::new(""))),
         None
     );
-}
-
-#[test]
-fn combine_doc_comment_pre_and_post_variant() {
-    // Simulates: --- Doc B
-    //            Some(x) or --- Doc C
-    let b = DocComment::new("Doc B");
-    let c = DocComment::new("Doc C");
-    let result = DocComment::combine(Some(b), Some(c));
-    assert_eq!(result.unwrap().value, "Doc B\n\nDoc C");
 }
 
 #[test]

@@ -3,11 +3,12 @@
 //! Also provides variant shape and parameter kind surface formatting for use
 //! by hover, diagnostics, and code generation.
 
+use internment::Intern;
 use std::fmt;
 
 use ast::expr::Expr;
 use ast::parameter::ParameterKind;
-use ast::{Pattern, TypeExpr};
+use ast::{Pattern, Typed};
 
 pub trait ExprFormatExt {
     fn format_surface(&self) -> String;
@@ -27,49 +28,57 @@ impl ExprFormatExt for Expr {
 
     fn write_surface(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Expr::Todo => write!(f, "#todo"),
+            Expr::ResultValues(values) if values.is_empty() => write!(f, "()"),
             Expr::Binary(binary) if binary.op == ast::BinOp::LogicalOr => {
                 binary.lhs.value.write_surface(f)?;
                 write!(f, " or ")?;
                 binary.rhs.value.write_surface(f)
             }
+            Expr::Binary(binary) => {
+                write!(f, "(")?;
+                binary.lhs.value.write_surface(f)?;
+                write!(f, " {} ", binary.op.symbol())?;
+                binary.rhs.value.write_surface(f)?;
+                write!(f, ")")
+            }
+            Expr::Negate(inner) => {
+                write!(f, "-")?;
+                inner.value.write_surface(f)
+            }
             Expr::AnonymousTag(name) => write!(f, "{}", name.as_str()),
+            Expr::SelfRef => write!(f, "self"),
+            Expr::RecordGet { base, field } => {
+                base.value.write_surface(f)?;
+                write!(f, ".{field}")
+            }
             Expr::FnCall(call) => {
-                write!(f, "{}", call.path.value.root.as_str())?;
-                for segment in &call.path.value.segments {
-                    write!(f, ".{}", segment.as_str())?;
-                }
-                if let Some(args) = &call.args
-                    && !args.is_empty()
+                let args = call.args.as_deref();
+                let args = if call.syntax == ast::CallSyntax::Receiver {
+                    let (receiver, args) =
+                        args.and_then(|args| args.split_first()).ok_or(fmt::Error)?;
+                    receiver.value.write_surface(f)?;
+                    write!(f, ".")?;
+                    Some(args)
+                } else {
+                    args
+                };
+                write!(f, "{}", call.path.value.to_qualified_string())?;
+                if let Some(args) = args
+                    && (!args.is_empty() || call.syntax == ast::CallSyntax::Receiver)
                 {
-                    write!(f, "(")?;
-                    for (index, arg) in args.iter().enumerate() {
-                        if index > 0 {
-                            write!(f, ", ")?;
-                        }
-                        arg.value.write_surface(f)?;
-                    }
-                    write!(f, ")")?;
+                    write_expr_list(f, "(", ")", args)?;
                 }
                 Ok(())
             }
             Expr::TagCall(call) => {
                 if let Some(path) = &call.qual_path {
-                    write!(f, "{}", path.value.root.as_str())?;
-                    for segment in &path.value.segments {
-                        write!(f, ".{}", segment.as_str())?;
-                    }
+                    write!(f, "{}", path.value.to_qualified_string())?;
                 } else {
                     write!(f, "{}", call.name.as_str())?;
                 }
                 if !call.args.is_empty() {
-                    write!(f, "(")?;
-                    for (index, arg) in call.args.iter().enumerate() {
-                        if index > 0 {
-                            write!(f, ", ")?;
-                        }
-                        arg.value.write_surface(f)?;
-                    }
-                    write!(f, ")")?;
+                    write_expr_list(f, "(", ")", &call.args)?;
                 }
                 Ok(())
             }
@@ -86,16 +95,7 @@ impl ExprFormatExt for Expr {
                 write!(f, "@")?;
                 inner.value.write_surface(f)
             }
-            Expr::ArrayLit(values) | Expr::List(values) => {
-                write!(f, "[")?;
-                for (index, value) in values.iter().enumerate() {
-                    if index > 0 {
-                        write!(f, ", ")?;
-                    }
-                    value.value.write_surface(f)?;
-                }
-                write!(f, "]")
-            }
+            Expr::ArrayLit(values) | Expr::List(values) => write_expr_list(f, "[", "]", values),
             Expr::SequenceLiteral(ast::SequenceLiteral::Elements(elems)) => {
                 write!(f, "[")?;
                 for (index, elem) in elems.iter().enumerate() {
@@ -116,6 +116,20 @@ impl ExprFormatExt for Expr {
                 count.value.write_surface(f)?;
                 write!(f, "]")
             }
+            Expr::DomainOf(inner) => {
+                write!(f, "domain of {}", inner.value.format_surface())
+            }
+            Expr::IntegerDomain(inner) => {
+                write!(f, "is in ")?;
+                inner.value.write_surface(f)
+            }
+            Expr::Emit { code, arguments } => {
+                write!(f, "#emit(")?;
+                code.value.write_surface(f)?;
+                write!(f, ", ")?;
+                arguments.value.write_surface(f)?;
+                write!(f, ")")
+            }
             Expr::Range(range) => {
                 range.start.value.write_surface(f)?;
                 write!(f, " to ")?;
@@ -123,6 +137,57 @@ impl ExprFormatExt for Expr {
             }
             other => write!(f, "{other:?}"),
         }
+    }
+}
+
+fn write_expr_list(
+    f: &mut fmt::Formatter<'_>,
+    open: &str,
+    close: &str,
+    exprs: &[Typed<Expr>],
+) -> fmt::Result {
+    write!(f, "{open}")?;
+    for (index, expr) in exprs.iter().enumerate() {
+        if index > 0 {
+            write!(f, ", ")?;
+        }
+        expr.value.write_surface(f)?;
+    }
+    write!(f, "{close}")
+}
+
+fn write_params(
+    f: &mut impl fmt::Write,
+    name: &str,
+    params: &[(Intern<String>, ParameterKind)],
+) -> fmt::Result {
+    write!(f, "{name}(")?;
+    for (index, (param_name, kind)) in params.iter().enumerate() {
+        if index > 0 {
+            write!(f, ", ")?;
+        }
+        write_param(f, param_name.as_str(), kind)?;
+    }
+    write!(f, ")")
+}
+
+fn write_param(f: &mut impl fmt::Write, name: &str, kind: &ParameterKind) -> fmt::Result {
+    match kind {
+        ParameterKind::Tagged(sp) => {
+            let surface = sp.value.format_surface();
+            if surface == name {
+                write!(f, "{surface}")
+            } else {
+                write!(f, "{name} {surface}")
+            }
+        }
+        ParameterKind::ValueParam { ty } => write!(f, "{name} {}", ty.value.format_surface()),
+        ParameterKind::Inferred { ty } => {
+            write!(f, "{name} {}: ?", ty.value.format_surface())
+        }
+        ParameterKind::Generic => write!(f, "{name}"),
+        ParameterKind::Proposition(predicate) => write!(f, "{name} is {predicate}"),
+        ParameterKind::Default(expr) => write!(f, "{name}: {:?}", expr.value),
     }
 }
 
@@ -135,40 +200,11 @@ impl PatternFormatExt for Pattern {
         match self {
             Pattern::Invalid => "<invalid>".to_string(),
             Pattern::Nominal(name, _) => name.as_str().to_string(),
-            Pattern::Qualified(path) => {
-                let mut out = path.value.root.as_str().to_string();
-                for segment in &path.value.segments {
-                    out.push('.');
-                    out.push_str(segment.as_str());
-                }
-                out
-            }
+            Pattern::Qualified(path) => path.value.to_qualified_string(),
             Pattern::Generic { name, params, .. } => {
-                let params = params
-                    .iter()
-                    .map(|(param_name, kind)| match kind {
-                        ParameterKind::Tagged(sp) => {
-                            let surface = sp.value.format_surface();
-                            if surface == param_name.as_str() {
-                                surface
-                            } else {
-                                format!("{} {}", param_name.as_str(), surface)
-                            }
-                        }
-                        ParameterKind::ValueParam { ty } => {
-                            format!("{} {}", param_name.as_str(), ty.value.format_surface())
-                        }
-                        ParameterKind::Inferred { ty } => {
-                            format!("{} {}: ?", param_name.as_str(), ty.value.format_surface())
-                        }
-                        ParameterKind::Generic => param_name.as_str().to_string(),
-                        ParameterKind::Default(expr) => {
-                            format!("{}: {:?}", param_name.as_str(), expr.value)
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("{}({})", name.as_str(), params)
+                let mut out = String::new();
+                let _ = write_params(&mut out, name.as_str(), params);
+                out
             }
             Pattern::Literal(lit, _) => lit.to_string(),
             Pattern::Pointer(inner) => format!("@{}", inner.value.format_variant_shape()),
@@ -198,183 +234,6 @@ impl PatternFormatExt for Pattern {
     }
 }
 
-/// Extension trait providing surface formatting methods on [`TypeExpr`].
-pub trait TypeExprFormatExt {
-    /// Format this type expression to a string using the canonical Gin surface representation.
-    fn format_surface(&self) -> String;
-
-    /// Write this type expression surface representation to a formatter.
-    fn write_surface(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
-
-    /// Format this type expression as a union variant shape string.
-    fn format_variant_shape(&self) -> String;
-
-    /// Write this type expression as a union variant shape to a formatter.
-    fn write_variant_shape(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
-}
-
-impl TypeExprFormatExt for TypeExpr {
-    fn format_surface(&self) -> String {
-        struct Fmt<'a>(&'a TypeExpr);
-        impl fmt::Display for Fmt<'_> {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.write_surface(f)
-            }
-        }
-        Fmt(self).to_string()
-    }
-
-    fn write_surface(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TypeExpr::Nominal(name, _) => write!(f, "{}", name.as_str()),
-            TypeExpr::Qualified(path) => {
-                write!(f, "{}", path.root.as_str())?;
-                for seg in &path.segments {
-                    write!(f, ".{}", seg.as_str())?;
-                }
-                Ok(())
-            }
-            TypeExpr::Generic { name, params, .. } => {
-                write!(f, "{}(", name.as_str())?;
-                let mut first = true;
-                for (k, v) in params.iter() {
-                    if !first {
-                        write!(f, ", ")?;
-                    }
-                    first = false;
-                    match v {
-                        ParameterKind::Tagged(sp) => {
-                            let te = &sp.value;
-                            let surface = te.format_surface();
-                            // Positional type arg (key equals mangled type name):
-                            // just show the type. Named param (key differs): show key + type.
-                            if surface == k.as_str() {
-                                write!(f, "{surface}")?;
-                            } else {
-                                write!(f, "{} ", k.as_str())?;
-                                write!(f, "{surface}")?;
-                            }
-                        }
-                        ParameterKind::ValueParam { ty } => {
-                            write!(f, "{} ", k.as_str())?;
-                            ty.value.write_surface(f)?;
-                        }
-                        ParameterKind::Inferred { ty } => {
-                            write!(f, "{} ", k.as_str())?;
-                            ty.value.write_surface(f)?;
-                            write!(f, ": ?")?;
-                        }
-                        ParameterKind::Default(expr) => {
-                            write!(f, "{}: {expr:?}", k.as_str())?;
-                        }
-                        ParameterKind::Generic => {
-                            write!(f, "{}", k.as_str())?;
-                        }
-                    }
-                }
-                write!(f, ")")
-            }
-            TypeExpr::Literal(..) => write!(f, "<type>"),
-            TypeExpr::Pointer(inner) => {
-                write!(f, "@")?;
-                inner.value.write_surface(f)
-            }
-            TypeExpr::Ref {
-                inner,
-                mutable,
-                group,
-            } => {
-                if *mutable {
-                    write!(f, "mut")?;
-                } else {
-                    write!(f, "ref")?;
-                }
-                if let Some(group) = group {
-                    write!(f, "{{{group}}}")?;
-                }
-                write!(f, " ")?;
-                inner.value.write_surface(f)
-            }
-            TypeExpr::Unit => write!(f, "()"),
-            TypeExpr::InRange { bounds, .. } => write!(f, "{bounds}"),
-        }
-    }
-
-    fn format_variant_shape(&self) -> String {
-        struct Fmt<'a>(&'a TypeExpr);
-        impl fmt::Display for Fmt<'_> {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.write_variant_shape(f)
-            }
-        }
-        Fmt(self).to_string()
-    }
-
-    fn write_variant_shape(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TypeExpr::Generic { name, params, .. } => {
-                write!(f, "{}(", name.as_str())?;
-                let mut first = true;
-                for (k, v) in params {
-                    if !first {
-                        write!(f, ", ")?;
-                    }
-                    first = false;
-                    match v {
-                        ParameterKind::Tagged(sp) => {
-                            let type_str = sp.value.format_surface();
-                            if type_str == k.as_str() {
-                                write!(f, "{}", type_str)?;
-                            } else {
-                                write!(f, "{} {}", k.as_str(), type_str)?;
-                            }
-                        }
-                        ParameterKind::ValueParam { ty } => {
-                            write!(f, "{} {}", k.as_str(), ty.value.format_surface())?;
-                        }
-                        ParameterKind::Inferred { ty } => {
-                            write!(f, "{} {}: ?", k.as_str(), ty.value.format_surface())?;
-                        }
-                        ParameterKind::Generic => write!(f, "{}", k.as_str())?,
-                        ParameterKind::Default(expr) => write!(f, "{}: {:?}", k.as_str(), expr)?,
-                    }
-                }
-                write!(f, ")")
-            }
-            TypeExpr::Nominal(name, _) => write!(f, "{}", name.as_str()),
-            TypeExpr::Qualified(path) => {
-                write!(f, "{}", path.root.as_str())?;
-                for seg in &path.segments {
-                    write!(f, ".{}", seg.as_str())?;
-                }
-                Ok(())
-            }
-            TypeExpr::Literal(lit, _) => write!(f, "{lit}"),
-            TypeExpr::Pointer(inner) => {
-                write!(f, "@")?;
-                inner.value.write_variant_shape(f)
-            }
-            TypeExpr::Ref {
-                inner,
-                mutable,
-                group,
-            } => {
-                if *mutable {
-                    write!(f, "mut")?;
-                } else {
-                    write!(f, "ref")?;
-                }
-                if let Some(group) = group {
-                    write!(f, "{{{group}}}")?;
-                }
-                write!(f, " ")?;
-                inner.value.write_variant_shape(f)
-            }
-            TypeExpr::Unit => write!(f, "()"),
-            TypeExpr::InRange { bounds, .. } => write!(f, "{bounds}"),
-        }
-    }
-}
 #[cfg(test)]
 #[path = "../../tests/type_expr_tests.rs"]
 mod tests;

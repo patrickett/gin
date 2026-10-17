@@ -3,7 +3,8 @@
 //! These functions are purely structural — they inspect `ast` types and
 //! produce `diagnostic` values without needing any type information.
 
-use diagnostic::{Category, Diagnostic, DiagnosticCode};
+use diagnostic::code::{BindingCode, SyntaxCode};
+use diagnostic::{Category, Diagnostic};
 
 use crate::span::SpanTable;
 use crate::{Bind, BindValue};
@@ -16,16 +17,16 @@ impl Bind {
             return None;
         }
         let suggested = name.to_lower_snake_case();
-        Some(Diagnostic {
-            code: DiagnosticCode::from("parse-bind-name-not-snake-case"),
-            message: format!("bind name `{name}` should be lower snake_case"),
-            help_on_span: None,
-            help: Some(format!("rename the bind to `{suggested}`")),
-            category: Category::Warn,
-            span: span_table.get(self.name_span),
-            related: Vec::new(),
-            args: Vec::new(),
-        })
+        Some(
+            // parse-bind-name-not-snake-case
+            Diagnostic::new(
+                SyntaxCode::BindingNameNotSnakeCase,
+                format!("bind name `{name}` should be lower snake_case"),
+            )
+            .with_help(format!("rename the bind to `{suggested}`"))
+            .with_category(Category::Warn)
+            .at_span(span_table.get(self.name_span)),
+        )
     }
 }
 
@@ -88,16 +89,16 @@ impl BindWarningsExt for [Bind] {
             for bind in self.iter().skip(1) {
                 if bind.is_constant() {
                     let name = bind.name.as_str().to_string();
-                    diags.push(Diagnostic {
-                        code: DiagnosticCode::from("type-const-bind-after-declare"),
-                        message: format!("`{name}` was previously declared but is now defined with `:=`; use `:` for a rebindable bind"),
-                        help_on_span: None,
-                        help: Some(format!("change to `{name}: ...` to make it rebindable")),
-                        category: Category::Warn,
-                        span: span_table.get(bind.name_span),
-                        related: Vec::new(),
-                        args: Vec::new(),
-                    });
+                    diags.push(
+                        // type-const-bind-after-declare
+                        Diagnostic::new(
+                            BindingCode::ConstantAfterDeclaration,
+                            format!("`{name}` was previously declared but is now defined with `:=`; use `:` for a rebindable bind"),
+                        )
+                        .with_help(format!("change to `{name}: ...` to make it rebindable"))
+                        .with_category(Category::Warn)
+                        .at_span(span_table.get(bind.name_span)),
+                    );
                     break;
                 }
             }

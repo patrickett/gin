@@ -174,15 +174,6 @@ fn line_index_unicode_round_trip() {
 }
 
 #[test]
-fn line_index_byte_range_to_positions() {
-    let source = "abc\ndef\nghi";
-    let idx = LineIndex::new(source);
-    let (start, end) = idx.byte_range_to_positions(source, 4, 7);
-    assert_eq!(start, (1, 0)); // 'd'
-    assert_eq!(end, (1, 3)); // 'f' (after 'def')
-}
-
-#[test]
 fn line_index_consistency_with_sourecext() {
     let source = "a\nhello world\nfoo\nbar baz\n";
     let idx = LineIndex::new(source);

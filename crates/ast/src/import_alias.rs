@@ -17,9 +17,6 @@ type AliasMap = HashMap<Intern<String>, Spanned<ModPath>>;
 impl FileAst {
     /// Rewrite expressions so imported symbols can be referenced by their bare names.
     pub fn apply_symbol_aliases(&mut self) {
-        if self.symbol_aliases.is_empty() {
-            return;
-        }
         let alias_map = self.build_alias_map();
         let namespaces = self
             .uses
@@ -45,6 +42,48 @@ impl FileAst {
             alias_spans: Vec::new(),
         };
         let _ = walk_file_ast_mut(&mut folder, self);
+        for declaration in self.tags.values_mut() {
+            let mut aliases = folder.alias_map.clone();
+            if let Some(params) = &declaration.params {
+                for name in params.keys() {
+                    aliases.remove(name);
+                }
+            }
+            match &mut declaration.value {
+                crate::DeclareValue::Refinement(predicate) => {
+                    rewrite_constraint_names(predicate, &aliases)
+                }
+                crate::DeclareValue::Has(members) => {
+                    for member in members.iter() {
+                        if let crate::HasMember::Property(field) = member {
+                            aliases.remove(&field.name);
+                        }
+                    }
+                    for member in members {
+                        if let crate::HasMember::Property(field) = member
+                            && let Some(predicate) = &mut field.refinement
+                        {
+                            rewrite_constraint_names(predicate, &aliases);
+                        }
+                        if let crate::HasMember::Function(function) = member {
+                            let mut aliases = aliases.clone();
+                            for name in function.params.keys() {
+                                aliases.remove(name);
+                            }
+                            for predicate in function.param_refinements.values_mut() {
+                                rewrite_constraint_names(predicate, &aliases);
+                            }
+                            for proof in &mut function.payload_postconditions {
+                                let mut aliases = aliases.clone();
+                                aliases.remove(&proof.name);
+                                rewrite_proof_names(&mut proof.proposition, &aliases);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         self.symbol_alias_spans = folder.alias_spans;
     }
 }
@@ -69,7 +108,9 @@ impl Expr {
     fn apply_alias(&mut self, alias_map: &AliasMap) {
         match self {
             Expr::FnCall(call) => {
-                call.path.apply_alias(alias_map);
+                if call.syntax == crate::CallSyntax::Path {
+                    call.path.apply_alias(alias_map);
+                }
                 if let Some(args) = &mut call.args {
                     for arg in args {
                         arg.value.apply_alias(alias_map);
@@ -100,15 +141,6 @@ impl Expr {
 
 impl Folder for ImportAliasFolder {
     fn visit_bind(&mut self, bind: &mut Bind) -> ControlFlow<()> {
-        for attribute in bind.attributes.raw_attributes.iter_mut().flatten() {
-            if let crate::AttributeItem::Call { name, args, .. } = attribute
-                && matches!(name.as_str(), "machine")
-            {
-                for arg in args {
-                    self.visit_expr(arg)?;
-                }
-            }
-        }
         let mut aliases = Vec::new();
         let mut namespaces = Vec::new();
         if let Some(params) = &bind.params {
@@ -121,10 +153,30 @@ impl Folder for ImportAliasFolder {
                 }
             }
         }
+        for predicate in bind.param_refinements.values_mut() {
+            rewrite_constraint_names(predicate, &self.alias_map);
+        }
+        if let Some(predicate) = &mut bind.return_refinement {
+            rewrite_constraint_names(predicate, &self.alias_map);
+        }
+        for proof in &mut bind.payload_postconditions {
+            let alias = self.alias_map.remove(&proof.name);
+            rewrite_proof_names(&mut proof.proposition, &self.alias_map);
+            if let Some(alias) = alias {
+                self.alias_map.insert(proof.name, alias);
+            }
+        }
         let result = walk_bind_mut(self, bind);
         self.alias_map.extend(aliases);
         self.namespaces.extend(namespaces);
         result
+    }
+
+    fn visit_return(&mut self, ret: &mut crate::Return) -> ControlFlow<()> {
+        if let Some(proof) = &mut ret.postcondition {
+            rewrite_proof_names(&mut proof.value, &self.alias_map);
+        }
+        walk_return_mut(self, ret)
     }
 
     fn visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
@@ -185,6 +237,11 @@ impl Folder for ImportAliasFolder {
 
     fn visit_condition(&mut self, condition: &mut crate::Condition) -> ControlFlow<()> {
         match condition {
+            crate::Condition::Proposition { subject } => self.visit_expr(&mut subject.value),
+            crate::Condition::Compare { left, right, .. } => {
+                self.visit_expr(&mut left.value)?;
+                self.visit_expr(&mut right.value)
+            }
             crate::Condition::Is { subject, pattern } => {
                 self.visit_expr(&mut subject.value)?;
                 pattern.value.apply_alias(&self.alias_map);
@@ -199,7 +256,9 @@ impl Folder for ImportAliasFolder {
     }
 
     fn visit_fn_call(&mut self, call: &mut FnCall) -> ControlFlow<()> {
-        if let Some(span) = call.path.apply_alias(&self.alias_map) {
+        if call.syntax == crate::CallSyntax::Path
+            && let Some(span) = call.path.apply_alias(&self.alias_map)
+        {
             self.alias_spans.push(span);
         }
         walk_fn_call_mut(self, call)
@@ -211,6 +270,23 @@ impl Folder for ImportAliasFolder {
         }
         walk_tag_call_mut(self, tc)
     }
+}
+
+fn rewrite_proof_names(proof: &mut crate::ProofProposition, aliases: &AliasMap) {
+    let mut predicate = crate::PredicateExpr::Proposition(Box::new(proof.clone()));
+    rewrite_constraint_names(&mut predicate, aliases);
+    let crate::PredicateExpr::Proposition(value) = predicate else {
+        unreachable!()
+    };
+    *proof = *value;
+}
+
+fn rewrite_constraint_names(predicate: &mut crate::PredicateExpr, aliases: &AliasMap) {
+    crate::ty::walk_predicate_names(predicate, &mut |name| {
+        if let Some(target) = aliases.get(name) {
+            *name = Intern::new(target.value.to_qualified_string());
+        }
+    });
 }
 
 impl Pattern {

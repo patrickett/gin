@@ -9,6 +9,7 @@ use support::transform_source;
 #[test]
 fn duplicate_field_name_reported() {
     let src = "\
+Int is in 0 to 255
 Coord has x Int, y Int, z Int
 p := Coord(x: 1, x: 2, y: 3, z: 4)
 ";
@@ -27,6 +28,7 @@ p := Coord(x: 1, x: 2, y: 3, z: 4)
 #[test]
 fn unknown_field_name_reported() {
     let src = "\
+Int is in 0 to 255
 Coord has x Int, y Int, z Int
 p := Coord(x: 1, y: 2, w: 3)
 ";
@@ -47,6 +49,7 @@ p := Coord(x: 1, y: 2, w: 3)
 #[test]
 fn missing_field_reported() {
     let src = "\
+Int is in 0 to 255
 Coord has x Int, y Int, z Int
 p := Coord(x: 1, y: 2)
 ";
@@ -65,6 +68,7 @@ p := Coord(x: 1, y: 2)
 #[test]
 fn field_type_mismatch_reported() {
     let src = "\
+Int is in 0 to 255
 Coord has x Int, y Int, z Int
 p := Coord(x: \"hello\", y: 2, z: 3)
 ";
@@ -72,8 +76,10 @@ p := Coord(x: \"hello\", y: 2, z: 3)
     let flaws = typed.all_flaws();
 
     let has_type_mismatch = flaws.iter().any(|(_, f)| {
-        f.code.slug() == "type-mismatch"
-            || (f.message.contains("type") && f.message.contains("mismatch"))
+        matches!(
+            f.code.slug().as_str(),
+            "type-mismatch" | "type-text-literal-mismatch"
+        ) || (f.message.contains("type") && f.message.contains("mismatch"))
     });
     assert!(
         has_type_mismatch,

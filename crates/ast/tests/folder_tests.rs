@@ -1,6 +1,5 @@
 use ast::folder::{Visitor, walk_expr};
-use ast::{AsmOperandBinding, Expr, Literal, SpanId, Typed};
-use internment::Intern;
+use ast::{Expr, Literal, SpanId, Typed};
 use std::ops::ControlFlow;
 
 #[test]
@@ -34,7 +33,7 @@ fn fixed_array_allocation_visits_initializer_and_size() {
 }
 
 #[test]
-fn assembly_visitor_traverses_specification_and_named_operands() {
+fn emission_visitor_traverses_code_and_arguments() {
     struct Nodes(usize);
 
     impl Visitor for Nodes {
@@ -44,15 +43,15 @@ fn assembly_visitor_traverses_specification_and_named_operands() {
         }
     }
 
-    let expr = Expr::Asm {
-        specification: Box::new(Typed::infer(
+    let expr = Expr::Emit {
+        code: Box::new(Typed::infer(
             Expr::Lit(Literal::String("spec".into())),
             SpanId::INVALID,
         )),
-        operands: vec![AsmOperandBinding {
-            name: Intern::from_ref("value"),
-            value: Typed::infer(Expr::Lit(Literal::Int(1.into())), SpanId::INVALID),
-        }],
+        arguments: Box::new(Typed::infer(
+            Expr::Lit(Literal::Int(1.into())),
+            SpanId::INVALID,
+        )),
     };
     let mut nodes = Nodes(0);
     let _ = nodes.visit_expr(&expr);

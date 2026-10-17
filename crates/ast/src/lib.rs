@@ -5,17 +5,18 @@
 pub mod expr;
 pub mod warnings;
 pub use expr::{
-    AsmOperandBinding, AttributeItem, BinOp, Binary, Bind, BindAttributes, BindOperator, BindValue,
-    BundleExportImport, COMPILER_QUERY_NAMES, Complexity, ComplexityExpr, Condition, Expr, FnCall,
-    ForInLoop, FormatPart, FormatString, IfExpr, Import, ImportSource, Literal, LocalBundleImport,
-    Loop, LoopEnum, ModuleImport, NamedResult, OperatorRole, Range, Return, SequenceElement,
-    SequenceLiteral, TagCall, Typed, WhenArm, WhenExpr, WhileLoop,
+    AttributeItem, BinOp, Binary, Bind, BindAttributes, BindOperator, BindValue,
+    BundleExportImport, COMPILER_QUERY_NAMES, CallSyntax, Complexity, ComplexityExpr, Condition,
+    Expr, FnCall, ForInLoop, FormatPart, FormatString, IfExpr, Import, ImportSource, Literal,
+    LocalBundleImport, Loop, LoopEnum, ModuleImport, NamedResult, OperatorRole,
+    PayloadPostcondition, Range, Return, SequenceElement, SequenceLiteral, TagCall, Typed, WhenArm,
+    WhenExpr, WhileLoop,
 };
 
+mod definitions;
+pub use definitions::{DefinitionId, OverloadGroups};
 mod file_ast;
-pub use file_ast::{
-    DefMap, FileAst, MergeConflict, MethodMap, Symbol, SymbolAlias, SymbolKind, SymbolTable, TagMap,
-};
+pub use file_ast::{DefMap, FileAst, SymbolAlias, TagMap};
 
 mod import_alias;
 
@@ -28,9 +29,7 @@ pub mod group_path;
 pub use group_path::GroupPath;
 
 pub mod parameter;
-pub use parameter::{
-    GroupParam, ParamConvention, ParamInfo, ParamSlot, Parameter, ParameterKind, Parameters,
-};
+pub use parameter::{GroupParam, ParamConvention, ParamSlot, Parameter, ParameterKind, Parameters};
 
 pub mod type_decl;
 pub use type_decl::TypeNameExt;
@@ -40,10 +39,13 @@ pub use normal_expr::{
     BinderId, BinderOwner, DependentArgId, NormalExpr, TargetQueryKind, TypeReference,
 };
 
+pub mod query;
+pub use query::QueryKind;
+
 pub mod integer;
 
 pub mod const_value;
-pub use const_value::{ConstValue, TypeConstraint};
+pub use const_value::ConstValue;
 
 pub mod folder;
 

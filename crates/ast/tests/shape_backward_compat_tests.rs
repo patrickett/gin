@@ -98,11 +98,7 @@ Allocator has
 /// 11.3 — Record shape with constructor (namespaced constructor method).
 #[test]
 fn record_with_constructor() {
-    let src = "\
-Int is in 1 to 400
-String has bytes List(Byte)
-Coord has x Int, y Int
-Coord.make(x Int, y Int) Coord: Coord(x, y)";
+    let src = "Int is in 1 to 400\nString has bytes List(Byte)\nCoord has x Int, y Int\nCoord.make(x Int, y Int) Coord: return Coord(x, y)";
     let typed = transform_source(src);
 
     // Tags should exist.
@@ -112,7 +108,7 @@ Coord.make(x Int, y Int) Coord: Coord(x, y)";
     }
 
     // `Coord.make` should be a valid function def.
-    let make_id = DefId(Intern::new("Coord.make".to_string()));
+    let make_id = DefId::named(Intern::new("Coord.make".to_string()));
     assert!(typed.defs.contains_key(&make_id), "Coord.make should exist");
 
     let flaws = typed.all_flaws();

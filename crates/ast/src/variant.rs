@@ -10,18 +10,28 @@ use crate::{Expr, Pattern};
 pub enum Variant {
     External {
         shape: Box<Spanned<Pattern>>,
+        discriminant: Option<Spanned<i256::I256>>,
         /// Optional `-> result_type` (e.g. `Nil -> Vec(x, 0)`).
         result_ty: Option<Box<Spanned<Expr>>>,
     },
     Local {
         doc_comment: Option<DocComment>,
         shape: Box<Spanned<Pattern>>,
+        discriminant: Option<Spanned<i256::I256>>,
         /// Optional `-> result_type` (e.g. `Cons -> Vec(x, n + 1)`).
         result_ty: Option<Box<Spanned<Expr>>>,
     },
 }
 
 impl Variant {
+    pub fn discriminant(&self) -> Option<&Spanned<i256::I256>> {
+        match self {
+            Self::External { discriminant, .. } | Self::Local { discriminant, .. } => {
+                discriminant.as_ref()
+            }
+        }
+    }
+
     pub fn shape(&self) -> &Spanned<Pattern> {
         match self {
             Variant::External { shape, .. } | Variant::Local { shape, .. } => shape,
@@ -54,7 +64,19 @@ impl Hash for Variant {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
         match self {
-            Self::External { shape, .. } | Self::Local { shape, .. } => shape.hash(state),
+            Self::External {
+                shape,
+                discriminant,
+                ..
+            }
+            | Self::Local {
+                shape,
+                discriminant,
+                ..
+            } => {
+                shape.hash(state);
+                discriminant.as_ref().map(|value| value.value).hash(state);
+            }
         }
     }
 }

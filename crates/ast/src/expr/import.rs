@@ -16,22 +16,23 @@ pub struct BundleExportImport {
     pub span: SpanId,
 }
 
-/// `use dep a, b as c` — dependency `dep` must be in `flask.jsonc`.
+/// `use dep a, b as c` — dependency `dep` must be in `mod.flask`.
 /// Also supports `use dep.folder a, b` — `path_segments` are logical folder
 /// modules under the dependency root (e.g. `primitive` in `use self.primitive Bool`).
 /// Also supports `use 'path' a, b as c` — when `local_path` is set,
 /// the import resolves against the local filesystem path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LocalBundleImport {
-    /// Dependency name from flask.jsonc (e.g. "core" in `use core …`).
+    /// Dependency name from mod.flask (e.g. "core" in `use core …`).
     pub root: Intern<String>,
     /// Folder path under the dependency or quoted local root.
     pub path_segments: Vec<Intern<String>>,
+    pub module_path: Option<Box<Spanned<ModPath>>>,
     pub members: Vec<BundleExportImport>,
 
     pub span: SpanId,
     /// When set, this is a `use 'path' items` import. The resolver looks up
-    /// `path` on the local filesystem instead of in flask.jsonc dependencies.
+    /// `path` on the local filesystem instead of in mod.flask dependencies.
     pub local_path: Option<PathBuf>,
 }
 
@@ -49,7 +50,7 @@ pub struct Import(pub Vec<ModuleImport>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ImportSource {
-    /// Top level name defined in `flask.jsonc` ex. `use http.*`
+    /// Top level name defined in `mod.flask` ex. `use http.*`
     Package(Spanned<ModPath>),
     /// Path to a module on disk ex. `use '../http' as http`
     Local(PathBuf, SpanId),
@@ -154,14 +155,6 @@ impl BundleExportImport {
 impl LocalBundleImport {
     /// Dot-separated qualifier for flat member imports, e.g. `self.primitive`.
     pub fn qualifier_prefix(&self) -> String {
-        if self.path_segments.is_empty() {
-            return self.root.to_string();
-        }
-        let mut s = self.root.to_string();
-        for seg in &self.path_segments {
-            s.push('.');
-            s.push_str(seg.as_str());
-        }
-        s
+        crate::path::join_dotted(self.root, &self.path_segments)
     }
 }

@@ -1,7 +1,7 @@
 //! Comptime function inlining at runtime call sites and flow constant propagation on `:`.
 
 use ast::ConstValue;
-use flask::CompileTarget;
+use flask::{CompileTarget, TargetTriple};
 use internment::Intern;
 use parser::cursor::TokenCursor;
 use typecheck::prepare_parse_ast;
@@ -10,15 +10,21 @@ use typecheck::typed::CallCapability;
 use typecheck::{BindBody, DefId, ExprId, FileId, TypedExprKind};
 
 fn transform_prepared(source: &str) -> typecheck::TypedFileAst {
-    let mut file_ast = TokenCursor::parse_source(source);
-    let _ = prepare_parse_ast(&mut file_ast, &CompileTarget::Library);
-    transform(&file_ast, FileId(0), &TransformCtx::new())
+    let mut file_ast = TokenCursor::parse_source(&format!(
+        "{source}\n{}",
+        test_fixtures::preludes::INT_PRELUDE
+    ));
+    let target = CompileTarget::Concrete(TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap());
+    let _ = prepare_parse_ast(&mut file_ast, &target);
+    let mut context = TransformCtx::new();
+    context.compile_target = target;
+    transform(&file_ast, FileId(0), &context)
 }
 
 fn main_body_exprs(typed: &typecheck::TypedFileAst) -> Vec<ExprId> {
     let main = typed
         .defs
-        .get(&DefId(Intern::from_ref("main")))
+        .get(&DefId::named(Intern::from_ref("main")))
         .expect("main def");
     match &main.body {
         BindBody::Expr(id) => vec![*id],
@@ -85,15 +91,17 @@ fn literal_string_values_for_name<'a>(
 
 #[test]
 fn comptime_fn_inlined_in_main_with_type_arg() {
-    let typed =
-        transform_prepared("size_for(x Type) Int := 64\n\nmain:\n  n: size_for(Int)\n  return n\n");
+    let typed = transform_prepared(
+        "size_for(x) Int := return #size(x)\n\nmain:\n  n: size_for(Int)\n  return n\n",
+    );
     let size_for = typed
         .defs
-        .get(&DefId(Intern::from_ref("size_for")))
+        .values()
+        .find(|bind| bind.name.as_str().starts_with("size_for$specialized$"))
         .expect("size_for def in typed ast");
     assert!(
         size_for.is_constant && size_for.call_capability == CallCapability::StagePolymorphic,
-        "size_for must be a stage-polymorphic constant bind in typed defs"
+        "size_for must be a stage-polymorphic constant bind in typed defs: {size_for:?}"
     );
     let roots = main_body_exprs(&typed);
     assert!(
@@ -103,27 +111,27 @@ fn comptime_fn_inlined_in_main_with_type_arg() {
     );
     let n_values = literal_string_values_for_name(&typed, &roots, "n");
     assert_eq!(n_values.len(), 1);
-    assert!(matches!(n_values[0], ConstValue::Int(value) if *value == i256::I256::from(64)));
+    assert!(matches!(n_values[0], ConstValue::Int(value) if *value == i256::I256::from(8)));
 }
 
 #[test]
 fn comptime_fn_call_with_runtime_arg_reports_flaw() {
     let typed = transform_prepared(
-        "size_for(x Type) Int := 64\n\npick(x Int) Int:\n  return x\n\nseed() Int:\n  return 1\n\nmain:\n  n: size_for(pick(seed()))\n  return 0\n",
+        "size_for(x) Int := return #size(x)\n\npick(x Int) Int:\n  return x\n\nseed() Int:\n  return 1\n\nmain:\n  n: size_for(pick(seed()))\n  return 0\n",
     );
     assert!(
-        typed.all_flaws().iter().any(|(_, f)| {
-            f.code.slug() == "type-cannot-call-comptime-with-runtime-args"
-                && f.arg("fn_name") == Some("size_for")
-        }),
-        "expected CannotCallComptimeWithRuntimeArgs: {:?}",
+        typed
+            .all_flaws()
+            .iter()
+            .any(|(_, f)| { f.code.slug() == "type-generic-specialization" }),
+        "expected type argument rejection: {:?}",
         typed.all_flaws()
     );
 }
 
 #[test]
 fn rebindable_string_literal_updates_const_value() {
-    let typed = transform_prepared("main:\n  name: 'John'\n  name: 'Jane'\n  return 0\n");
+    let typed = transform_prepared("main:\n  name: 'John'\n  name:: 'Jane'\n  return 0\n");
     let roots = main_body_exprs(&typed);
     let values = literal_string_values_for_name(&typed, &roots, "name");
     assert_eq!(values.len(), 2);
@@ -133,7 +141,8 @@ fn rebindable_string_literal_updates_const_value() {
 
 #[test]
 fn comptime_fn_inlined_returning_negative_int() {
-    let typed = transform_prepared("neg_one() Int := -1\n\nmain:\n  n: neg_one()\n  return n\n");
+    let typed =
+        transform_prepared("neg_one() Int := return -1\n\nmain:\n  n: neg_one()\n  return n\n");
     let roots = main_body_exprs(&typed);
     assert!(
         !any_fn_call_named(&typed, &roots, "neg_one"),

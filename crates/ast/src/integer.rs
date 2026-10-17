@@ -1,3 +1,7 @@
+use diagnostic::DiagnosticCode;
+use diagnostic::code::{IntegerCode, TypeCode};
+mod containment;
+
 use std::num::NonZeroU32;
 
 use i256::I256;
@@ -54,20 +58,20 @@ impl FiniteHull {
         let width = if self.min >= zero {
             (I256::BITS - self.max.leading_zeros()).max(1)
         } else {
-            signed_width(self.min, self.max)
+            self.signed_width()
         };
         IntegerRepresentation::new(NonZeroU32::new(width).unwrap())
     }
-}
 
-fn signed_width(min: I256, max: I256) -> u32 {
-    for width in 1..I256::BITS {
-        let magnitude = I256::from(1) << (width - 1);
-        if min >= -magnitude && max < magnitude {
-            return width;
+    fn signed_width(&self) -> u32 {
+        for width in 1..I256::BITS {
+            let magnitude = I256::from(1) << (width - 1);
+            if self.min >= -magnitude && self.max < magnitude {
+                return width;
+            }
         }
+        I256::BITS
     }
-    I256::BITS
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -121,12 +125,29 @@ impl IntegerDomain {
     }
 
     pub fn from_refinement(predicate: &crate::ty::PredicateExpr) -> Self {
-        let predicate = flatten_refinement_conjunctions(predicate);
+        let predicate = predicate.flatten_conjunctions();
         let mut lower = None;
         let mut upper = None;
-        let fully_represented_by_bounds =
-            collect_refinement_bounds(&predicate, &mut lower, &mut upper);
+        let fully_represented_by_bounds = predicate.collect_bounds(&mut lower, &mut upper);
         if !fully_represented_by_bounds {
+            let predicates = match &predicate {
+                crate::ty::PredicateExpr::And(predicates) => predicates.as_slice(),
+                _ => std::slice::from_ref(&predicate),
+            };
+            let mut excluded = Vec::new();
+            let bounds_and_exclusions = predicates.iter().all(|predicate| {
+                if let crate::ty::PredicateExpr::Ne(value) = predicate {
+                    if let Some(value) = value.eval_integer() {
+                        excluded.push(value);
+                        return true;
+                    }
+                    return false;
+                }
+                predicate.collect_bounds(&mut lower, &mut upper)
+            });
+            if bounds_and_exclusions && let (Some(min), Some(max)) = (lower, upper) {
+                return Self::excluding(min, max, excluded).unwrap_or_else(Self::empty);
+            }
             let storage_hull = lower
                 .zip(upper)
                 .and_then(|(min, max)| FiniteHull::new(min, max));
@@ -160,7 +181,7 @@ impl IntegerDomain {
         subject: internment::Intern<String>,
     ) -> Self {
         let mut predicate = predicate.clone();
-        normalize_refinement_subject(&mut predicate, subject);
+        predicate.normalize_subject(subject);
         Self::from_refinement(&predicate)
     }
 
@@ -237,273 +258,324 @@ impl IntegerDomain {
         &self.predicate
     }
 
+    pub fn refine(&self, predicate: crate::ty::PredicateExpr) -> Self {
+        use crate::ty::PredicateExpr;
+        let mut predicates = match self.predicate() {
+            CanonicalPredicate::Hull(hull) | CanonicalPredicate::HullExcluding { hull, .. } => {
+                vec![
+                    PredicateExpr::Ge(hull.min().into()),
+                    PredicateExpr::Le(hull.max().into()),
+                ]
+            }
+            CanonicalPredicate::Structured(predicate) => vec![predicate.clone()],
+            _ => return self.clone(),
+        };
+        if let CanonicalPredicate::HullExcluding { excluded, .. } = self.predicate() {
+            predicates.extend(
+                excluded
+                    .iter()
+                    .map(|value| PredicateExpr::Ne((*value).into())),
+            );
+        }
+        predicates.push(predicate);
+        Self::from_refinement(&PredicateExpr::And(predicates))
+    }
+
     pub fn storage_hull(&self) -> Option<&FiniteHull> {
         self.storage_hull.as_ref()
     }
 
-    pub fn contains(&self, value: I256) -> bool {
+    pub fn closed_bounds(&self) -> Option<(NormalExpr, NormalExpr)> {
+        use crate::ty::PredicateExpr;
         match &self.predicate {
-            CanonicalPredicate::Empty => false,
-            CanonicalPredicate::Unbounded => true,
-            CanonicalPredicate::Symbolic(_) => false,
-            CanonicalPredicate::Structured(predicate) => {
-                structured_predicate_contains(predicate, value)
-            }
-            CanonicalPredicate::LowerBound { bound, inclusive } => {
-                if *inclusive {
-                    value >= *bound
-                } else {
-                    value > *bound
+            CanonicalPredicate::Hull(hull) => Some((hull.min().into(), hull.max().into())),
+            CanonicalPredicate::Structured(PredicateExpr::And(predicates)) => {
+                let mut lower = None;
+                let mut upper = None;
+                for predicate in predicates {
+                    match predicate {
+                        PredicateExpr::Ge(bound) if lower.is_none() => lower = Some(bound.clone()),
+                        PredicateExpr::Le(bound) if upper.is_none() => upper = Some(bound.clone()),
+                        _ => return None,
+                    }
                 }
+                lower.zip(upper)
             }
-            CanonicalPredicate::UpperBound { bound, inclusive } => {
-                if *inclusive {
-                    value <= *bound
-                } else {
-                    value < *bound
-                }
-            }
-            CanonicalPredicate::Hull(hull) => hull.contains(value),
-            CanonicalPredicate::HullExcluding { hull, excluded } => {
-                hull.contains(value) && excluded.binary_search(&value).is_err()
-            }
-            CanonicalPredicate::Union(predicates) => predicates.iter().any(|predicate| {
-                Self {
-                    predicate: predicate.clone(),
-                    storage_hull: self.storage_hull.clone(),
-                }
-                .contains(value)
+            _ => None,
+        }
+    }
+
+    pub fn contains(&self, value: I256) -> bool {
+        self.membership(value) == ContainmentProof::Proven
+    }
+
+    pub fn membership(&self, value: I256) -> ContainmentProof {
+        let result = match &self.predicate {
+            CanonicalPredicate::Empty => Some(false),
+            CanonicalPredicate::Unbounded => Some(true),
+            CanonicalPredicate::Symbolic(_) => None,
+            CanonicalPredicate::Structured(predicate) => predicate.contains(value),
+            CanonicalPredicate::LowerBound { bound, inclusive } => Some(if *inclusive {
+                value >= *bound
+            } else {
+                value > *bound
             }),
+            CanonicalPredicate::UpperBound { bound, inclusive } => Some(if *inclusive {
+                value <= *bound
+            } else {
+                value < *bound
+            }),
+            CanonicalPredicate::Hull(hull) => Some(hull.contains(value)),
+            CanonicalPredicate::HullExcluding { hull, excluded } => {
+                Some(hull.contains(value) && excluded.binary_search(&value).is_err())
+            }
+            CanonicalPredicate::Union(predicates) => {
+                let mut unknown = false;
+                for predicate in predicates {
+                    match (Self {
+                        predicate: predicate.clone(),
+                        storage_hull: None,
+                    })
+                    .membership(value)
+                    {
+                        ContainmentProof::Proven => return ContainmentProof::Proven,
+                        ContainmentProof::Unknown => unknown = true,
+                        ContainmentProof::Disproven => {}
+                    }
+                }
+                if unknown { None } else { Some(false) }
+            }
+        };
+        match result {
+            Some(true) => ContainmentProof::Proven,
+            Some(false) => ContainmentProof::Disproven,
+            None => ContainmentProof::Unknown,
         }
     }
 }
 
-fn flatten_refinement_conjunctions(
-    predicate: &crate::ty::PredicateExpr,
-) -> crate::ty::PredicateExpr {
-    let crate::ty::PredicateExpr::And(predicates) = predicate else {
-        return predicate.clone();
-    };
-    let mut flattened = Vec::new();
-    for predicate in predicates {
-        match flatten_refinement_conjunctions(predicate) {
-            crate::ty::PredicateExpr::And(children) => flattened.extend(children),
-            predicate => flattened.push(predicate),
-        }
-    }
-    crate::ty::PredicateExpr::And(flattened)
+trait TruthValue {
+    fn conjunction(self, other: Self) -> Self;
+    fn disjunction(self, other: Self) -> Self;
 }
 
-fn normalize_refinement_subject(
-    predicate: &mut crate::ty::PredicateExpr,
-    subject: internment::Intern<String>,
-) {
-    use crate::ty::PredicateExpr;
-    match predicate {
-        PredicateExpr::And(predicates) => {
-            for predicate in predicates {
-                normalize_refinement_subject(predicate, subject);
+impl TruthValue for Option<bool> {
+    fn conjunction(self, other: Self) -> Self {
+        match (self, other) {
+            (Some(false), _) | (_, Some(false)) => Some(false),
+            (Some(true), Some(true)) => Some(true),
+            _ => None,
+        }
+    }
+
+    fn disjunction(self, other: Self) -> Self {
+        match (self, other) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
+        }
+    }
+}
+
+impl NormalExpr {
+    fn eval_integer(&self) -> Option<I256> {
+        match self {
+            Self::Value(crate::ConstValue::Int(value)) => Some(*value),
+            Self::Add(left, right) => left.eval_integer()?.checked_add(right.eval_integer()?),
+            Self::Sub(left, right) => left.eval_integer()?.checked_sub(right.eval_integer()?),
+            Self::Mul(left, right) => left.eval_integer()?.checked_mul(right.eval_integer()?),
+            Self::Value(_) | Self::Var(_) | Self::Inferred(_) | Self::TargetQuery { .. } => None,
+        }
+    }
+}
+
+impl crate::ty::ProofTerm {
+    fn eval_integer(&self, candidate: I256) -> Option<I256> {
+        match self {
+            Self::Value(value) => Some(*value),
+            Self::Name(name) if name.as_str() == "self" => Some(candidate),
+            Self::Add(left, right) => Some(
+                left.eval_integer(candidate)?
+                    .wrapping_add(right.eval_integer(candidate)?),
+            ),
+            Self::Sub(left, right) => Some(
+                left.eval_integer(candidate)?
+                    .wrapping_sub(right.eval_integer(candidate)?),
+            ),
+            Self::Mul(left, right) => Some(
+                left.eval_integer(candidate)?
+                    .wrapping_mul(right.eval_integer(candidate)?),
+            ),
+            Self::Remainder(left, right) => {
+                let left = left.eval_integer(candidate)?;
+                let right = right.eval_integer(candidate)?;
+                (right != I256::from(0)).then(|| left % right)
+            }
+            Self::PowerOfTwo(inner) => {
+                let value = inner.eval_integer(candidate)?;
+                let power =
+                    value > I256::from(0) && (value & (value - I256::from(1))) == I256::from(0);
+                Some(I256::from(u8::from(power)))
+            }
+            Self::Name(_) | Self::TargetQuery { .. } => None,
+        }
+    }
+
+    fn normalize_subject(&mut self, subject: internment::Intern<String>) {
+        match self {
+            Self::Name(name) if *name == subject => {
+                *name = internment::Intern::from_ref("self");
+            }
+            Self::Add(left, right)
+            | Self::Sub(left, right)
+            | Self::Mul(left, right)
+            | Self::Remainder(left, right) => {
+                left.normalize_subject(subject);
+                right.normalize_subject(subject);
+            }
+            Self::PowerOfTwo(inner) => inner.normalize_subject(subject),
+            Self::Name(_) | Self::Value(_) | Self::TargetQuery { .. } => {}
+        }
+    }
+}
+
+impl crate::ty::ProofProposition {
+    fn holds(&self, candidate: I256) -> Option<bool> {
+        use crate::ProofRelation;
+        match self {
+            Self::Compare {
+                left,
+                relation,
+                right,
+            } => {
+                let left = left.eval_integer(candidate)?;
+                let right = right.eval_integer(candidate)?;
+                Some(match relation {
+                    ProofRelation::Equal => left == right,
+                    ProofRelation::NotEqual => left != right,
+                    ProofRelation::Less => left < right,
+                    ProofRelation::LessOrEqual => left <= right,
+                    ProofRelation::Greater => left > right,
+                    ProofRelation::GreaterOrEqual => left >= right,
+                })
+            }
+            Self::InRange { value, start, end } => {
+                let value = value.eval_integer(candidate)?;
+                let start = start.eval_integer(candidate)?;
+                let end = end.eval_integer(candidate)?;
+                Some(start <= value && value <= end)
+            }
+            Self::Not(inner) => inner.holds(candidate).map(|value| !value),
+            Self::And(left, right) => left.holds(candidate).conjunction(right.holds(candidate)),
+            Self::Or(left, right) => left.holds(candidate).disjunction(right.holds(candidate)),
+        }
+    }
+
+    fn normalize_subject(&mut self, subject: internment::Intern<String>) {
+        match self {
+            Self::Compare { left, right, .. } => {
+                left.normalize_subject(subject);
+                right.normalize_subject(subject);
+            }
+            Self::InRange { value, start, end } => {
+                value.normalize_subject(subject);
+                start.normalize_subject(subject);
+                end.normalize_subject(subject);
+            }
+            Self::Not(inner) => inner.normalize_subject(subject),
+            Self::And(left, right) | Self::Or(left, right) => {
+                left.normalize_subject(subject);
+                right.normalize_subject(subject);
             }
         }
-        PredicateExpr::Proposition(proposition) => {
-            normalize_proposition_subject(proposition, subject);
-        }
-        PredicateExpr::Lt(_)
-        | PredicateExpr::Gt(_)
-        | PredicateExpr::Le(_)
-        | PredicateExpr::Ge(_)
-        | PredicateExpr::Eq(_)
-        | PredicateExpr::Ne(_) => {}
     }
 }
 
-fn normalize_proposition_subject(
-    proposition: &mut crate::ProofProposition,
-    subject: internment::Intern<String>,
-) {
-    use crate::ProofProposition;
-    match proposition {
-        ProofProposition::Compare { left, right, .. } => {
-            normalize_proof_term_subject(left, subject);
-            normalize_proof_term_subject(right, subject);
-        }
-        ProofProposition::InRange { value, start, end } => {
-            normalize_proof_term_subject(value, subject);
-            normalize_proof_term_subject(start, subject);
-            normalize_proof_term_subject(end, subject);
-        }
-        ProofProposition::Not(inner) => normalize_proposition_subject(inner, subject),
-        ProofProposition::And(left, right) | ProofProposition::Or(left, right) => {
-            normalize_proposition_subject(left, subject);
-            normalize_proposition_subject(right, subject);
-        }
-    }
-}
-
-fn normalize_proof_term_subject(term: &mut crate::ProofTerm, subject: internment::Intern<String>) {
-    use crate::ProofTerm;
-    match term {
-        ProofTerm::Name(name) if *name == subject => {
-            *name = internment::Intern::from_ref("self");
-        }
-        ProofTerm::Add(left, right)
-        | ProofTerm::Sub(left, right)
-        | ProofTerm::Mul(left, right)
-        | ProofTerm::Remainder(left, right) => {
-            normalize_proof_term_subject(left, subject);
-            normalize_proof_term_subject(right, subject);
-        }
-        ProofTerm::PowerOfTwo(inner) => normalize_proof_term_subject(inner, subject),
-        ProofTerm::Name(_) | ProofTerm::Value(_) | ProofTerm::TargetQuery { .. } => {}
-    }
-}
-
-fn structured_predicate_contains(predicate: &crate::ty::PredicateExpr, value: I256) -> bool {
-    use crate::ty::PredicateExpr;
-    match predicate {
-        PredicateExpr::Lt(right) => eval_normal_expr(right).is_some_and(|right| value < right),
-        PredicateExpr::Gt(right) => eval_normal_expr(right).is_some_and(|right| value > right),
-        PredicateExpr::Le(right) => eval_normal_expr(right).is_some_and(|right| value <= right),
-        PredicateExpr::Ge(right) => eval_normal_expr(right).is_some_and(|right| value >= right),
-        PredicateExpr::Eq(right) => eval_normal_expr(right).is_some_and(|right| value == right),
-        PredicateExpr::Ne(right) => eval_normal_expr(right).is_some_and(|right| value != right),
-        PredicateExpr::And(predicates) => predicates
-            .iter()
-            .all(|predicate| structured_predicate_contains(predicate, value)),
-        PredicateExpr::Proposition(proposition) => eval_proposition(proposition, value),
-    }
-}
-
-fn eval_normal_expr(expr: &NormalExpr) -> Option<I256> {
-    match expr {
-        NormalExpr::Value(crate::ConstValue::Int(value)) => Some(*value),
-        NormalExpr::Add(left, right) => {
-            eval_normal_expr(left)?.checked_add(eval_normal_expr(right)?)
-        }
-        NormalExpr::Sub(left, right) => {
-            eval_normal_expr(left)?.checked_sub(eval_normal_expr(right)?)
-        }
-        NormalExpr::Mul(left, right) => {
-            eval_normal_expr(left)?.checked_mul(eval_normal_expr(right)?)
-        }
-        NormalExpr::Value(_)
-        | NormalExpr::Var(_)
-        | NormalExpr::Inferred(_)
-        | NormalExpr::TargetQuery { .. } => None,
-    }
-}
-
-fn eval_proposition(proposition: &crate::ProofProposition, candidate: I256) -> bool {
-    use crate::{ProofProposition, ProofRelation};
-    match proposition {
-        ProofProposition::Compare {
-            left,
-            relation,
-            right,
-        } => {
-            let Some(left) = eval_proof_term(left, candidate) else {
-                return false;
-            };
-            let Some(right) = eval_proof_term(right, candidate) else {
-                return false;
-            };
-            match relation {
-                ProofRelation::Equal => left == right,
-                ProofRelation::NotEqual => left != right,
-                ProofRelation::Less => left < right,
-                ProofRelation::LessOrEqual => left <= right,
-                ProofRelation::Greater => left > right,
-                ProofRelation::GreaterOrEqual => left >= right,
+impl crate::ty::PredicateExpr {
+    fn flatten_conjunctions(&self) -> Self {
+        let Self::And(predicates) = self else {
+            return self.clone();
+        };
+        let mut flattened = Vec::new();
+        for predicate in predicates {
+            match predicate.flatten_conjunctions() {
+                Self::And(children) => flattened.extend(children),
+                predicate => flattened.push(predicate),
             }
         }
-        ProofProposition::InRange { value, start, end } => {
-            let Some(value) = eval_proof_term(value, candidate) else {
-                return false;
-            };
-            let Some(start) = eval_proof_term(start, candidate) else {
-                return false;
-            };
-            let Some(end) = eval_proof_term(end, candidate) else {
-                return false;
-            };
-            start <= value && value <= end
-        }
-        ProofProposition::Not(inner) => !eval_proposition(inner, candidate),
-        ProofProposition::And(left, right) => {
-            eval_proposition(left, candidate) && eval_proposition(right, candidate)
-        }
-        ProofProposition::Or(left, right) => {
-            eval_proposition(left, candidate) || eval_proposition(right, candidate)
+        Self::And(flattened)
+    }
+
+    fn normalize_subject(&mut self, subject: internment::Intern<String>) {
+        match self {
+            Self::And(predicates) => {
+                for predicate in predicates {
+                    predicate.normalize_subject(subject);
+                }
+            }
+            Self::Proposition(proposition) => proposition.normalize_subject(subject),
+            Self::Lt(_) | Self::Gt(_) | Self::Le(_) | Self::Ge(_) | Self::Eq(_) | Self::Ne(_) => {}
         }
     }
-}
 
-fn eval_proof_term(term: &crate::ProofTerm, candidate: I256) -> Option<I256> {
-    use crate::ProofTerm;
-    match term {
-        ProofTerm::Value(value) => Some(*value),
-        ProofTerm::Name(name) if name.as_str() == "self" => Some(candidate),
-        ProofTerm::Add(left, right) => {
-            Some(eval_proof_term(left, candidate)?.wrapping_add(eval_proof_term(right, candidate)?))
+    fn contains(&self, value: I256) -> Option<bool> {
+        match self {
+            Self::Lt(right) => right.eval_integer().map(|right| value < right),
+            Self::Gt(right) => right.eval_integer().map(|right| value > right),
+            Self::Le(right) => right.eval_integer().map(|right| value <= right),
+            Self::Ge(right) => right.eval_integer().map(|right| value >= right),
+            Self::Eq(right) => right.eval_integer().map(|right| value == right),
+            Self::Ne(right) => right.eval_integer().map(|right| value != right),
+            Self::And(predicates) => {
+                let mut unknown = false;
+                for predicate in predicates {
+                    match predicate.contains(value) {
+                        Some(false) => return Some(false),
+                        None => unknown = true,
+                        Some(true) => {}
+                    }
+                }
+                (!unknown).then_some(true)
+            }
+            Self::Proposition(proposition) => proposition.holds(value),
         }
-        ProofTerm::Sub(left, right) => {
-            Some(eval_proof_term(left, candidate)?.wrapping_sub(eval_proof_term(right, candidate)?))
-        }
-        ProofTerm::Mul(left, right) => {
-            Some(eval_proof_term(left, candidate)?.wrapping_mul(eval_proof_term(right, candidate)?))
-        }
-        ProofTerm::Remainder(left, right) => {
-            let left = eval_proof_term(left, candidate)?;
-            let right = eval_proof_term(right, candidate)?;
-            (right != I256::from(0)).then(|| left % right)
-        }
-        ProofTerm::PowerOfTwo(inner) => {
-            let value = eval_proof_term(inner, candidate)?;
-            let power = value > I256::from(0) && (value & (value - I256::from(1))) == I256::from(0);
-            Some(I256::from(u8::from(power)))
-        }
-        ProofTerm::Name(_) | ProofTerm::TargetQuery { .. } => None,
     }
-}
 
-fn collect_refinement_bounds(
-    predicate: &crate::ty::PredicateExpr,
-    lower: &mut Option<I256>,
-    upper: &mut Option<I256>,
-) -> bool {
-    use crate::ty::PredicateExpr;
-
-    let value = eval_normal_expr;
-    match predicate {
-        PredicateExpr::Gt(expr) => value(expr)
-            .and_then(|value| value.checked_add(I256::from(1)))
-            .is_some_and(|value| {
+    fn collect_bounds(&self, lower: &mut Option<I256>, upper: &mut Option<I256>) -> bool {
+        match self {
+            Self::Gt(expr) => expr
+                .eval_integer()
+                .and_then(|value| value.checked_add(I256::from(1)))
+                .is_some_and(|value| {
+                    *lower = Some(lower.map_or(value, |current| current.max(value)));
+                    true
+                }),
+            Self::Ge(expr) => expr.eval_integer().is_some_and(|value| {
                 *lower = Some(lower.map_or(value, |current| current.max(value)));
                 true
             }),
-        PredicateExpr::Ge(expr) => value(expr).is_some_and(|value| {
-            *lower = Some(lower.map_or(value, |current| current.max(value)));
-            true
-        }),
-        PredicateExpr::Lt(expr) => value(expr)
-            .and_then(|value| value.checked_sub(I256::from(1)))
-            .is_some_and(|value| {
+            Self::Lt(expr) => expr
+                .eval_integer()
+                .and_then(|value| value.checked_sub(I256::from(1)))
+                .is_some_and(|value| {
+                    *upper = Some(upper.map_or(value, |current| current.min(value)));
+                    true
+                }),
+            Self::Le(expr) => expr.eval_integer().is_some_and(|value| {
                 *upper = Some(upper.map_or(value, |current| current.min(value)));
                 true
             }),
-        PredicateExpr::Le(expr) => value(expr).is_some_and(|value| {
-            *upper = Some(upper.map_or(value, |current| current.min(value)));
-            true
-        }),
-        PredicateExpr::Eq(expr) => value(expr).is_some_and(|value| {
-            *lower = Some(lower.map_or(value, |current| current.max(value)));
-            *upper = Some(upper.map_or(value, |current| current.min(value)));
-            true
-        }),
-        PredicateExpr::And(predicates) => predicates
-            .iter()
-            .all(|predicate| collect_refinement_bounds(predicate, lower, upper)),
-        PredicateExpr::Ne(_) | PredicateExpr::Proposition(_) => false,
+            Self::Eq(expr) => expr.eval_integer().is_some_and(|value| {
+                *lower = Some(lower.map_or(value, |current| current.max(value)));
+                *upper = Some(upper.map_or(value, |current| current.min(value)));
+                true
+            }),
+            Self::And(predicates) => predicates.iter().fold(true, |represented, predicate| {
+                let child_represented = predicate.collect_bounds(lower, upper);
+                represented && child_represented
+            }),
+            Self::Ne(_) | Self::Proposition(_) => false,
+        }
     }
 }
 
@@ -517,6 +589,49 @@ impl IntegerValidity {
 
     pub fn domain(&self) -> &IntegerDomain {
         &self.0
+    }
+
+    pub fn resolve_representation(
+        &self,
+        rule: &IntegerRepresentationRule,
+    ) -> Result<IntegerRepresentation, IntegerRepresentationError> {
+        let required = self
+            .domain()
+            .storage_hull()
+            .map(FiniteHull::inferred_representation)
+            .ok_or_else(|| match self.domain().predicate() {
+                CanonicalPredicate::Empty => IntegerRepresentationError::EmptyDomain,
+                _ => IntegerRepresentationError::UnboundedDomain,
+            })?;
+        let representation = match rule {
+            IntegerRepresentationRule::InferFromValidity => required,
+            IntegerRepresentationRule::ExactBits(CanonicalNaturalExpr::Value(width)) => {
+                IntegerRepresentation::new(*width)
+            }
+            IntegerRepresentationRule::ExactBits(CanonicalNaturalExpr::Symbolic(_)) => {
+                return Err(IntegerRepresentationError::UnresolvedWidth);
+            }
+        };
+        if representation.width() < required.width() {
+            return Err(IntegerRepresentationError::RepresentationTooSmall {
+                requested: representation,
+                required,
+            });
+        }
+        Ok(representation)
+    }
+
+    pub fn resolve_runtime_representation(
+        &self,
+        rule: &IntegerRepresentationRule,
+    ) -> Result<IntegerRepresentation, IntegerRepresentationError> {
+        let representation = self.resolve_representation(rule)?;
+        if !representation.is_runtime_supported() {
+            return Err(IntegerRepresentationError::RuntimeWidthUnsupported(
+                representation,
+            ));
+        }
+        Ok(representation)
     }
 }
 
@@ -536,76 +651,25 @@ pub enum ContainmentProof {
 }
 
 impl ContainmentProof {
-    pub fn diagnostic_code(self) -> Option<&'static str> {
+    pub fn diagnostic_code(self) -> Option<DiagnosticCode> {
         match self {
             Self::Proven => None,
-            Self::Disproven => Some("type-integer-narrowing-failed"),
-            Self::Unknown => Some("type-integer-narrowing-unproven"),
+            Self::Disproven => Some(DiagnosticCode::Type(TypeCode::Integer(
+                // type-integer-narrowing-failed
+                IntegerCode::NarrowingFailed,
+            ))),
+            Self::Unknown => Some(DiagnosticCode::Type(TypeCode::Integer(
+                // type-integer-narrowing-unproven
+                IntegerCode::NarrowingUnproven,
+            ))),
         }
     }
 }
 
-pub fn prove_containment(actual: &IntegerDomain, expected: &IntegerDomain) -> ContainmentProof {
-    if actual == expected {
-        return ContainmentProof::Proven;
+impl IntegerDomain {
+    pub fn prove_containment(&self, expected: &IntegerDomain) -> ContainmentProof {
+        containment::prove(self, expected)
     }
-    if matches!(actual.predicate(), CanonicalPredicate::Empty)
-        || matches!(expected.predicate(), CanonicalPredicate::Unbounded)
-    {
-        return ContainmentProof::Proven;
-    }
-    if let Some(actual_hull) = actual.storage_hull()
-        && actual_hull.min() == actual_hull.max()
-    {
-        return if expected.contains(actual_hull.min()) {
-            ContainmentProof::Proven
-        } else {
-            ContainmentProof::Disproven
-        };
-    }
-    if matches!(
-        actual.predicate(),
-        CanonicalPredicate::Symbolic(_) | CanonicalPredicate::Structured(_)
-    ) || matches!(
-        expected.predicate(),
-        CanonicalPredicate::Symbolic(_) | CanonicalPredicate::Structured(_)
-    ) {
-        return ContainmentProof::Unknown;
-    }
-    if matches!(actual.predicate(), CanonicalPredicate::Unbounded) {
-        return ContainmentProof::Disproven;
-    }
-    let (Some(actual_hull), Some(expected_hull)) = (actual.storage_hull(), expected.storage_hull())
-    else {
-        return ContainmentProof::Disproven;
-    };
-    if actual_hull.min() < expected_hull.min() || actual_hull.max() > expected_hull.max() {
-        return ContainmentProof::Disproven;
-    }
-    if let CanonicalPredicate::HullExcluding { excluded, .. } = expected.predicate()
-        && excluded.iter().any(|value| actual.contains(*value))
-    {
-        return ContainmentProof::Disproven;
-    }
-    ContainmentProof::Proven
-}
-
-pub fn proves_lossless_storage(
-    knowledge: &IntegerKnowledge,
-    target: IntegerRepresentation,
-) -> bool {
-    let required = match knowledge {
-        IntegerKnowledge::Exact(CanonicalIntegerExpr::Value(value)) => {
-            FiniteHull::new(*value, *value).map(|hull| hull.inferred_representation())
-        }
-        IntegerKnowledge::Domain(domain) => domain
-            .storage_hull()
-            .map(FiniteHull::inferred_representation),
-        IntegerKnowledge::Exact(CanonicalIntegerExpr::Symbolic(_))
-        | IntegerKnowledge::Unknown
-        | IntegerKnowledge::Poison => None,
-    };
-    required.is_some_and(|required| required.width() <= target.width())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -665,65 +729,81 @@ pub enum IntegerRepresentationError {
 }
 
 impl IntegerRepresentationError {
-    pub fn diagnostic_code(&self) -> &'static str {
+    pub fn diagnostic_code(&self) -> DiagnosticCode {
         match self {
             Self::EmptyDomain | Self::UnresolvedWidth => {
-                "type-integer-representation-width-invalid"
+                // type-integer-representation-width-invalid
+                DiagnosticCode::Type(TypeCode::Integer(IntegerCode::RepresentationWidthInvalid))
             }
-            Self::UnboundedDomain => "type-integer-refinement-requires-finite-bounds",
-            Self::RuntimeWidthUnsupported(_) => "type-integer-runtime-width-unsupported",
-            Self::RepresentationTooSmall { .. } => "type-integer-representation-too-small",
+            Self::UnboundedDomain => DiagnosticCode::Type(TypeCode::Integer(
+                // type-integer-refinement-requires-finite-bounds
+                IntegerCode::RefinementRequiresFiniteBounds,
+            )),
+            Self::RuntimeWidthUnsupported(_) => {
+                // type-integer-runtime-width-unsupported
+                DiagnosticCode::Type(TypeCode::Integer(IntegerCode::RuntimeWidthUnsupported))
+            }
+            Self::RepresentationTooSmall { .. } => {
+                // type-integer-representation-too-small
+                DiagnosticCode::Type(TypeCode::Integer(IntegerCode::RepresentationTooSmall))
+            }
         }
     }
-}
-
-pub fn resolve_representation(
-    validity: &IntegerValidity,
-    rule: &IntegerRepresentationRule,
-) -> Result<IntegerRepresentation, IntegerRepresentationError> {
-    let required = validity
-        .domain()
-        .storage_hull()
-        .map(FiniteHull::inferred_representation)
-        .ok_or_else(|| match validity.domain().predicate() {
-            CanonicalPredicate::Empty => IntegerRepresentationError::EmptyDomain,
-            _ => IntegerRepresentationError::UnboundedDomain,
-        })?;
-    let representation = match rule {
-        IntegerRepresentationRule::InferFromValidity => required,
-        IntegerRepresentationRule::ExactBits(CanonicalNaturalExpr::Value(width)) => {
-            IntegerRepresentation::new(*width)
-        }
-        IntegerRepresentationRule::ExactBits(CanonicalNaturalExpr::Symbolic(_)) => {
-            return Err(IntegerRepresentationError::UnresolvedWidth);
-        }
-    };
-    if representation.width() < required.width() {
-        return Err(IntegerRepresentationError::RepresentationTooSmall {
-            requested: representation,
-            required,
-        });
-    }
-    Ok(representation)
-}
-
-pub fn resolve_runtime_representation(
-    validity: &IntegerValidity,
-    rule: &IntegerRepresentationRule,
-) -> Result<IntegerRepresentation, IntegerRepresentationError> {
-    let representation = resolve_representation(validity, rule)?;
-    if !representation.is_runtime_supported() {
-        return Err(IntegerRepresentationError::RuntimeWidthUnsupported(
-            representation,
-        ));
-    }
-    Ok(representation)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ty::PredicateExpr;
+
+    #[test]
+    fn finite_refinements_canonicalize_exclusions_in_any_order() {
+        let expected = IntegerDomain::excluding((-128).into(), 127.into(), vec![0.into()]).unwrap();
+        for predicates in [
+            vec![
+                PredicateExpr::Ne(0_i128.into()),
+                PredicateExpr::Ge((-128_i128).into()),
+                PredicateExpr::Le(127_i128.into()),
+            ],
+            vec![
+                PredicateExpr::Ge((-128_i128).into()),
+                PredicateExpr::Le(127_i128.into()),
+                PredicateExpr::Ne(0_i128.into()),
+            ],
+        ] {
+            assert_eq!(
+                IntegerDomain::from_refinement(&PredicateExpr::And(predicates)),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn successive_guards_preserve_the_complete_intersection() {
+        let expected = IntegerDomain::excluding((-128).into(), 127.into(), vec![0.into()]).unwrap();
+        let actual = IntegerDomain::bounded((-32768).into(), 32767.into())
+            .unwrap()
+            .refine(PredicateExpr::And(vec![
+                PredicateExpr::Ge((-128_i128).into()),
+                PredicateExpr::Le(127_i128.into()),
+            ]))
+            .refine(PredicateExpr::Ne(0_i128.into()));
+        assert_eq!(
+            actual.prove_containment(&expected),
+            ContainmentProof::Proven
+        );
+        assert!(!actual.contains(0.into()));
+        let preserved = actual.refine(PredicateExpr::Le(100_i128.into()));
+        assert!(!preserved.contains(0.into()));
+        assert!(!preserved.contains(101.into()));
+        assert!(preserved.contains(100.into()));
+        assert_eq!(
+            IntegerDomain::bounded((-128).into(), 127.into())
+                .unwrap()
+                .prove_containment(&expected),
+            ContainmentProof::Disproven
+        );
+    }
 
     #[test]
     fn constant_arithmetic_bounds_establish_a_finite_signed_domain() {
@@ -743,11 +823,59 @@ mod tests {
     #[test]
     fn overflowing_bound_arithmetic_does_not_prove_a_wrapped_domain() {
         let overflow = NormalExpr::Add(Box::new(I256::MAX.into()), Box::new(1_i128.into()));
-        assert_eq!(eval_normal_expr(&overflow), None);
+        assert_eq!(overflow.eval_integer(), None);
         let domain = IntegerDomain::from_refinement(&PredicateExpr::And(vec![
             PredicateExpr::Ge(overflow),
             PredicateExpr::Le(127_i128.into()),
         ]));
         assert!(domain.storage_hull().is_none());
     }
+
+    #[test]
+    fn symbolic_bounds_distinguish_unknown_membership_from_disproven_membership() {
+        let predicates = vec![
+            PredicateExpr::Ge(0_i128.into()),
+            PredicateExpr::Le(NormalExpr::Var(internment::Intern::from_ref("maximum"))),
+        ];
+        for predicates in [predicates.clone(), predicates.into_iter().rev().collect()] {
+            let domain = IntegerDomain::from_refinement(&PredicateExpr::And(predicates));
+            assert_eq!(domain.membership((-1).into()), ContainmentProof::Disproven);
+            assert_eq!(domain.membership(0.into()), ContainmentProof::Unknown);
+        }
+        let domain = IntegerDomain::from_refinement(&PredicateExpr::And(vec![
+            PredicateExpr::Ge(0_i128.into()),
+            PredicateExpr::Le(NormalExpr::Var(internment::Intern::from_ref("maximum"))),
+        ]));
+        let upper_bounded = IntegerDomain::from_refinement(&PredicateExpr::And(vec![
+            PredicateExpr::Ge(NormalExpr::Var(internment::Intern::from_ref("minimum"))),
+            PredicateExpr::Le(0_i128.into()),
+        ]));
+        assert_eq!(
+            upper_bounded.membership(1.into()),
+            ContainmentProof::Disproven
+        );
+        assert_eq!(
+            upper_bounded.membership(0.into()),
+            ContainmentProof::Unknown
+        );
+        let zero = IntegerDomain::bounded(0.into(), 0.into()).unwrap();
+        assert_eq!(zero.prove_containment(&domain), ContainmentProof::Unknown);
+        assert!(domain.closed_bounds().is_some());
+    }
+
+    #[test]
+    fn range_projection_preserves_additional_domain_constraints() {
+        let domain = IntegerDomain::from_refinement(&PredicateExpr::And(vec![
+            PredicateExpr::Ge(0_i128.into()),
+            PredicateExpr::Le(NormalExpr::Var(internment::Intern::from_ref("maximum"))),
+            PredicateExpr::Ne(3_i128.into()),
+        ]));
+        assert!(domain.closed_bounds().is_none());
+        assert_eq!(domain.membership(3.into()), ContainmentProof::Disproven);
+        assert_eq!(domain.membership(2.into()), ContainmentProof::Unknown);
+    }
 }
+
+#[cfg(test)]
+#[path = "integer/containment_tests.rs"]
+mod containment_tests;

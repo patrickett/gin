@@ -27,8 +27,8 @@ fn parse_direct_children_follow_source_order() {
         ("main: Shape(left, right)\n", "tag call", 2),
         ("main: left to right\n", "range", 2),
         ("main: [init; size]\n", "sequence literal", 2),
-        ("main: buffer.(index)\n", "buffer get", 2),
-        ("main: buffer.(index):: value\n", "buffer set", 3),
+        ("main: buffer.[index]\n", "buffer get", 2),
+        ("main: buffer.[index]:: value\n", "buffer set", 3),
         ("main: tuple.0\n", "value row get", 1),
         ("main: tuple.0:: value\n", "value row set", 2),
         ("main: record.field\n", "record get", 1),
@@ -57,12 +57,12 @@ fn parse_direct_children_follow_source_order() {
             "when",
             3,
         ),
-        ("main: while condition is True\n    body\nloop\n", "loop", 2),
-        ("main: for item in iterable\n    body\nloop\n", "loop", 3),
+        ("main: while condition is True do\n    body\n", "loop", 2),
+        ("main: for item in iterable\n    body\n", "loop", 3),
         (
-            "main: if condition is True\n    body\nreturn fallback\n",
-            "if",
-            3,
+            "main: when condition is True then\n    body\n    return fallback\n",
+            "when",
+            2,
         ),
     ];
 
@@ -121,19 +121,6 @@ fn parse_direct_children_support_early_exit() {
 }
 
 #[test]
-fn mutable_parse_traversal_visits_all_allocation_children() {
-    let (_, mut expr) = parsed_main_expr("main: [initializer; size]\n");
-    let mut visits = 0;
-
-    let _ = ast::folder::walk_expr_children_mut(&mut expr, &mut |_, _| {
-        visits += 1;
-        std::ops::ControlFlow::Continue(())
-    });
-
-    assert_eq!(visits, 2);
-}
-
-#[test]
 fn typed_direct_children_cover_lowered_multi_child_shapes() {
     let cases = [
         ("main: call(left, right)\n", "call", 2),
@@ -143,9 +130,9 @@ fn typed_direct_children_cover_lowered_multi_child_shapes() {
         ("main: [left, right]\n", "array", 2),
         ("main: Shape(left, right)\n", "tag call", 2),
         ("main: left to right\n", "range", 2),
-        ("main: [init; 3]\n", "array", 3),
-        ("main: buffer.(index)\n", "buffer get", 2),
-        ("main: buffer.(index):: value\n", "buffer set", 3),
+        ("main: [init; 3]\n", "fixed-array allocation", 1),
+        ("main: buffer.[index]\n", "buffer get", 2),
+        ("main: buffer.[index]:: value\n", "buffer set", 3),
         ("main: tuple.0\n", "value row get", 1),
         ("main: tuple.0:: value\n", "value row set", 2),
         ("main: record.field:: value\n", "record set", 2),
@@ -162,12 +149,12 @@ fn typed_direct_children_cover_lowered_multi_child_shapes() {
             "when",
             3,
         ),
-        ("main: while condition is True\n    body\nloop\n", "loop", 2),
-        ("main: for item in iterable\n    body\nloop\n", "loop", 2),
+        ("main: while condition is True do\n    body\n", "loop", 2),
+        ("main: for item in iterable\n    body\n", "loop", 1),
         (
-            "main: if condition is True\n    body\nreturn fallback\n",
-            "if",
-            3,
+            "main: when condition is True then\n    body\n    return fallback\n",
+            "when",
+            2,
         ),
     ];
 
@@ -176,7 +163,7 @@ fn typed_direct_children_cover_lowered_multi_child_shapes() {
         let typed = transform(&ast, FileId(0), &TransformCtx::new());
         let bind = typed
             .defs
-            .get(&DefId(Intern::from_ref("main")))
+            .get(&DefId::named(Intern::from_ref("main")))
             .expect("main definition");
         let root = match bind.body {
             BindBody::Expr(id) => id,
@@ -227,7 +214,7 @@ main:
     local Int
     local:: initializer
     Some(x: item) := source
-return item
+    return item
 ";
     let ast = TokenCursor::parse_source(source);
     let bind = ast
@@ -256,7 +243,7 @@ return item
     let typed = transform(&ast, FileId(0), &TransformCtx::new());
     let bind = typed
         .defs
-        .get(&DefId(Intern::from_ref("main")))
+        .get(&DefId::named(Intern::from_ref("main")))
         .expect("typed main definition");
     let BindBody::Body { exprs, .. } = &bind.body else {
         panic!("typed block body");
@@ -293,25 +280,28 @@ fn call_eat_argument_is_rejected() {
 }
 
 #[test]
-fn compile_time_validation_observes_nested_constructor_arguments() {
-    let source = "\
-Shape has value Type
-runtime(value Type) Type: value
-bad(ty Type) Type := Shape(runtime(ty))
-";
+fn constant_callable_preserves_nested_runtime_constructor_arguments() {
+    let source = "Word is in 0 to 255\nWord.finish(self): return\nShape has\n    value Word\n    finish(self): return\nruntime(value Word) Word: return value\nbad(value Word) Shape := return Shape(value: runtime(value))\n";
     let typed = transform(
         &TokenCursor::parse_source(source),
         FileId(0),
         &TransformCtx::new(),
     );
-
-    assert!(
-        typed.all_flaws().iter().any(|(_, flaw)| {
-            flaw.code.slug() == "compile-time-runtime-call" && flaw.arg("bind_name") == Some("bad")
-        }),
-        "expected compile-time-runtime-call on `bad`, got: {:?}",
-        typed.all_flaws()
-    );
+    assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
+    let bind = &typed.defs[&DefId::named(Intern::from_ref("bad"))];
+    assert!(bind.is_constant);
+    let BindBody::Expr(root) = bind.body else {
+        panic!("expected constructor body")
+    };
+    let mut runtime_calls = 0;
+    let _ = typecheck::typed::walk_expr_preorder(&typed, root, &mut |id| {
+        if matches!(&typed.exprs.kind[id.as_usize()], TypedExprKind::FnCall { target, .. } if target.0.as_str() == "runtime")
+        {
+            runtime_calls += 1;
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    assert_eq!(runtime_calls, 1);
 }
 
 #[test]

@@ -7,5 +7,6 @@ use crate::span::SpanId;
 pub struct Return {
     /// Values returned by this statement, in declaration order.
     pub values: Vec<Typed<Expr>>,
+    pub postcondition: Option<Box<crate::Spanned<crate::ProofProposition>>>,
     pub span_id: SpanId,
 }

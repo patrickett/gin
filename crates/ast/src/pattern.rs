@@ -91,13 +91,29 @@ impl Pattern {
                     .iter()
                     .enumerate()
                     .map(|(index, arg)| {
+                        if let Expr::FnCall(call) = &arg.value
+                            && call.args.is_none()
+                            && call.path.value.segments.is_empty()
+                            && (call
+                                .path
+                                .value
+                                .root
+                                .as_str()
+                                .chars()
+                                .next()
+                                .is_some_and(|character| character.is_ascii_lowercase())
+                                || call.path.value.root.as_str() == "_")
+                        {
+                            return (call.path.value.root, ParameterKind::Generic);
+                        }
                         let name = Intern::new(format!("_{index}"));
                         (name, ParameterKind::Default(Box::new(arg.clone())))
                     })
                     .collect::<Vec<_>>();
                 let param_spans = params
                     .iter()
-                    .map(|(name, _)| (*name, SpanId::INVALID))
+                    .zip(&call.args)
+                    .map(|((name, _), arg)| (*name, arg.span_id))
                     .collect();
                 Self::Generic {
                     name: call.name,
@@ -143,25 +159,12 @@ impl Pattern {
     }
 
     pub fn is_catch_all_pattern(&self) -> bool {
-        match self {
-            Self::Nominal(name, _)
-                if name.as_str() == "_"
+        matches!(self, Self::Nominal(name, _) if name.as_str() == "_"
                     || name
                         .as_str()
                         .chars()
                         .next()
-                        .is_some_and(|character| character.is_ascii_lowercase()) =>
-            {
-                true
-            }
-            Self::ListCons { tail, .. } => tail.value.is_catch_all_pattern(),
-            Self::Generic { params, .. } => {
-                params.len() == 1
-                    && params[0].0.as_str() == "_"
-                    && matches!(params[0].1, ParameterKind::Generic)
-            }
-            _ => false,
-        }
+                        .is_some_and(|character| character.is_ascii_lowercase()))
     }
 
     pub fn pattern_binding_types(
@@ -169,6 +172,7 @@ impl Pattern {
         subject_ty: Option<&Ty>,
         variant_map: &VariantMap,
         tag_types: &HashMap<Intern<String>, Ty>,
+        sequence_element: &dyn Fn(&Ty) -> Option<Ty>,
     ) -> HashMap<Intern<String>, Ty> {
         let mut out = HashMap::new();
         match self {
@@ -198,6 +202,9 @@ impl Pattern {
                                     crate::type_expr::resolve_expr_type(&ty.value, tag_types)
                                 }
                                 ParameterKind::Generic => Ty::Opaque(*param_name),
+                                ParameterKind::Proposition(predicate) => {
+                                    Ty::Proposition(predicate.clone())
+                                }
                                 ParameterKind::Default(_) => continue,
                             }
                         } else {
@@ -234,25 +241,40 @@ impl Pattern {
                 out.insert(*name, subject_ty.cloned().unwrap_or(Ty::Opaque(*name)));
             }
             Pattern::ListCons { head, tail } => {
-                if let Some(elem_ty) = subject_ty.and_then(|ty| ty.list_elem_ty(tag_types)) {
-                    for (name, ty) in
-                        head.value
-                            .pattern_binding_types(Some(&elem_ty), variant_map, tag_types)
-                    {
+                if let Some(elem_ty) = subject_ty.and_then(sequence_element) {
+                    for (name, ty) in head.value.pattern_binding_types(
+                        Some(&elem_ty),
+                        variant_map,
+                        tag_types,
+                        sequence_element,
+                    ) {
                         out.insert(name, ty);
                     }
                     let tail_ty = match subject_ty {
-                        Some(Ty::Array { elem, .. }) => Ty::Array {
+                        Some(Ty::Array { elem, size }) => Ty::Array {
                             elem: elem.clone(),
-                            size: NormalExpr::from(0),
+                            size: size.as_const_int().map_or_else(
+                                || {
+                                    NormalExpr::Sub(
+                                        Box::new(size.clone()),
+                                        Box::new(NormalExpr::from(1)),
+                                    )
+                                },
+                                |length| NormalExpr::from((length - 1).max(0)),
+                            ),
                         },
+                        Some(Ty::Sequence(fields)) => {
+                            Ty::Sequence(fields.iter().skip(1).cloned().collect())
+                        }
                         Some(ty) => ty.clone(),
                         None => Ty::Opaque(Intern::new("list_tail".to_string())),
                     };
-                    for (name, ty) in
-                        tail.value
-                            .pattern_binding_types(Some(&tail_ty), variant_map, tag_types)
-                    {
+                    for (name, ty) in tail.value.pattern_binding_types(
+                        Some(&tail_ty),
+                        variant_map,
+                        tag_types,
+                        sequence_element,
+                    ) {
                         out.insert(name, ty);
                     }
                 }
@@ -268,6 +290,7 @@ impl Pattern {
         subject_ty: Option<&Ty>,
         variant_map: &VariantMap,
         tag_types: &HashMap<Intern<String>, Ty>,
+        sequence_element: &dyn Fn(&Ty) -> Option<Ty>,
     ) -> Option<Ty> {
         match self {
             Pattern::Generic {
@@ -300,26 +323,30 @@ impl Pattern {
                 }
             }
             Pattern::ListCons { head, tail } => {
-                let elem_ty = subject_ty.and_then(|ty| ty.list_elem_ty(tag_types))?;
+                let elem_ty = subject_ty.and_then(sequence_element)?;
                 if slot == 0 {
-                    head.value
-                        .pattern_param_type_at_slot(0, Some(&elem_ty), variant_map, tag_types)
+                    head.value.pattern_param_type_at_slot(
+                        0,
+                        Some(&elem_ty),
+                        variant_map,
+                        tag_types,
+                        sequence_element,
+                    )
                 } else {
                     let tail_ty = match subject_ty {
                         Some(Ty::Array { elem, .. }) => Ty::Array {
                             elem: elem.clone(),
                             size: NormalExpr::from(0),
                         },
-                        _ => tag_types
-                            .get(&Intern::from_ref("List"))
-                            .cloned()
-                            .unwrap_or(Ty::Opaque(Intern::new("list_tail".to_string()))),
+                        Some(ty) => ty.clone(),
+                        None => return None,
                     };
                     tail.value.pattern_param_type_at_slot(
                         slot.saturating_sub(1),
                         Some(&tail_ty),
                         variant_map,
                         tag_types,
+                        sequence_element,
                     )
                 }
             }
@@ -341,20 +368,12 @@ impl Pattern {
                 Literal::String(s) => s.as_str(),
                 Literal::Int(_) => "__literal_int",
                 Literal::Float(_) => "__literal_float",
-                Literal::Number(_) => "__literal_number",
             },
             Self::Pointer(inner) | Self::Ref { inner, .. } => inner.value.surface_mangle_name(),
             Self::Unit => "()",
             Self::InRange { .. } => "__in_range",
             Self::ListEmpty => "[]",
             Self::ListCons { .. } => "[..]",
-        }
-    }
-
-    pub fn nominal_name(&self) -> Option<&Intern<String>> {
-        match self {
-            Self::Nominal(name, _) => Some(name),
-            _ => None,
         }
     }
 
@@ -385,17 +404,6 @@ impl Pattern {
     }
 
     pub fn list_cons_shape(&self) -> Option<(usize, bool)> {
-        fn is_tail_catch_all(expr: &Pattern) -> bool {
-            match expr {
-                Pattern::Nominal(name, _) => name
-                    .as_str()
-                    .chars()
-                    .next()
-                    .is_some_and(|ch| ch == '_' || ch.is_ascii_lowercase()),
-                _ => expr.is_catch_all_pattern(),
-            }
-        }
-
         fn shape(expr: &Pattern) -> Option<(usize, bool)> {
             match expr {
                 Pattern::ListEmpty => Some((0, false)),
@@ -403,7 +411,7 @@ impl Pattern {
                     let (depth, catch_all) = shape(&tail.value)?;
                     Some((depth + 1, catch_all))
                 }
-                _ => Some((0, is_tail_catch_all(expr))),
+                _ => Some((0, expr.is_list_tail_catch_all())),
             }
         }
 
@@ -509,31 +517,6 @@ impl From<TypeExpr> for Pattern {
     }
 }
 
-impl TypeExpr {
-    /// Return the mangled surface name for this type expression.
-    pub fn surface_mangle_name(&self) -> &str {
-        match self {
-            TypeExpr::Nominal(n, _) => n.as_str(),
-            TypeExpr::Generic { name, .. } => name.as_str(),
-            TypeExpr::Qualified(path) => path
-                .segments
-                .last()
-                .map(|s| s.as_str())
-                .unwrap_or(path.root.as_str()),
-            TypeExpr::Literal(lit, _) => match lit {
-                Literal::String(s) => s.as_str(),
-                Literal::Int(_) => "__literal_int",
-                Literal::Float(_) => "__literal_float",
-                Literal::Number(_) => "__literal_number",
-            },
-            TypeExpr::Pointer(inner) => inner.value.surface_mangle_name(),
-            TypeExpr::Ref { inner, .. } => inner.value.surface_mangle_name(),
-            TypeExpr::Unit => "()",
-            TypeExpr::InRange { .. } => "__in_range",
-        }
-    }
-}
-
 impl Expr {
     /// `for` loop patterns are a subset of expressions:
     /// - a simple identifier (`x` → `Expr::FnCall` with an empty path tail).
@@ -541,9 +524,9 @@ impl Expr {
     /// Returns `None` if the expression is not a valid `for` binder (e.g. a call or literal).
     pub fn for_loop_pattern_names(&self) -> Option<Vec<Intern<String>>> {
         match self {
-            Expr::FnCall(FnCall { path, args: None }) if path.segments.is_empty() => {
-                Some(vec![path.root])
-            }
+            Expr::FnCall(FnCall {
+                path, args: None, ..
+            }) if path.segments.is_empty() => Some(vec![path.root]),
             _ => None,
         }
     }
@@ -606,7 +589,12 @@ impl Expr {
                 .args
                 .iter()
                 .any(|a| a.value.pattern_variant_word_in(span_table, byte_pos, word)),
-            Expr::ArrayLit(elems) | Expr::List(elems) => elems
+            Expr::Return(ret) => ret.values.iter().any(|value| {
+                value
+                    .value
+                    .pattern_variant_word_in(span_table, byte_pos, word)
+            }),
+            Expr::Block(elems) | Expr::ArrayLit(elems) | Expr::List(elems) => elems
                 .iter()
                 .any(|e| e.value.pattern_variant_word_in(span_table, byte_pos, word)),
             _ => false,
@@ -648,6 +636,16 @@ impl WhenExpr {
 impl crate::Condition {
     fn pattern_variant_word_in(&self, span_table: &SpanTable, byte_pos: usize, word: &str) -> bool {
         match self {
+            crate::Condition::Proposition { subject } => subject
+                .value
+                .pattern_variant_word_in(span_table, byte_pos, word),
+            crate::Condition::Compare { left, right, .. } => {
+                left.value
+                    .pattern_variant_word_in(span_table, byte_pos, word)
+                    || right
+                        .value
+                        .pattern_variant_word_in(span_table, byte_pos, word)
+            }
             crate::Condition::Is { subject, pattern } => {
                 pattern
                     .value
@@ -687,19 +685,6 @@ impl BindValue {
 }
 
 impl FileAst {
-    /// Cursor on a union variant used as an expression (`then False`, bare `True`).
-    pub fn expr_union_variant_at_byte(&self, source: &str, byte_pos: usize) -> Option<String> {
-        let word = self
-            .word_at_byte(byte_pos, source)
-            .or_else(|| source.word_at_byte_offset(byte_pos))?;
-        let (expr, _) = self.expr_at_byte(byte_pos)?;
-        match expr {
-            Expr::AnonymousTag(name) if name.as_str() == word => Some(word),
-            Expr::TagCall(tc) if tc.name.as_str() == word => Some(word),
-            _ => None,
-        }
-    }
-
     /// Pattern, expression, or tag-declare site for a union variant literal.
     ///
     /// Detects variants inside `when`/`if is` patterns, expression sites, and
@@ -707,26 +692,28 @@ impl FileAst {
     /// goto-definition on a bare-tag variant name resolves to the variant
     /// definition rather than a coincidentally-named type.
     pub fn union_variant_reference_at_byte(&self, source: &str, byte_pos: usize) -> Option<String> {
-        self.pattern_variant_literal_at_byte(source, byte_pos)
-            .or_else(|| self.expr_union_variant_at_byte(source, byte_pos))
-            .or_else(|| self.variant_word_in_tag_declare(byte_pos))
-    }
-
-    /// If `byte_pos` is on a union variant literal in an `is` pattern, return its name.
-    pub fn pattern_variant_literal_at_byte(&self, source: &str, byte_pos: usize) -> Option<String> {
-        let word = self
+        if let Some(word) = self
             .word_at_byte(byte_pos, source)
-            .or_else(|| source.word_at_byte_offset(byte_pos))?;
-        if self.pattern_variant_word_in(byte_pos, &word) {
-            Some(word)
-        } else {
-            None
+            .or_else(|| source.word_at_byte_offset(byte_pos))
+        {
+            if self.pattern_variant_word_in(byte_pos, &word) {
+                return Some(word);
+            }
+            if let Some((expr, _)) = self.expr_at_byte(byte_pos) {
+                let matched = match expr {
+                    Expr::AnonymousTag(name) => name.as_str() == word,
+                    Expr::TagCall(call) => call.name.as_str() == word,
+                    _ => false,
+                };
+                if matched {
+                    return Some(word);
+                }
+            }
         }
+        self.variant_word_in_tag_declare(byte_pos)
     }
 }
 
-/// Check if `byte_pos` falls within a variant name inside a tag's union
-/// declaration, e.g. `Ordering` in `Comparison is Ordering or Incomparable`.
 impl FileAst {
     /// Check if `byte_pos` falls within a variant name inside a tag's union
     /// declaration, e.g. `Ordering` in `Comparison is Ordering or Incomparable`.
@@ -778,11 +765,6 @@ impl Pattern {
     /// Names bound by an `is` pattern's generic parameter keys, e.g. `Some(v)` -> `[v]`.
     /// Wildcards (`_`) are excluded. Nominal and qualified variants bind no names.
     pub fn binding_names(&self) -> Vec<Intern<String>> {
-        self.binding_names_filtered(true)
-    }
-
-    /// Collect binding names from a pattern, optionally excluding wildcards.
-    fn binding_names_filtered(&self, exclude_wildcards: bool) -> Vec<Intern<String>> {
         let mut names = match self {
             Pattern::Generic { params, .. } => params.iter().map(|(k, _)| *k).collect(),
             Pattern::Nominal(name, _)
@@ -804,14 +786,12 @@ impl Pattern {
             | Pattern::InRange { .. }
             | Pattern::ListEmpty => Vec::new(),
             Pattern::ListCons { head, tail } => {
-                let mut names = head.value.binding_names_filtered(exclude_wildcards);
-                names.extend(tail.value.binding_names_filtered(exclude_wildcards));
+                let mut names = head.value.binding_names();
+                names.extend(tail.value.binding_names());
                 names
             }
         };
-        if exclude_wildcards {
-            names.retain(|n| !n.is_pattern_wildcard());
-        }
+        names.retain(|n| !n.is_pattern_wildcard());
         names
     }
 }

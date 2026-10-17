@@ -40,11 +40,12 @@ fn expr_from_type(value: TypeExpr) -> Expr {
                         SpanId::INVALID,
                     ),
                     ParameterKind::Default(expr) => *expr,
+                    ParameterKind::Proposition(_) => panic!("numeric fixture has no propositions"),
                 })
                 .collect(),
         }),
         TypeExpr::Literal(lit, _) => Expr::Lit(lit),
-        _ => Expr::Lit(Literal::Number(0)),
+        _ => Expr::Lit(Literal::Int(0.into())),
     }
 }
 
@@ -73,6 +74,7 @@ fn variant(shape: TypeExpr) -> Variant {
             value: Pattern::from(shape),
             span_id: SpanId::INVALID,
         }),
+        discriminant: None,
         result_ty: None,
     }
 }
@@ -91,14 +93,27 @@ fn declaration_surface_keeps_simple_nominal_union_compact() {
 }
 
 #[test]
-fn declaration_surface_empty_has_uses_has_keyword() {
+fn declaration_surface_empty_has_uses_type_name() {
     let declare = Declare::new(
         intern("AllocError"),
         SpanId::INVALID,
         DeclareValue::Has(Vec::new()),
     );
 
-    assert_eq!(declare.surface_text(), "AllocError has");
+    assert_eq!(declare.surface_text(), "AllocError");
+}
+
+#[test]
+fn declaration_surface_preserves_symbolic_integer_bounds() {
+    let declare = Declare::new(
+        intern("Extent"),
+        SpanId::INVALID,
+        DeclareValue::Refinement(Box::new(ast::ty::PredicateExpr::And(vec![
+            ast::ty::PredicateExpr::Ge(0_i128.into()),
+            ast::ty::PredicateExpr::Le(ast::NormalExpr::Var(intern("maximum"))),
+        ]))),
+    );
+    assert_eq!(declare.surface_text(), "Extent is in 0 to maximum");
 }
 
 #[test]
@@ -107,24 +122,28 @@ fn declaration_surface_simple_has_uses_inline() {
         intern("Bounded"),
         SpanId::INVALID,
         DeclareValue::Has(vec![
-            HasMember::Property(HasProperty {
+            HasMember::Property(Box::new(HasProperty {
                 qualifier: None,
                 name: intern("min"),
                 name_span: SpanId::INVALID,
+                owned_storage: false,
+                attributes: Default::default(),
                 ty: None,
                 body: None,
                 doc_comment: None,
                 refinement: None,
-            }),
-            HasMember::Property(HasProperty {
+            })),
+            HasMember::Property(Box::new(HasProperty {
                 qualifier: None,
                 name: intern("max"),
                 name_span: SpanId::INVALID,
+                owned_storage: false,
+                attributes: Default::default(),
                 ty: None,
                 body: None,
                 doc_comment: None,
                 refinement: None,
-            }),
+            })),
         ]),
     );
 
@@ -137,29 +156,33 @@ fn declaration_surface_excludes_trait_implementation_members() {
         intern("Range"),
         SpanId::INVALID,
         DeclareValue::Has(vec![
-            HasMember::Property(HasProperty {
+            HasMember::Property(Box::new(HasProperty {
                 qualifier: None,
                 name: intern("start"),
                 name_span: SpanId::INVALID,
+                owned_storage: false,
+                attributes: Default::default(),
                 ty: Some(Box::new(spanned_expr(expr_from_type(nominal("x"))))),
                 body: None,
                 doc_comment: None,
                 refinement: None,
-            }),
-            HasMember::Property(HasProperty {
+            })),
+            HasMember::Property(Box::new(HasProperty {
                 qualifier: Some(HasMemberQualifier {
                     name: intern("Bounded"),
                     span: SpanId::INVALID,
                 }),
                 name: intern("min"),
                 name_span: SpanId::INVALID,
+                owned_storage: false,
+                attributes: Default::default(),
                 ty: None,
                 body: Some(HasMemberBody::Overrideable(BindValue::Expr(Box::new(
                     Typed::infer(Expr::AnonymousTag(intern("start")), SpanId::INVALID),
                 )))),
                 doc_comment: None,
                 refinement: None,
-            }),
+            })),
         ]),
     );
 
@@ -167,7 +190,7 @@ fn declaration_surface_excludes_trait_implementation_members() {
 }
 
 #[test]
-fn declaration_surface_has_members_uses_surface_types() {
+fn declaration_surface_shows_fields_without_instance_or_associated_methods() {
     let declare = Declare::new(
         intern("Allocator"),
         SpanId::INVALID,
@@ -187,14 +210,16 @@ fn declaration_surface_has_members_uses_surface_types() {
                 conventions: Default::default(),
                 param_groups: Default::default(),
                 param_refinements: Default::default(),
-                return_ty: Some(Box::new(spanned_expr(expr_from_type(generic(
-                    "Slice",
-                    vec![("Byte", nominal("Byte"))],
+                return_ty: Some(Box::new(spanned_expr(Expr::Binary(ast::Binary::new(
+                    Typed::infer(
+                        expr_from_type(generic("Slice", vec![("Byte", nominal("Byte"))])),
+                        SpanId::INVALID,
+                    ),
+                    ast::BinOp::LogicalOr,
+                    Typed::infer(expr_from_type(nominal("AllocError")), SpanId::INVALID),
                 ))))),
                 anonymous_result_alternatives: Vec::new(),
-                error_ty: Some(Box::new(spanned_expr(expr_from_type(nominal(
-                    "AllocError",
-                ))))),
+                payload_postconditions: Vec::new(),
                 body: None,
                 doc_comment: None,
                 refinement: None,
@@ -218,7 +243,7 @@ fn declaration_surface_has_members_uses_surface_types() {
                 param_refinements: Default::default(),
                 return_ty: Some(Box::new(spanned_expr(expr_from_type(nominal("Self"))))),
                 anonymous_result_alternatives: Vec::new(),
-                error_ty: None,
+                payload_postconditions: Vec::new(),
                 body: Some(HasMemberBody::Overrideable(BindValue::Expr(Box::new(
                     Typed::infer(Expr::AnonymousTag(intern("Self")), SpanId::INVALID),
                 )))),
@@ -227,24 +252,23 @@ fn declaration_surface_has_members_uses_surface_types() {
                 kind: HasFunctionKind::Associated,
                 attributes: Default::default(),
             })),
-            HasMember::Property(HasProperty {
+            HasMember::Property(Box::new(HasProperty {
                 qualifier: None,
                 name: intern("length"),
                 name_span: SpanId::INVALID,
+                owned_storage: false,
+                attributes: Default::default(),
                 ty: Some(Box::new(spanned_expr(Expr::TakePtr(Box::new(
                     Typed::infer(Expr::AnonymousTag(intern("Byte")), SpanId::INVALID),
                 ))))),
                 body: None,
                 doc_comment: None,
                 refinement: None,
-            }),
+            })),
         ]),
     );
 
-    assert_eq!(
-        declare.surface_text(),
-        "Allocator has\n    reserve(l Layout) Slice(Byte) or AllocError\n    length @Byte"
-    );
+    assert_eq!(declare.surface_text(), "Allocator has length @Byte");
 }
 
 #[test]
