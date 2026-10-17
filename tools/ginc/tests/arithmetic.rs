@@ -39,13 +39,18 @@ fn test_parenthesized_expression() {
 
 #[test]
 fn narrow_integer_shifts_accept_literal_counts() {
-    for (name, range, operation, input, expected) in [
-        ("left", "0 to 255", "<<", 3, 24),
-        ("right", "0 to 255", ">>", 192, 24),
-        ("signed_right", "-128 to 127", ">>", -64, 248),
+    for (name, range, operation, input, expected, masked) in [
+        ("left", "0 to 255", "<<", 3, 24, true),
+        ("right", "0 to 255", ">>", 192, 24, false),
+        ("signed_right", "-128 to 127", ">>", -64, 248, false),
     ] {
+        let shifted = if masked {
+            format!("((value {operation} 3) & 255)")
+        } else {
+            format!("(value {operation} 3)")
+        };
         let source = format!(
-            "Byte is in {range}\nByte has\n    finish(self):\n        return\nshift(value is in {range}) Byte: return (value {operation} 3) as Byte\n#entry\nmain: shift({input})\n"
+            "Byte is in {range}\nByte has\n    finish(self):\n        return\nshift(value is in {range}) Byte: return {shifted} as Byte\n#entry\nmain: shift({input})\n"
         );
         cra(&format!("literal_shift_{name}"), &source)
             .assert_compiled()

@@ -138,25 +138,33 @@ pub(crate) fn lower_condition(
             let (mut guarded, _) = with_condition_locals(typed, env, &left, scope);
             refine_integer_locals_from_condition(typed, &left, true, &mut guarded);
             let right = lower_condition(typed, right, scope, &mut guarded);
-            for (name, previous) in env.place_versions.clone() {
-                if let Some(current) = guarded.place_versions.get(&name)
-                    && *current != previous
-                {
-                    env.set_place_version(name, *current);
-                    env.integer_domains.remove(&previous);
-                    env.union_members.remove(&previous);
-                    env.const_values.remove(&name);
-                    env.result_evidence.remove(&name);
-                    env.projected_result_evidence.remove(&name);
-                    env.projected_versions.clear();
-                }
-            }
+            adopt_refined_versions(env, &guarded);
             crate::typed::TypedCondition::And(Box::new(left), Box::new(right))
         }
-        ast::Condition::Or(left, right) => crate::typed::TypedCondition::Or(
-            Box::new(lower_condition(typed, left, scope, env)),
-            Box::new(lower_condition(typed, right, scope, env)),
-        ),
+        ast::Condition::Or(left, right) => {
+            let left = lower_condition(typed, left, scope, env);
+            let mut guarded = env.clone();
+            refine_integer_locals_from_condition(typed, &left, false, &mut guarded);
+            let right = lower_condition(typed, right, scope, &mut guarded);
+            adopt_refined_versions(env, &guarded);
+            crate::typed::TypedCondition::Or(Box::new(left), Box::new(right))
+        }
+    }
+}
+
+fn adopt_refined_versions(env: &mut FlowState, guarded: &FlowState) {
+    for (name, previous) in env.place_versions.clone() {
+        if let Some(current) = guarded.place_versions.get(&name)
+            && *current != previous
+        {
+            env.set_place_version(name, *current);
+            env.integer_domains.remove(&previous);
+            env.union_members.remove(&previous);
+            env.const_values.remove(&name);
+            env.result_evidence.remove(&name);
+            env.projected_result_evidence.remove(&name);
+            env.projected_versions.clear();
+        }
     }
 }
 

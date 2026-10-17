@@ -27,7 +27,7 @@ run Byte:
     for value in view
         previous is in Byte: total
         amount is in Byte: value
-        total:: replace(total, (previous + amount) as Byte)
+        total:: replace(total, ((previous + amount) & 255) as Byte)
     return total
 "#,
     )

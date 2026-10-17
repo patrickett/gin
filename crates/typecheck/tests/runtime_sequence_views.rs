@@ -104,7 +104,7 @@ fn view_loop_cannot_consume_borrowed_elements() {
 fn compile_time_view_iteration_uses_the_visible_length() {
     let typed = check_no_flaws_with(
         VIEW,
-        "run(length Length) Byte:\n    source [Byte; 4]: [10, 20, 30, 40]\n    view: prefix(source, length)\n    total Byte: 0\n    for value in view.storage\n        previous is in Byte: total\n        amount is in Byte: read(value)\n        total:: replace(total, (previous + amount) as Byte)\n    return total\n",
+        "run(length Length) Byte:\n    source [Byte; 4]: [10, 20, 30, 40]\n    view: prefix(source, length)\n    total Byte: 0\n    for value in view.storage\n        previous is in Byte: total\n        amount is in Byte: read(value)\n        total:: replace(total, ((previous + amount) & 255) as Byte)\n    return total\n",
     );
     let target = flask::CompileTarget::Library;
     for (length, expected) in [(0, 0), (1, 10), (2, 30), (4, 100)] {

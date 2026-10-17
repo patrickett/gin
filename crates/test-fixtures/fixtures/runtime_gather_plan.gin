@@ -56,7 +56,7 @@ prepare_indices(source ref View(Count, 10000), target mut MutView(ValidatedIndex
     when source.length.as_num = 0 then
         return 1
     for cursor in 0 to source.length.as_num - 1
-        accepted: prepare_one(source, target, cursor as Count, extent)
+        accepted: prepare_one(source, target, (cursor & 65535) as Count, extent)
         when accepted.as_num = 0 then
             return 0
     return 1
@@ -75,19 +75,19 @@ gather_prepared(indices ref View(ValidatedIndex, 10000), values ref View(Byte, 6
     for index in indices.storage
         previous is in Score: total.as_num
         value is in Score: read_prepared(index, values) as Score
-        total :: Score.replace(total, (previous + value) as Score)
+        total :: Score.replace(total, ((previous + value) & 18446744073709551615) as Score)
     return total
 gather_checked(indices ref View(Count, 10000), values ref View(Byte, 65535)) Score:
     total Score: 0
     for index in indices.storage
         previous is in Score: total.as_num
         value is in Score: checked_at(values, index.as_num as Count) as Score
-        total :: Score.replace(total, (previous + value) as Score)
+        total :: Score.replace(total, ((previous + value) & 18446744073709551615) as Score)
     return total
 gather_checked_witness(indices ref View(RawIndex, 10000), values ref View(Byte, 65535)) Score:
     total Score: 0
     for index in indices.storage
         previous is in Score: total.as_num
         value is in Score: read_witness(index, values) as Score
-        total :: Score.replace(total, (previous + value) as Score)
+        total :: Score.replace(total, ((previous + value) & 18446744073709551615) as Score)
     return total

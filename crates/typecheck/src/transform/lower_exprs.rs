@@ -49,7 +49,10 @@ fn integer_width_for_exact_value(value: i256::I256) -> u8 {
 
 fn named_instance_has_symbolic_argument(instance: &ast::ty::NamedTypeInstance) -> bool {
     instance.arguments.iter().any(|(_, argument)| {
-        matches!(argument, ast::ty::TyArg::Type(ty) if matches!(ty.as_ref(), Ty::Opaque(_)))
+        matches!(
+            argument,
+            ast::ty::TyArg::Type(ty) if matches!(ty.as_ref(), Ty::Opaque(_))
+        ) || matches!(argument, ast::ty::TyArg::Const(ast::NormalExpr::Var(_)))
     })
 }
 
@@ -2019,7 +2022,7 @@ pub(crate) fn lower_typed_expr(
         env.union_members.clear();
         env.invalidate_mutable_constants();
     }
-    let mut kind = lower_expr_kind(typed, expr, scope, env, reserved_expr_id);
+    let kind = lower_expr_kind(typed, expr, scope, env, reserved_expr_id);
     if let TypedExprKind::TargetQuery {
         kind: query,
         operand,
@@ -2042,7 +2045,6 @@ pub(crate) fn lower_typed_expr(
                 ),
             };
             const_val = Some(ConstValue::Int(value));
-            kind = TypedExprKind::Lit(Literal::Int(value));
         } else if let Expr::TargetQuery { operand, .. } = &expr.value {
             let (min, max) = super::flow::layout_query_bounds(*query);
             resolved_ty = Ty::AnonymousInteger {
@@ -2120,7 +2122,7 @@ pub(crate) fn lower_typed_expr(
         } else {
             env.invalidate_value_evidence(typed, call);
         }
-    } else if let TypedExprKind::FnCall { target, .. } = &kind
+    } else if let TypedExprKind::FnCall { target, args, .. } = &kind
         && !env.places.contains_key(&target.0)
     {
         let conventions = typed
@@ -2133,8 +2135,27 @@ pub(crate) fn lower_typed_expr(
                     .get(target)
                     .map(|signature| &signature.param_conventions)
             });
-        if conventions.is_none_or(|conventions| conventions.contains(&ast::ParamConvention::Mutate))
-        {
+        let effects = typed
+            .defs
+            .get(target)
+            .map(|bind| &*bind.effects)
+            .or_else(|| {
+                scope
+                    .callable_signatures
+                    .get(target)
+                    .map(|signature| &*signature.effects)
+            });
+        let pointer_argument = args.as_deref().unwrap_or_default().iter().any(|argument| {
+            typed
+                .exprs
+                .ty_of(*argument)
+                .is_some_and(|ty| typed.type_registry.contains_pointers(ty))
+        });
+        let may_write = pointer_argument
+            || conventions
+                .is_none_or(|conventions| conventions.contains(&ast::ParamConvention::Mutate))
+            || effects.is_some_and(|effects| effects.unknown_memory || !effects.writes.is_empty());
+        if may_write {
             let call = reserved_expr_id.unwrap_or(ExprId(typed.exprs.kind.len() as u32));
             env.invalidate_value_evidence(typed, call);
         }
@@ -3078,6 +3099,7 @@ pub(crate) fn lower_typed_expr(
     {
         if actual.declaration != expected.declaration
             || (!named_instance_has_symbolic_argument(actual)
+                && !named_instance_has_symbolic_argument(expected)
                 && actual.arguments != expected.arguments)
         {
             // type-return-mismatch
@@ -3966,7 +3988,7 @@ pub(super) fn ensure_temporary_owner(
         name: Intern::from_ref("temporary"),
         parent: None,
         projection: None,
-        mutable: false,
+        mutable: true,
         explicit_contract: true,
         ty: ty.clone(),
     });
@@ -5123,6 +5145,23 @@ fn types_are_incompatible(arg_ty: &Ty, field_ty: &Ty) -> bool {
     }
 }
 
+fn arm_result_row<'a>(typed: &'a TypedFileAst, body: ExprId) -> Option<&'a Ty> {
+    let ty = typed.exprs.ty_of(body)?;
+    if matches!(ty, Ty::Sequence(_)) {
+        return Some(ty);
+    }
+    let TypedExprKind::TagCall {
+        args: Some(args), ..
+    } = typed.exprs.kind_of(body)?
+    else {
+        return Some(ty);
+    };
+    let inner = args.first().and_then(|arg| typed.exprs.ty_of(*arg))?;
+    matches!(inner, Ty::Sequence(_))
+        .then_some(inner)
+        .or(Some(ty))
+}
+
 struct FlawContext<'a, 'f> {
     typed: &'a TypedFileAst,
     name_span_id: Option<SpanId>,
@@ -5333,21 +5372,23 @@ fn check_type_flaws(expr_id: ExprId, kind: &TypedExprKind, ty: &Ty, context: Fla
                     TypedWhenArm::Else(body, _) => *body,
                 };
                 (!crate::analysis::expression_returns(typed.resolved_program(), body))
-                    .then(|| typed.exprs.ty.get(body.as_usize()))
+                    .then(|| arm_result_row(typed, body))
                     .flatten()
             });
             if let Some(Ty::Sequence(first)) =
                 arm_types.clone().find(|ty| matches!(ty, Ty::Sequence(_)))
+                && first.iter().all(|element| element.name.is_some())
                 && arm_types
                     .filter_map(|ty| match ty {
                         Ty::Sequence(elements) => Some(elements),
                         _ => None,
                     })
                     .any(|elements| {
-                        first
-                            .iter()
-                            .map(|element| element.name)
-                            .ne(elements.iter().map(|element| element.name))
+                        elements.iter().all(|element| element.name.is_some())
+                            && first
+                                .iter()
+                                .map(|element| element.name)
+                                .ne(elements.iter().map(|element| element.name))
                     })
             {
                 // type-incompatible-result-names

@@ -10,14 +10,14 @@ Resource has Copy
     copy(self ref) CopyResult(Self):
         pointer: self.attempts
         previous is in Byte: pointer.[0]
-        pointer.[0] :: Byte.replace(pointer.[0], (previous + 1) as Byte)
+        pointer.[0] :: Byte.replace(pointer.[0], ((previous + 1) & 255) as Byte)
         when previous = 0 then return Copied(value: Self(attempts: self.attempts, drops: self.drops))
         error AllocError: AllocError.OutOfMemory
         return error
     release(self):
         Resource(attempts, drops) := self
         previous is in Byte: drops.[0]
-        drops.[0] :: Byte.replace(drops.[0], (previous + 1) as Byte)
+        drops.[0] :: Byte.replace(drops.[0], ((previous + 1) & 255) as Byte)
         return
 exercise(values own List(Resource) and values.length = 0 and values.capacity >= 2, attempts @Byte, drops @Byte) Status:
     values.push_reserved(Resource(attempts: deref (ref attempts), drops: deref (ref drops)))
@@ -27,13 +27,13 @@ exercise(values own List(Resource) and values.length = 0 and values.capacity >= 
             copy.release
             values.release
             return 1
-        AllocError(_) then return
-    partial is in Byte: drops.[0]
-    count is in Byte: attempts.[0]
-    length is in Length: values.length
-    values.release
-    total is in Byte: drops.[0]
-    return when partial = 1 and count = 2 and length = 2 and total = 3 then 0 else 2
+        AllocError(_) then
+            partial is in Byte: drops.[0]
+            count is in Byte: attempts.[0]
+            length is in Length: values.length
+            values.release
+            total is in Byte: drops.[0]
+            return when partial = 1 and count = 2 and length = 2 and total = 3 then 0 else 2
 #entry
 main is in Status:
     attempts Byte: 0

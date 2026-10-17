@@ -12,6 +12,9 @@ use std::path::Path;
 use std::process::Command;
 use strum::Display;
 
+// AArch64 GlobalISel and its fallback disagree on stack slots for byte-array arguments.
+const LLVM_CODEGEN_ARGUMENTS: [&str; 2] = ["-mllvm", "-global-isel=false"];
+
 /// Build profile for optimization levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Display)]
 pub enum Profile {
@@ -424,6 +427,10 @@ impl NativeCompiler {
             Self::find_tool("mlir-translate", &mut diagnostics)?,
         ];
         let mut hash = Sha256::new();
+        for argument in LLVM_CODEGEN_ARGUMENTS {
+            hash.update((argument.len() as u64).to_le_bytes());
+            hash.update(argument.as_bytes());
+        }
         for tool in tools {
             let path = if Path::new(&tool).is_absolute() {
                 std::path::PathBuf::from(&tool)
@@ -571,6 +578,7 @@ impl NativeCompiler {
         command
             .arg("-c")
             .arg(opt_flag)
+            .args(LLVM_CODEGEN_ARGUMENTS)
             .args(["-x", "ir", "-"])
             .arg("-o")
             .arg(obj_path);

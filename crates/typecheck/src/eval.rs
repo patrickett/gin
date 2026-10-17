@@ -1086,13 +1086,16 @@ impl<'p, H: EvalHost> Evaluator<'p, H> {
                 flask::CompileTarget::Library => None,
             },
             TypedExprKind::TargetQuery { kind, operand } => {
-                let layout = self.program.target_layout.as_ref().ok_or_else(|| {
-                    // compile-time-target-unavailable
-                    Diagnostic::new(
-                        EvaluationCode::TargetUnavailable,
-                        "target queries require a concrete compile target",
-                    )
-                })?;
+                let Some(layout) = self.program.target_layout.as_ref() else {
+                    return match self.program.exprs.const_value_of(expr) {
+                        Some(Some(value)) => Ok(EvalOutcome::Complete(value.clone())),
+                        _ => Err(Diagnostic::new(
+                            // compile-time-target-unavailable
+                            EvaluationCode::TargetUnavailable,
+                            "target queries require a concrete compile target",
+                        )),
+                    };
+                };
                 Some(ConstValue::Int(i256::I256::from(
                     layout
                         .query(*kind, operand, Some(self.program.type_registry))

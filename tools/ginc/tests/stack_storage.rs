@@ -53,7 +53,7 @@ Word has
 
 increment(value mut Word):
     bits is in Word: value
-    value:: (bits + 1) as Word
+    value:: ((bits + 1) & 255) as Word
     return
 
 exercise(count is in Word) Word:

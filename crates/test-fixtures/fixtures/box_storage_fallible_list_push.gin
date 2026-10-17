@@ -8,7 +8,7 @@ Resource has
     release(self):
         Resource(dropped) := self
         previous is in Byte: dropped.[0]
-        dropped.[0] :: Byte.replace(dropped.[0], (previous + 1) as Byte)
+        dropped.[0] :: Byte.replace(dropped.[0], ((previous + 1) & 255) as Byte)
         return
 FailGrowth has Allocator
     inner GlobalAllocator

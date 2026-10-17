@@ -138,7 +138,7 @@ fn native_source(cases: &[Case], comparisons: &[Comparison]) -> String {
             .map(|operator| format!("flag_{operator}"))
             .collect::<Vec<_>>()
             .join(" + ");
-        source.push_str(&format!("    return {flags}\n"));
+        source.push_str(&format!("    return ({flags}) & 255\n"));
     }
     source.push_str("#entry\nmain:\n");
     for case in cases {
@@ -238,8 +238,9 @@ fn generated_native_comparisons_match_independent_reference() {
                     }
                 }
                 panic!(
-                    "comparison batch failed, but the isolated case passed: {profile:?}, {:?}",
-                    failing[0]
+                    "comparison batch failed, but the isolated case passed: {profile:?}, {:?}\n{}",
+                    failing[0],
+                    native_source(batch, &Comparison::ALL)
                 );
             }
         }

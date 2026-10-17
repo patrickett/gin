@@ -119,7 +119,7 @@ main:
     writer.clear
     writer.move_to(0, 0)
     writer.foreground(6)
-    writer.queue('Gin')
+    writer.queue('Gin terminal: arrows move, q or Ctrl-C exits')
     writer.move_to(65535, 65535)
     writer.reset_style
     writer.show_cursor
@@ -141,7 +141,12 @@ main:
             and pending = 4096 and flushed = 0 and empty = 0
             and error = -9 and retained = 5 then 0 else 1
 "#;
-    let expected = b"queued\n\x1b[?1049h\x1b[?25l\x1b[2J\x1b[1;1H\x1b[36mGin\x1b[65536;65536H\x1b[0m\x1b[?25h\x1b[?1049l";
+    let expected = concat!(
+        "queued\n\x1b[?1049h\x1b[?25l\x1b[2J\x1b[1;1H\x1b[36m",
+        "Gin terminal: arrows move, q or Ctrl-C exits",
+        "\x1b[65536;65536H\x1b[0m\x1b[?25h\x1b[?1049l",
+    )
+    .as_bytes();
     let package = TempPackage::new("terminal_output");
     for profile in [Profile::Debug, Profile::Release] {
         let output = Command::new(compile(&package, source, profile))

@@ -12,7 +12,7 @@ fn echo_example_copies_stdin_to_stdout() {
     let input = package.write(
         "main.gin",
         &test_fixtures::with_runtime(
-            r#"SignedInt is in -2147483648 to 2147483647
+            r#"SignedInt is in -9223372036854775808 to 9223372036854775807
 SignedInt has
     finish(self):
         return

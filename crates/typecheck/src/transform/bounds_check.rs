@@ -209,8 +209,7 @@ fn check_bounded_scalar_arg(
                         },
                     )
             }
-            (_, None) => true,
-            _ => false,
+            (None, _) | (_, None) => true,
         };
         if !assignable || !nominally_compatible {
             push_bounds_mismatch(flaws, arg_ty, param_ty);

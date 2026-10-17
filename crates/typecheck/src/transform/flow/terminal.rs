@@ -103,6 +103,11 @@ impl TypedFileAst {
         if is_reference_type(self, ty) {
             return false;
         }
+        if let Some((element, _)) =
+            crate::representation::Repr::array_parts(ty, Some(&self.type_registry))
+        {
+            return self.borrowed_value_needs_ownership(&element);
+        }
         match self.type_registry.resolved_definition_for_type(ty) {
             Ty::Record { .. } | Ty::Opaque(_) | Ty::OwnedStorage { .. } => true,
             Ty::Union { variants, .. } => variants.iter().any(|variant| !variant.fields.is_empty()),

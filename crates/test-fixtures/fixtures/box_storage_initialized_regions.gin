@@ -6,7 +6,7 @@ Resource has
     release(self):
         Resource(value, releases) := self
         count is in Byte: releases.[0]
-        releases.[0]:: Byte.replace(releases.[0], (count + 1) as Byte)
+        releases.[0]:: Byte.replace(releases.[0], ((count + 1) & 255) as Byte)
         return
 unwrap(attempt AllocationResult(Resource)) Allocation(Resource):
     return when attempt is

@@ -154,7 +154,7 @@ fn unsupported_source_reports_a_sequence_requirement() {
 #[test]
 fn compile_time_sequence_traversal_preserves_rebindings_and_order() {
     let source = format!(
-        "{}replace(previous Word, next Word) Word: return next\nrun() Word:\n    total Word: 0\n    for value in [first: 1, second: 2, third: 3]\n        previous is in 0 to 255: total\n        digit is in 0 to 255: value\n        total:: replace(total, (previous * 10 + digit) as Word)\n    return total\n",
+        "{}replace(previous Word, next Word) Word: return next\nrun() Word:\n    total Word: 0\n    for value in [first: 1, second: 2, third: 3]\n        previous is in 0 to 255: total\n        digit is in 0 to 255: value\n        total:: replace(total, ((previous * 10 + digit) & 255) as Word)\n    return total\n",
         test_fixtures::preludes::WORD_PRELUDE
     );
     assert_eq!(evaluate(&source), ast::ConstValue::Int(123.into()));
@@ -278,7 +278,7 @@ fn compile_time_ranges_choose_direction_and_include_the_endpoint() {
         ),
     ] {
         let source = format!(
-            "{}replace(previous Word, next Word) Word: return next\nrun Word:\n    total Word: 0\n    for value in {range}\n        previous is in Word: total\n        total:: replace(total, (previous + 1) as Word)\n    return total\n",
+            "{}replace(previous Word, next Word) Word: return next\nrun Word:\n    total Word: 0\n    for value in {range}\n        previous is in Word: total\n        total:: replace(total, ((previous + 1) & 255) as Word)\n    return total\n",
             test_fixtures::preludes::WORD_PRELUDE
         );
         let typed = check_unflawed(&source);
@@ -297,7 +297,7 @@ fn compile_time_ranges_choose_direction_and_include_the_endpoint() {
 #[test]
 fn compile_time_descending_range_preserves_order_and_rebindings() {
     let source = format!(
-        "{}replace(previous Word, next Word) Word: return next\nrun Word:\n    total Word: 0\n    for value in 3 to 0\n        previous is in Word: total\n        total:: replace(total, (previous * 4 + value) as Word)\n    return total\n",
+        "{}replace(previous Word, next Word) Word: return next\nrun Word:\n    total Word: 0\n    for value in 3 to 0\n        previous is in Word: total\n        total:: replace(total, ((previous * 4 + value) & 255) as Word)\n    return total\n",
         test_fixtures::preludes::WORD_PRELUDE
     );
     assert_eq!(evaluate(&source), ast::ConstValue::Int(228.into()));

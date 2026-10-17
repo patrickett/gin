@@ -11,7 +11,7 @@ fn mixed_local_write_and_runtime_extern_compile_and_run() {
     let input = package.write(
         "main.gin",
         &test_fixtures::with_runtime(
-            r#"SignedInt is in -2147483648 to 2147483647
+            r#"SignedInt is in -9223372036854775808 to 9223372036854775807
 SignedInt has
     finish(self):
         return

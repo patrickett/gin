@@ -87,6 +87,46 @@ struct RegistryTables {
     target_dependent_integers: HashSet<DeclarationKey>,
 }
 
+fn canonical_predicate_depends_on_target(predicate: &ast::integer::CanonicalPredicate) -> bool {
+    match predicate {
+        ast::integer::CanonicalPredicate::Symbolic(expr) => normal_expr_depends_on_target(expr),
+        ast::integer::CanonicalPredicate::Structured(predicate) => {
+            predicate_expr_depends_on_target(predicate)
+        }
+        ast::integer::CanonicalPredicate::Union(domains) => domains
+            .iter()
+            .any(|domain| canonical_predicate_depends_on_target(domain)),
+        _ => false,
+    }
+}
+
+fn predicate_expr_depends_on_target(predicate: &ast::ty::PredicateExpr) -> bool {
+    match predicate {
+        ast::ty::PredicateExpr::Lt(expr)
+        | ast::ty::PredicateExpr::Gt(expr)
+        | ast::ty::PredicateExpr::Le(expr)
+        | ast::ty::PredicateExpr::Ge(expr)
+        | ast::ty::PredicateExpr::Eq(expr)
+        | ast::ty::PredicateExpr::Ne(expr) => normal_expr_depends_on_target(expr),
+        ast::ty::PredicateExpr::And(predicates) => {
+            predicates.iter().any(predicate_expr_depends_on_target)
+        }
+        ast::ty::PredicateExpr::Proposition(_) => false,
+    }
+}
+
+fn normal_expr_depends_on_target(expr: &ast::NormalExpr) -> bool {
+    match expr {
+        ast::NormalExpr::TargetQuery { .. } => true,
+        ast::NormalExpr::Add(left, right)
+        | ast::NormalExpr::Sub(left, right)
+        | ast::NormalExpr::Mul(left, right) => {
+            normal_expr_depends_on_target(left) || normal_expr_depends_on_target(right)
+        }
+        _ => false,
+    }
+}
+
 impl TypeRegistry {
     pub fn contains_references(&self, ty: &Ty) -> bool {
         let mut pending = vec![ty.clone()];
@@ -99,6 +139,34 @@ impl TypeRegistry {
                 continue;
             }
             if crate::ty::reference_semantics_for_type(&ty, Some(self)).is_some() {
+                return true;
+            }
+            match self.resolved_definition_for_type(&ty) {
+                Ty::Record { fields, .. } => pending.extend(fields.into_iter().map(|(_, ty)| *ty)),
+                Ty::Array { elem, .. } => pending.push(*elem),
+                Ty::Sequence(fields) => pending.extend(fields.into_iter().map(|field| *field.ty)),
+                Ty::Union { variants, .. } => pending.extend(
+                    variants
+                        .into_iter()
+                        .flat_map(|variant| variant.fields.into_iter().map(|(_, ty)| *ty)),
+                ),
+                _ => {}
+            }
+        }
+        true
+    }
+
+    pub fn contains_pointers(&self, ty: &Ty) -> bool {
+        let mut pending = vec![ty.clone()];
+        let mut visited = HashSet::new();
+        for _ in 0..16_384 {
+            let Some(ty) = pending.pop() else {
+                return false;
+            };
+            if !visited.insert(ty.clone()) {
+                continue;
+            }
+            if matches!(ty, Ty::Ptr { .. } | Ty::OwnedStorage { .. }) {
                 return true;
             }
             match self.resolved_definition_for_type(&ty) {
@@ -299,19 +367,8 @@ impl TypeRegistry {
 
     pub(crate) fn is_target_dependent_validity(&self, validity: &IntegerValidity) -> bool {
         semantic_reads::scan();
-        if let ast::integer::CanonicalPredicate::Symbolic(expr) = validity.domain().predicate() {
-            let mut pending = vec![expr];
-            while let Some(expr) = pending.pop() {
-                match expr {
-                    ast::NormalExpr::TargetQuery { .. } => return true,
-                    ast::NormalExpr::Add(lhs, rhs)
-                    | ast::NormalExpr::Sub(lhs, rhs)
-                    | ast::NormalExpr::Mul(lhs, rhs) => {
-                        pending.extend([lhs.as_ref(), rhs.as_ref()])
-                    }
-                    _ => {}
-                }
-            }
+        if canonical_predicate_depends_on_target(validity.domain().predicate()) {
+            return true;
         }
         self.tables.declarations.values().any(|declaration| {
             self.tables

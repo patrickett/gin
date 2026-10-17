@@ -1372,7 +1372,16 @@ impl<'a> WalkExprCtx<'a> {
                         && variant.fields.is_empty()
                 })
         );
-        if !raw_store
+        let base = match self.typed.exprs.kind_of(expression) {
+            Some(
+                TypedExprKind::RecordSet { base, .. } | TypedExprKind::AggregateSet { base, .. },
+            ) => Some(*base),
+            Some(TypedExprKind::BufSet { buf, .. }) => Some(*buf),
+            _ => None,
+        };
+        let temporary = base.is_some_and(|base| self.typed.temporary_owner(base).is_some());
+        if !temporary
+            && !raw_store
             && !consumes_previous
             && !payload_free_sum
             && !place.ty.is_structurally_discardable()
@@ -1672,7 +1681,8 @@ impl<'a> WalkExprCtx<'a> {
                 if let Some(subject) = subject
                     && !self.typed.borrows_value(subject)
                     && !self.pattern_discards_owned_fields(&pattern.value, subject)
-                    && (pattern_moves_subject(&pattern.value)
+                    && (self.typed.temporary_owner(subject).is_some()
+                        || pattern_moves_subject(&pattern.value)
                         || pattern_moves_empty_variant(self.typed, &pattern.value, subject))
                 {
                     self.validate_unpack_authority(subject, site);

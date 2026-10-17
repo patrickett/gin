@@ -85,7 +85,7 @@ sum(n Word, source ref [Word; n]) Word:
     for value in source
         amount is in 0 to 255: value
         previous is in 0 to 255: total
-        total:: replace(total, (previous + amount) as Word)
+        total:: replace(total, ((previous + amount) & 255) as Word)
     return total
 #entry
 main:
@@ -179,7 +179,7 @@ fn indexing_a_returned_dependent_record_evaluates_the_source_once() {
         r#"
 make(source ref [Word; 4], calls mut Word) Slice(Word):
     previous is in Word: calls
-    calls:: replace(deref calls, (previous + 1) as Word)
+    calls:: replace(deref calls, ((previous + 1) & 255) as Word)
     return Slice(length: 4 as Word, data: source)
 #entry
 main:
@@ -246,7 +246,7 @@ sum(n Word, source ref [Word; 4]) Word:
     for value in view
         amount is in Word: value
         previous is in Word: total
-        total:: replace(total, (previous + amount) as Word)
+        total:: replace(total, ((previous + amount) & 255) as Word)
     return total
 #entry
 main:
@@ -317,7 +317,7 @@ fn slice_borrow_operands_are_evaluated_once_in_order() {
 record(calls mut Word, value Word) Word:
     previous is in Word: calls
     amount is in Word: value
-    calls:: replace(deref calls, (previous * 10 + amount) as Word)
+    calls:: replace(deref calls, ((previous * 10 + amount) & 255) as Word)
     return value
 source(bytes ref{storage} [Word; 4], calls mut{counter} Word) ref{storage} [Word; 4]:
     record(calls, 1)

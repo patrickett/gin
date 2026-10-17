@@ -205,6 +205,28 @@ fn newline_separated_sources_parse_without_errors() {
 }
 
 #[test]
+fn empty_has_body_preserves_following_type_declarations() {
+    for declaration in [
+        "Next has\n    value Byte\n",
+        "Next is in 0 to 255\n",
+        "Next(element) has\n    value element\n",
+    ] {
+        let source = format!("Marker has\n{declaration}");
+        let parsed = source.parse_source_full();
+        assert!(
+            parsed.symptoms.is_empty(),
+            "{source}: {:?}",
+            parsed.symptoms
+        );
+        assert_eq!(parsed.ast.tags.len(), 2, "{source}");
+        let marker = &parsed.ast.tags[&internment::Intern::from_ref("Marker")];
+        assert!(marker.provided_traits.is_empty(), "{source}: {marker:?}");
+        assert!(matches!(&marker.value, ast::DeclareValue::Has(members) if members.is_empty()));
+        assert!(has_tag(&parsed, "Next"), "{source}");
+    }
+}
+
+#[test]
 fn func_params_same_line_missing_comma_rejected() {
     let src = "add(a Int b Int) Int := a + b\n";
     let out = src.parse_source_full();

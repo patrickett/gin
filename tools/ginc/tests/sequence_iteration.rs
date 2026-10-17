@@ -33,7 +33,7 @@ fn homogeneous_and_named_sequences_preserve_order_and_rebindings() {
         run(
             name,
             &format!(
-                "#entry\nmain:\n    total Word: 0\n    for value in {sequence}\n        digit is in 0 to 255: value\n        previous is in 0 to 255: total\n        total:: replace(total, (previous * 10 + digit) as Word)\n    return total\n"
+                "#entry\nmain:\n    total Word: 0\n    for value in {sequence}\n        digit is in 0 to 255: value\n        previous is in 0 to 255: total\n        total:: replace(total, ((previous * 10 + digit) & 255) as Word)\n    return total\n"
             ),
             123,
         );
@@ -44,7 +44,7 @@ fn homogeneous_and_named_sequences_preserve_order_and_rebindings() {
 fn heterogeneous_sequences_call_each_elements_method() {
     run(
         "heterogeneous",
-        "First has\n    score(self) Word: return 17\nSecond has\n    score(self) Word: return 25\n#entry\nmain:\n    total Word: 0\n    for value in [First(), Second()]\n        score: value.score\n        amount is in 0 to 255: score\n        previous is in 0 to 255: total\n        total:: replace(total, (previous + amount) as Word)\n    return total\n",
+        "First has\n    score(self) Word: return 17\nSecond has\n    score(self) Word: return 25\n#entry\nmain:\n    total Word: 0\n    for value in [First(), Second()]\n        score: value.score\n        amount is in 0 to 255: score\n        previous is in 0 to 255: total\n        total:: replace(total, ((previous + amount) & 255) as Word)\n    return total\n",
         42,
     );
 }
@@ -53,7 +53,7 @@ fn heterogeneous_sequences_call_each_elements_method() {
 fn sequence_source_is_evaluated_once_before_iteration() {
     run(
         "evaluate_source_once",
-        "make(count mut Word) [Word; 2]:\n    previous is in 0 to 255: count\n    count:: replace(deref count, (previous + 1) as Word)\n    return 10, 20\n#entry\nmain:\n    count Word: 0\n    for value in make(count)\n        value.finish\n    return count\n",
+        "make(count mut Word) [Word; 2]:\n    previous is in 0 to 255: count\n    count:: replace(deref count, ((previous + 1) & 255) as Word)\n    return 10, 20\n#entry\nmain:\n    count Word: 0\n    for value in make(count)\n        value.finish\n    return count\n",
         1,
     );
 }
@@ -80,7 +80,7 @@ fn iteration_bindings_preserve_outer_values_after_the_loop() {
 fn nested_sequences_are_elements_and_nested_traversal_works() {
     run(
         "nested_sequence",
-        "#entry\nmain:\n    total Word: 0\n    for row in [[1, 2], [3]]\n        for value in row\n            amount is in 0 to 255: value\n            previous is in 0 to 255: total\n            total:: replace(total, (previous + amount) as Word)\n    return total\n",
+        "#entry\nmain:\n    total Word: 0\n    for row in [[1, 2], [3]]\n        for value in row\n            amount is in 0 to 255: value\n            previous is in 0 to 255: total\n            total:: replace(total, ((previous + amount) & 255) as Word)\n    return total\n",
         6,
     );
 }
@@ -118,7 +118,7 @@ fn integer_ranges_choose_direction_and_include_the_endpoint() {
         run(
             name,
             &format!(
-                "count Word:\n    total Word: 0\n    for value in {range}\n        previous is in 0 to 255: total\n        total:: replace(total, (previous + 1) as Word)\n    return total\n#entry\nmain: count\n"
+                "count Word:\n    total Word: 0\n    for value in {range}\n        previous is in 0 to 255: total\n        total:: replace(total, ((previous + 1) & 255) as Word)\n    return total\n#entry\nmain: count\n"
             ),
             expected,
         );
@@ -131,7 +131,7 @@ fn integer_range_bounds_are_evaluated_once_before_the_body() {
         run(
             "range_bound_order",
             &format!(
-                "lower(count mut Word) Word:\n    previous is in 0 to 255: count\n    count:: replace(deref count, (previous + 1) as Word)\n    return {start}\nupper(count mut Word) Word:\n    previous is in 0 to 255: count\n    count:: replace(deref count, (previous + 1) as Word)\n    return {end}\n#entry\nmain:\n    count Word: 0\n    total Word: 0\n    for value in lower(count) to upper(count)\n        previous is in 0 to 255: total\n        total:: replace(total, (previous + 1) as Word)\n    calls is in 0 to 255: count\n    visits is in 0 to 255: total\n    return calls * 10 + visits\n"
+                "lower(count mut Word) Word:\n    previous is in 0 to 255: count\n    count:: replace(deref count, ((previous + 1) & 255) as Word)\n    return {start}\nupper(count mut Word) Word:\n    previous is in 0 to 255: count\n    count:: replace(deref count, ((previous + 1) & 255) as Word)\n    return {end}\n#entry\nmain:\n    count Word: 0\n    total Word: 0\n    for value in lower(count) to upper(count)\n        previous is in 0 to 255: total\n        total:: replace(total, ((previous + 1) & 255) as Word)\n    calls is in 0 to 255: count\n    visits is in 0 to 255: total\n    return calls * 10 + visits\n"
             ),
             expected,
         );
@@ -151,7 +151,7 @@ fn integer_range_binder_is_independent_of_an_outer_constant() {
 fn range_bound_mutation_is_visible_to_the_loop_body() {
     run(
         "range_bound_mutation",
-        "lower(total mut Word) Word:\n    total:: replace(deref total, 1)\n    return 0\n#entry\nmain:\n    total Word: 0\n    for value in lower(total) to 2\n        previous is in 0 to 255: total\n        total:: replace(total, (previous + 1) as Word)\n    return total\n",
+        "lower(total mut Word) Word:\n    total:: replace(deref total, 1)\n    return 0\n#entry\nmain:\n    total Word: 0\n    for value in lower(total) to 2\n        previous is in 0 to 255: total\n        total:: replace(total, ((previous + 1) & 255) as Word)\n    return total\n",
         4,
     );
 }
@@ -195,7 +195,7 @@ fn inclusive_ranges_stop_at_machine_endpoints() {
         run(
             name,
             &format!(
-                "#entry\nmain:\n    total Word: 0\n    for value in {lower} to {upper}\n        previous is in Word: total\n        total:: replace(total, (previous + 1) as Word)\n    return total\n"
+                "#entry\nmain:\n    total Word: 0\n    for value in {lower} to {upper}\n        previous is in Word: total\n        total:: replace(total, ((previous + 1) & 255) as Word)\n    return total\n"
             ),
             2,
         );
@@ -206,12 +206,12 @@ fn inclusive_ranges_stop_at_machine_endpoints() {
 fn descending_range_preserves_order_rebindings_and_nested_loops() {
     run(
         "descending_order",
-        "#entry\nmain:\n    total Word: 0\n    for value in 3 to 0\n        previous is in Word: total\n        total:: replace(total, (previous * 4 + value) as Word)\n    return total\n",
+        "#entry\nmain:\n    total Word: 0\n    for value in 3 to 0\n        previous is in Word: total\n        total:: replace(total, ((previous * 4 + value) & 255) as Word)\n    return total\n",
         228,
     );
     run(
         "nested_descending_ranges",
-        "#entry\nmain:\n    total Word: 0\n    for outer in 3 to 0\n        for inner in 2 to 0\n            previous is in Word: total\n            total:: replace(total, (previous + outer + inner) as Word)\n    return total\n",
+        "#entry\nmain:\n    total Word: 0\n    for outer in 3 to 0\n        for inner in 2 to 0\n            previous is in Word: total\n            total:: replace(total, ((previous + outer + inner) & 255) as Word)\n    return total\n",
         30,
     );
 }
@@ -231,7 +231,7 @@ fn runtime_bounds_select_both_directions_and_singleton_ranges() {
         run(
             "runtime_range_direction",
             &format!(
-                "fold(start Word, end Word) Word:\n    total Word: 0\n    for value in start to end\n        previous is in Word: total\n        digit is in Word: value\n        total:: replace(total, (previous * 4 + digit) as Word)\n    return total\n#entry\nmain: fold({start}, {end})\n"
+                "fold(start Word, end Word) Word:\n    total Word: 0\n    for value in start to end\n        previous is in Word: total\n        digit is in Word: value\n        total:: replace(total, ((previous * 4 + digit) & 255) as Word)\n    return total\n#entry\nmain: fold({start}, {end})\n"
             ),
             expected,
         );
@@ -264,7 +264,7 @@ fn runtime_views_visit_only_the_visible_prefix() {
         run(
             "visible_prefix",
             &format!(
-                "{VIEW}run(length Length) Word:\n    source [Word; 4]: [10, 20, 30, 40]\n    view: prefix(source, length)\n    total Word: 0\n    for item in view.storage\n        previous is in Word: total\n        amount is in Word: read(item)\n        total:: replace(total, (previous + amount) as Word)\n    return total\n#entry\nmain: run({length})\n"
+                "{VIEW}run(length Length) Word:\n    source [Word; 4]: [10, 20, 30, 40]\n    view: prefix(source, length)\n    total Word: 0\n    for item in view.storage\n        previous is in Word: total\n        amount is in Word: read(item)\n        total:: replace(total, ((previous + amount) & 255) as Word)\n    return total\n#entry\nmain: run({length})\n"
             ),
             expected,
         );
@@ -320,7 +320,7 @@ fn runtime_view_constructor_traps_if_length_exceeds_backing_array() {
 fn dependent_views_borrow_array_storage_and_traverse_initialized_elements() {
     run(
         "pointer_view",
-        "Length is in 0 to 255\nLength has\n    finish(self):\n        return\nWindow(element) has\n    storage ref [element; length]\n    length Length\n    finish(self):\n        return\nread(value ref Word) Word: return deref value\n#entry\nmain:\n    source [Word; 4]: [10, 20, 30, 40]\n    data: ref source.[0; 2]\n    view Window(Word): Window(storage: data, length: 2)\n    total Word: 0\n    for item in view.storage\n        previous is in Word: total\n        amount is in Word: read(item)\n        total:: replace(total, (previous + amount) as Word)\n    return total\n",
+        "Length is in 0 to 255\nLength has\n    finish(self):\n        return\nWindow(element) has\n    storage ref [element; length]\n    length Length\n    finish(self):\n        return\nread(value ref Word) Word: return deref value\n#entry\nmain:\n    source [Word; 4]: [10, 20, 30, 40]\n    data: ref source.[0; 2]\n    view Window(Word): Window(storage: data, length: 2)\n    total Word: 0\n    for item in view.storage\n        previous is in Word: total\n        amount is in Word: read(item)\n        total:: replace(total, ((previous + amount) & 255) as Word)\n    return total\n",
         30,
     );
 }
@@ -353,7 +353,7 @@ main:
     for value in prefix.storage
         previous is in Byte: total
         amount is in Byte: read(value)
-        total:: replace(total, (previous + amount) as Byte)
+        total:: replace(total, ((previous + amount) & 255) as Byte)
     vector: when List.with_capacity(Byte, 2) is
         List(value) then value
         AllocFailure(failure) then
@@ -368,7 +368,7 @@ main:
     for value in view.data
         previous is in Byte: total
         amount is in Byte: read(value)
-        total:: replace(total, (previous + amount) as Byte)
+        total:: replace(total, ((previous + amount) & 255) as Byte)
     vector.release
     return total
 "#,
@@ -427,7 +427,7 @@ fn core_list_views_do_not_survive_storage_invalidation() {
 fn inclusive_unsigned_ranges_stop_at_the_maximum_endpoint() {
     run(
         "unsigned_range_max",
-        "Wide is in 0 to 18446744073709551615\nWide has\n    finish(self):\n        return\nlower Wide: 18446744073709551614\nupper Wide: 18446744073709551615\n#entry\nmain:\n    total Word: 0\n    for value in lower to upper\n        previous is in Word: total\n        total:: replace(total, (previous + 1) as Word)\n    return total\n",
+        "Wide is in 0 to 18446744073709551615\nWide has\n    finish(self):\n        return\nlower Wide: 18446744073709551614\nupper Wide: 18446744073709551615\n#entry\nmain:\n    total Word: 0\n    for value in lower to upper\n        previous is in Word: total\n        total:: replace(total, ((previous + 1) & 255) as Word)\n    return total\n",
         2,
     );
 }
@@ -437,7 +437,7 @@ fn runtime_view_sources_are_evaluated_once() {
     run(
         "view_evaluate_once",
         &format!(
-            "{VIEW}make(source ref [Word; 4], calls mut Word) View(Word):\n    previous is in Word: calls\n    calls:: replace(deref calls, (previous + 1) as Word)\n    return prefix(source, 2)\n#entry\nmain:\n    source [Word; 4]: [10, 20, 30, 40]\n    calls Word: 0\n    total Word: 0\n    for value in make(source, calls).storage\n        previous is in Word: total\n        amount is in Word: read(value)\n        total:: replace(total, (previous + amount) as Word)\n    count is in Word: calls\n    sum is in Word: total\n    return count + sum\n"
+            "{VIEW}make(source ref [Word; 4], calls mut Word) View(Word):\n    previous is in Word: calls\n    calls:: replace(deref calls, ((previous + 1) & 255) as Word)\n    return prefix(source, 2)\n#entry\nmain:\n    source [Word; 4]: [10, 20, 30, 40]\n    calls Word: 0\n    total Word: 0\n    for value in make(source, calls).storage\n        previous is in Word: total\n        amount is in Word: read(value)\n        total:: replace(total, ((previous + amount) & 255) as Word)\n    count is in Word: calls\n    sum is in Word: total\n    return count + sum\n"
         ),
         31,
     );
@@ -448,7 +448,7 @@ fn runtime_view_binders_preserve_outer_constants() {
     run(
         "view_scope",
         &format!(
-            "{VIEW}#entry\nmain:\n    source [Word; 4]: [10, 20, 30, 40]\n    view: prefix(source, 2)\n    value Word: 42\n    total Word: 0\n    for item in view.storage\n        previous is in Word: total\n        amount is in Word: read(item)\n        total:: replace(total, (previous + amount) as Word)\n    outer is in Word: value\n    sum is in Word: total\n    return outer + sum\n"
+            "{VIEW}#entry\nmain:\n    source [Word; 4]: [10, 20, 30, 40]\n    view: prefix(source, 2)\n    value Word: 42\n    total Word: 0\n    for item in view.storage\n        previous is in Word: total\n        amount is in Word: read(item)\n        total:: replace(total, ((previous + amount) & 255) as Word)\n    outer is in Word: value\n    sum is in Word: total\n    return outer + sum\n"
         ),
         72,
     );
@@ -460,7 +460,7 @@ fn inclusive_count_ranges_guard_zero_before_unsigned_subtraction() {
         run(
             "count_range",
             &format!(
-                "Length is in 0 to 18446744073709551615\nLength has\n    finish(self):\n        return\ncount(length Length) Word:\n    count is in Length: length\n    total Word: 0\n    when count is 0 then\n        return total\n    for index in 0 to count - 1\n        previous is in Word: total\n        total:: replace(total, (previous + 1) as Word)\n    return total\n#entry\nmain: count({length})\n"
+                "Length is in 0 to 18446744073709551615\nLength has\n    finish(self):\n        return\ncount(length Length) Word:\n    count is in Length: length\n    total Word: 0\n    when count is 0 then\n        return total\n    for index in 0 to count - 1\n        previous is in Word: total\n        total:: replace(total, ((previous + 1) & 255) as Word)\n    return total\n#entry\nmain: count({length})\n"
             ),
             expected,
         );
@@ -518,7 +518,7 @@ fn core_mutable_array_and_list_views_update_their_storage() {
 use core.collection List
 increment(value mut Byte):
     previous is in Byte: value
-    value:: Byte.replace(deref value, (previous + 1) as Byte)
+    value:: Byte.replace(deref value, ((previous + 1) & 255) as Byte)
     return
 #entry
 main:

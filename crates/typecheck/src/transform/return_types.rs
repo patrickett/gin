@@ -296,7 +296,9 @@ pub(super) fn validate_integer_return_representation(
 ) {
     match ty {
         Ty::AnonymousInteger { validity }
-            if !typed.type_registry.is_target_dependent_validity(validity) =>
+            if !typed.type_registry.is_target_dependent_validity(validity)
+                && (typed.target_layout.is_some()
+                    || validity.domain().storage_hull().is_some()) =>
         {
             if let Err(error) = validity
                 .resolve_runtime_representation(&IntegerRepresentationRule::InferFromValidity)

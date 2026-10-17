@@ -99,7 +99,9 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 );
                 self.recover_removed_parenthesized_has_rhs();
                 (DeclareValue::Has(Vec::new()), Vec::new())
-            } else if matches!(self.peek(), Some(Token::Tag(_))) {
+            } else if !matches!(self.raw_peek(), Some(Token::Newline))
+                && matches!(self.peek(), Some(Token::Tag(_)))
+            {
                 let start = self.current_span();
                 let provided_traits = self.parse_trait_chain_after_has(expr_parser);
                 provided_traits_span = Some(self.merge_span(start, self.last_consumed_span()));
@@ -169,6 +171,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
         let mut private_block_doc = None;
         loop {
             self.skip_newlines();
+            if !has_block_body
+                && matches!(self.peek(), Some(Token::Tag(_)))
+                && self.peek_at(1) != Some(&Token::Dot)
+            {
+                break;
+            }
             if self.is_at(&Token::ParenClose) {
                 if !has_block_body {
                     self.advance();

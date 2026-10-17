@@ -26,7 +26,7 @@ Leaf has
     release(self):
         pointer: self.count
         previous is in Word: pointer.[0]
-        pointer.[0]:: Word.replace(pointer.[0], (previous + 1) as Word)
+        pointer.[0]:: Word.replace(pointer.[0], ((previous + 1) & 255) as Word)
         last: self.last
         last.[0]:: Word.replace(last.[0], self.id)
         return
@@ -56,7 +56,7 @@ main:
     finish(empty)
     calls is in Word: count
     last_id is in Word: last
-    return ((calls * 10) + last_id) as Word
+    return (((calls * 10) + last_id) & 255) as Word
 "#
         ),
         22,
@@ -93,7 +93,7 @@ main:
     value.release
     calls is in Word: count
     last_id is in Word: last
-    return ((calls * 10) + last_id) as Word
+    return (((calls * 10) + last_id) & 255) as Word
 "#
             ),
             22,
@@ -127,7 +127,7 @@ main:
     calls is in Word: count
     last_id is in Word: last
     original_id is in Word: seen
-    return ((calls * 10) + last_id + original_id) as Word
+    return (((calls * 10) + last_id + original_id) & 255) as Word
 "#
         ),
         13,
@@ -162,7 +162,7 @@ main:
     calls is in Word: count
     last_id is in Word: last
     original_id is in Word: seen
-    return ((calls * 10) + last_id + original_id) as Word
+    return (((calls * 10) + last_id + original_id) & 255) as Word
 "#
         ),
         24,
@@ -199,7 +199,7 @@ main:
     left_code is in Word: left
     right_code is in Word: right
     empty_code is in Word: empty_result
-    return ((left_code * 10) + right_code + empty_code) as Word
+    return (((left_code * 10) + right_code + empty_code) & 255) as Word
 "#
         ),
         57,
@@ -343,7 +343,7 @@ main:
     value.finish(flag)
     calls is in Word: count
     last_id is in Word: last
-    return (calls * 10 + last_id) as Word
+    return ((calls * 10 + last_id) & 255) as Word
 "#
             ),
             expected,

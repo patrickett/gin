@@ -1,4 +1,5 @@
 Byte is in 0 to 255
+
 Byte has
     finish(self):
         return
@@ -6,47 +7,83 @@ Byte has
         bits is in 0 to 255: value
         return bits as Self
 Word is in 0 to 18446744073709551615
+
 Word has
     finish(self):
         return
 Status is in -9223372036854775808 to 9223372036854775807
+
 Status has
     finish(self):
         return
 
 reserve(length Word) @Byte: return runtime_allocate(length as RuntimeWord) as @Byte
-release(pointer @Byte, length Word) Status: return runtime_deallocate(pointer as RuntimePointer, length as RuntimeWord) as Status
-write(pointer @Byte, length Word) Status: return runtime_write(1, pointer as RuntimePointer, length as RuntimeWord) as Status
+
+release(pointer @Byte, length Word) Status: return runtime_deallocate(
+    pointer as RuntimePointer
+    length as RuntimeWord
+) as Status
+
+write(pointer @Byte, length Word) Status: return runtime_write(
+    1
+    pointer as RuntimePointer
+    length as RuntimeWord
+) as Status
 
 copy_pointer(pointer ref @Byte) @Byte: return deref pointer
+
 replace_byte(previous Byte, next Byte) Byte: return next
 
-copy(destination mut @Byte, input ref @Byte, length is in 0 to 18446744073709551615):
+copy(
+    destination mut @Byte
+    input ref @Byte
+    length is in 0 to 18446744073709551615
+):
     when length is 0 then
         return
     for index in 0 to length - 1
-        destination.[index]:: replace_byte(destination.[index], Byte.copy(input.[index]))
+        destination.[index] :: replace_byte(
+            destination.[index]
+            Byte.copy(input.[index])
+        )
     return
 
 main Status:
     failed: reserve(0)
     failed_address is in 0 to 18446744073709551615: failed as Word
-    failure is in -9223372036854775808 to 9223372036854775807: when failed_address = 0 then 0 else 1
+    failure is in -9223372036854775808 to 9223372036854775807: when failed_address = 0
+    then 0
+    else 1
     input: reserve(5)
     destination: reserve(5)
     release_input: copy_pointer(input)
-    invalid_release is in -9223372036854775808 to 9223372036854775807: release(release_input, 0)
-    release_failure is in -9223372036854775808 to 9223372036854775807: when invalid_release < 0 then 0 else 2
-    input.[0]:: replace_byte(input.[0], 65 as Byte)
-    input.[1]:: replace_byte(input.[1], 0 as Byte)
-    input.[2]:: replace_byte(input.[2], 66 as Byte)
-    input.[3]:: replace_byte(input.[3], 255 as Byte)
-    input.[4]:: replace_byte(input.[4], 10 as Byte)
+    invalid_release is in -9223372036854775808 to 9223372036854775807: release(
+        release_input
+        0
+    )
+    release_failure is in -9223372036854775808 to 9223372036854775807: when invalid_release < 0
+    then 0
+    else 2
+    input.[0] :: replace_byte(input.[0], 65 as Byte)
+    input.[1] :: replace_byte(input.[1], 0 as Byte)
+    input.[2] :: replace_byte(input.[2], 66 as Byte)
+    input.[3] :: replace_byte(input.[3], 255 as Byte)
+    input.[4] :: replace_byte(input.[4], 10 as Byte)
     copy(destination, input, 5)
     output: copy_pointer(destination)
     written is in -9223372036854775808 to 9223372036854775807: write(output, 5)
-    output_failure is in -9223372036854775808 to 9223372036854775807: when written = 5 then 0 else 4
-    released_input is in -9223372036854775808 to 9223372036854775807: release(input, 5)
-    released_destination is in -9223372036854775808 to 9223372036854775807: release(destination, 5)
-    return (failure + release_failure + output_failure + released_input + released_destination) as Status
-
+    output_failure is in -9223372036854775808 to 9223372036854775807: when written = 5
+    then 0
+    else 4
+    released_input is in -9223372036854775808 to 9223372036854775807: release(
+        input
+        5
+    )
+    released_destination is in -9223372036854775808 to 9223372036854775807: release(
+        destination
+        5
+    )
+    total: failure + release_failure + output_failure + released_input + released_destination
+    when total >= -9223372036854775808 and total <= 9223372036854775807 then
+        return total as Status
+    return 1

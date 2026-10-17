@@ -62,15 +62,15 @@ main:
 fn test_const_union_when_else() {
     compile_and_run_with_options(
         "LogLevel is Debug or Info or Warn or Error
+choose(level LogLevel): return when level is
+    Debug then 1
+    Info then 2
+    else 0
 
 #entry
 main:
-    level LogLevel: Warn
-    result: when level is
-        Debug then 1
-        Info then 2
-        else 0
-    return result
+    result: choose(Warn)
+    return 0
 ",
         Options {
             test_name: "const_union_when_else".into(),

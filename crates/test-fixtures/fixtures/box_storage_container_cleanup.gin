@@ -15,7 +15,7 @@ TrackingAllocator has Allocator
         self.inner.reclaim(storage)
         TrackingAllocator.check_count(observed, self.expected, self.fault)
         previous is in Byte: self.reclaimed.[0]
-        self.reclaimed.[0]:: Byte.replace(self.reclaimed.[0], (previous + 1) as Byte)
+        self.reclaimed.[0]:: Byte.replace(self.reclaimed.[0], ((previous + 1) & 255) as Byte)
         return
     release(self):
         TrackingAllocator(inner, drops, expected, reclaimed, released, fault) := self
@@ -26,7 +26,7 @@ TrackingAllocator has Allocator
         TrackingAllocator.check_count(reclaimed_count, one, fault)
         inner.release
         previous is in Byte: released.[0]
-        released.[0]:: Byte.replace(released.[0], (previous + 1) as Byte)
+        released.[0]:: Byte.replace(released.[0], ((previous + 1) & 255) as Byte)
         return
     check_count(observed ref Byte, expected ref Byte, fault mut @Byte):
         actual is in Byte: observed
@@ -42,10 +42,10 @@ Resource has
     release(self):
         Resource(id, drops, order) := self
         count is in Byte: drops.[0]
-        drops.[0]:: Byte.replace(drops.[0], (count + 1) as Byte)
+        drops.[0]:: Byte.replace(drops.[0], ((count + 1) & 255) as Byte)
         trace is in Byte: order.[0]
         identity is in Byte: id
-        order.[0]:: Byte.replace(order.[0], (trace * 10 + identity) as Byte)
+        order.[0]:: Byte.replace(order.[0], ((trace * 10 + identity) & 255) as Byte)
         return
 unwrap(attempt BoxResult(Resource, TrackingAllocator)) Box(Resource, TrackingAllocator):
     return when attempt is

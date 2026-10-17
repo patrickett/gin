@@ -126,7 +126,7 @@ Resource has
     release(self):
         pointer: self.count
         previous is in Byte: pointer.[0]
-        pointer.[0]:: Byte.replace(pointer.[0], (previous + 1) as Byte)
+        pointer.[0]:: Byte.replace(pointer.[0], ((previous + 1) & 255) as Byte)
         return
 transfer(value Resource):
     alias: value

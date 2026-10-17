@@ -157,7 +157,7 @@ fn list_capacity_preconditions_require_proofs_at_call_sites() {
         ),
         (
             "unknown_growth",
-            "run(values mut List(Byte), additional Length):\n    attempt ListReserveResult: values.reserve(additional)\n    attempt.release\n    return\n",
+            "run(values mut List(Byte), additional Length):\n    attempt ListReserveResult: values.reserve(additional)\n    return\n",
             Some("type-parameter-refinement-unproven"),
         ),
         (
@@ -167,7 +167,7 @@ fn list_capacity_preconditions_require_proofs_at_call_sites() {
         ),
         (
             "guarded_growth",
-            "run(values mut List(Byte), additional Length):\n    when additional <= max_count - values.length.as_num then\n        attempt ListReserveResult: values.reserve(additional)\n        attempt.release\n    return\n",
+            "run(values mut List(Byte), additional Length):\n    when additional <= max_count - values.length.as_num then\n        attempt ListReserveResult: values.reserve(additional)\n    return\n",
             None,
         ),
         (
