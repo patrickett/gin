@@ -8,5 +8,6 @@ workspace = true
 
 [dependencies]
 span = { workspace = true }
-ariadne = "0.5.1"
-derive_more = { workspace = true }
+ariadne = { version = "0.5.1", features = ["auto-color"] }
+serde = { workspace = true }
+thiserror = { workspace = true }

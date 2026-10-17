@@ -8,7 +8,7 @@
 //!
 //! Diagnostics are constructed via the builder pattern, e.g.:
 //! ```ignore
-//! Diagnostic::new("type-unknown-symbol", "unknown symbol `Foo`")
+//! Diagnostic::new(SymbolCode::Unknown, "unknown symbol `Foo`")
 //!     .with_arg("name", "Foo")
 //!     .with_help("add an import for `Foo`")
 //!     .at_span_id(span_id, &span_table)
@@ -19,8 +19,10 @@ extern crate self as diagnostic;
 
 pub use span::{Span, SpanId, SpanTable, Spanned};
 mod category;
+pub mod code;
+use crate::code::LexCode;
 pub use category::Category;
-use derive_more::From;
+pub use code::DiagnosticCode;
 use std::path::{Component, Path, PathBuf};
 
 /// Extension trait providing diagnostic path utilities on [`Path`].
@@ -110,22 +112,39 @@ pub struct RelatedSpan {
     pub label: String,
 }
 
-/// Stable kebab-case error-code slug (e.g. `"type-unknown-symbol"`, `"lex-unclosed-string"`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, From)]
-pub struct DiagnosticCode(pub String);
-
-impl DiagnosticCode {
-    /// Return the stable kebab-case slug string.
-    #[must_use]
-    pub fn slug(&self) -> &str {
-        &self.0
+/// 1-based line and column (in Unicode scalars) of `byte` in `source`.
+///
+/// The offset is clamped to the nearest preceding char boundary. This is the
+/// CLI/JSON reporting convention; it is NOT the 0-based UTF-16 convention used
+/// by LSP position conversions.
+#[must_use]
+pub fn source_position(source: &str, byte: usize) -> (usize, usize) {
+    let mut byte = byte.min(source.len());
+    while !source.is_char_boundary(byte) {
+        byte -= 1;
     }
+    let prefix = &source[..byte];
+    let line = prefix.bytes().filter(|b| *b == b'\n').count() + 1;
+    let column = prefix
+        .rsplit('\n')
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .count()
+        + 1;
+    (line, column)
 }
 
-impl From<&str> for DiagnosticCode {
-    fn from(s: &str) -> Self {
-        DiagnosticCode(s.to_string())
-    }
+/// Structured secondary data attached to a [`Diagnostic`].
+///
+/// Kept behind a box on [`Diagnostic`] so the diagnostic stays below clippy's
+/// `result_large_err` threshold while retaining its rich error/code payload.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct DiagnosticDetails {
+    /// Structured key-value args for IDE quickfix data extraction (e.g. symbol name).
+    /// Only populated when a quickfix is applicable.
+    pub args: Vec<(String, String)>,
+    pub related: Vec<RelatedSpan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -139,36 +158,59 @@ pub struct Diagnostic {
     /// Byte range in the source file this diagnostic applies to.
     pub span: Span,
     pub category: Category,
-    /// Structured key-value args for IDE quickfix data extraction (e.g. symbol name).
-    /// Only populated when a quickfix is applicable.
-    pub args: Vec<(String, String)>,
-    pub related: Vec<RelatedSpan>,
+    details: Option<Box<DiagnosticDetails>>,
 }
 
 impl Diagnostic {
-    /// Create a new diagnostic with the given kebab-code and human-readable message.
+    /// Create a new diagnostic with the given code and human-readable message.
     ///
     /// The message should be a self-contained description. Use [`with_arg`](Self::with_arg)
     /// to attach structured data for IDE quickfix extraction.
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(code: impl Into<DiagnosticCode>, message: impl Into<String>) -> Self {
         Self {
-            code: DiagnosticCode(code.into()),
+            code: code.into(),
             message: message.into(),
             help_on_span: None,
             help: None,
             span: Span::new(0, 0),
             category: Category::Flaw,
-            args: Vec::new(),
-            related: Vec::new(),
+            details: None,
         }
+    }
+
+    fn details_mut(&mut self) -> &mut DiagnosticDetails {
+        self.details
+            .get_or_insert_with(|| Box::new(DiagnosticDetails::default()))
+    }
+
+    /// Structured key-value args for IDE quickfix extraction.
+    #[must_use]
+    pub fn args(&self) -> &[(String, String)] {
+        match &self.details {
+            Some(details) => &details.args,
+            None => &[],
+        }
+    }
+
+    /// Secondary spans attached to this diagnostic.
+    #[must_use]
+    pub fn related(&self) -> &[RelatedSpan] {
+        match &self.details {
+            Some(details) => &details.related,
+            None => &[],
+        }
+    }
+
+    pub fn related_mut(&mut self) -> &mut Vec<RelatedSpan> {
+        &mut self.details_mut().related
     }
 
     /// Attach a structured key-value pair for IDE quickfix extraction.
     ///
-    /// Example: `Diagnostic::new("type-unknown-symbol", …).with_arg("name", "Foo")`
+    /// Example: `Diagnostic::new(SymbolCode::Unknown, …).with_arg("name", "Foo")`
     /// allows the LSP handler to do `diag.arg("name") → Some("Foo")` in O(1).
     pub fn with_arg(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.args.push((key.into(), value.into()));
+        self.details_mut().args.push((key.into(), value.into()));
         self
     }
 
@@ -201,15 +243,15 @@ impl Diagnostic {
     /// Retrieve a structured arg by key (used by IDE quickfix code).
     #[must_use]
     pub fn arg(&self, key: &str) -> Option<&str> {
-        self.args
+        self.args()
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
     }
 
     #[must_use]
-    pub fn error_code(&self) -> &str {
-        &self.code.0
+    pub fn error_code(&self) -> String {
+        self.code.slug()
     }
 
     /// Pretty-print this diagnostic using ariadne with source context.
@@ -246,43 +288,21 @@ impl Diagnostic {
 
         let color = self.category.color();
 
-        if start < end {
-            let underline = self
-                .help_on_span
-                .as_deref()
-                .or(self.help.as_deref())
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
+        let underline = self
+            .help_on_span
+            .as_deref()
+            .or(self.help.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
 
+        if start < end {
             let mut primary = Label::new((filename, span.clone())).with_color(color);
             if let Some(m) = underline {
                 primary = primary.with_message(m);
             }
             builder = builder.with_label(primary);
-
-            if self.help_on_span.is_some()
-                && let Some(h) = self
-                    .help
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-            {
-                let point = start..start;
-                let secondary = Label::new((filename, point))
-                    .with_color(color)
-                    .with_message(format!("help: {h}"))
-                    .with_order(1);
-                builder = builder.with_label(secondary);
-            }
         } else if start > 0 {
             let back = (start - 1)..start;
-            let underline = self
-                .help_on_span
-                .as_deref()
-                .or(self.help.as_deref())
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
-
             let mut label = Label::new((filename, back))
                 .with_color(color)
                 .with_message("here");
@@ -290,21 +310,6 @@ impl Diagnostic {
                 label = label.with_message(m);
             }
             builder = builder.with_label(label);
-
-            if self.help_on_span.is_some()
-                && let Some(h) = self
-                    .help
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-            {
-                let point = start..start;
-                let secondary = Label::new((filename, point))
-                    .with_color(color)
-                    .with_message(format!("help: {h}"))
-                    .with_order(1);
-                builder = builder.with_label(secondary);
-            }
         } else if let Some(help) = self
             .help
             .as_ref()
@@ -314,8 +319,24 @@ impl Diagnostic {
             builder = builder.with_note(help);
         }
 
+        if (start < end || start > 0)
+            && self.help_on_span.is_some()
+            && let Some(h) = self
+                .help
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        {
+            let point = start..start;
+            let secondary = Label::new((filename, point))
+                .with_color(color)
+                .with_message(format!("help: {h}"))
+                .with_order(1);
+            builder = builder.with_label(secondary);
+        }
+
         // Render related spans as secondary labels.
-        for related in &self.related {
+        for related in self.related() {
             let rstart = related.span.start();
             let rend = related.span.end();
             let rstart = rstart.min(len);
@@ -337,8 +358,10 @@ impl Diagnostic {
     /// Returns `true` if the diagnostic was fully handled (the caller should skip
     /// default rendering).
     pub fn render_custom(&self, source: &str, filename: &str) -> bool {
-        match self.code.slug() {
-            "lex-unclosed-string" => self.render_unclosed_string(source, filename),
+        match self.code {
+            DiagnosticCode::Lex(LexCode::UnclosedString) => {
+                self.render_unclosed_string(source, filename)
+            }
             _ => false,
         }
     }
