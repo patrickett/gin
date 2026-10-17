@@ -5,15 +5,20 @@ use std::path::{Path, PathBuf};
 
 use ast::source::{CharExt, SourceExt};
 use ast::{FileAst, HasSpanId, ImportSource, LocalBundleImport};
-use flask::{DependencyKind, FlaskPathExt};
+use flask::FlaskPathExt;
 use internment::Intern;
 
 use crate::ParsedFile;
 use crate::file_helpers::GinPackageExt;
 use crate::folder_module::{
-    normalize_local_import_path, resolve_logical_module_dir, split_dep_path_segments,
+    normalize_local_import_path, normalize_path_components, resolve_logical_module_dir,
+    split_dep_path_segments,
 };
 use crate::import_query::{find_package_root, resolve_dep_dir, resolve_import_at};
+
+mod lexical;
+pub use lexical::definition_span as local_definition_span;
+mod members;
 
 /// A public symbol's definition file and source byte range.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,14 +27,28 @@ pub struct DefLocation {
     pub byte_range: Range<usize>,
 }
 
-/// Import path navigation — either a manifest (`flask.jsonc`) or a symbol definition.
+/// Import path navigation — either a manifest (`mod.flask`) or a symbol definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportNavLocation {
-    /// `flask.jsonc` or folder module root (navigate to start of file).
+    /// `mod.flask` or folder module root (navigate to start of file).
     Manifest(PathBuf),
     /// Same-file `use` of current-module symbols.
     FileRoot(PathBuf),
     Definition(DefLocation),
+}
+
+pub(crate) fn dep_bundle_import(dep_name: &str, path_segments: &[String]) -> LocalBundleImport {
+    LocalBundleImport {
+        root: Intern::new(dep_name.to_string()),
+        module_path: None,
+        path_segments: path_segments
+            .iter()
+            .map(|segment| Intern::new(segment.clone()))
+            .collect(),
+        members: Vec::new(),
+        span: ast::span::SpanId::INVALID,
+        local_path: None,
+    }
 }
 
 /// Result of resolving the cursor for goto-definition.
@@ -44,29 +63,19 @@ pub enum CursorDefinition {
 }
 
 /// Find a public `symbol` under `scope_dir` (package or folder module).
-pub fn public_symbol_def_location(
+pub(crate) fn public_symbol_def_location(
     scope_dir: &Path,
     symbol: &str,
     file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
 ) -> Option<DefLocation> {
     let def_file = scope_dir.find_public_def(symbol)?;
     let parsed = file_reader(&def_file)?;
-    let byte_range = parsed.output.ast.definition_span(symbol)?;
-    Some(DefLocation {
-        file: def_file,
-        byte_range,
-    })
+    def_location_in_file(def_file, symbol, &parsed)
 }
 
-/// Dependency member: `use dep.sym`.
-pub fn dep_symbol_def_location(
-    file_path: &Path,
-    dep_name: &str,
-    symbol: &str,
-    file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
-) -> Option<DefLocation> {
-    let dep_dir = resolve_dep_dir(file_path, dep_name)?;
-    public_symbol_def_location(&dep_dir, symbol, file_reader)
+fn def_location_in_file(file: PathBuf, symbol: &str, parsed: &ParsedFile) -> Option<DefLocation> {
+    let byte_range = parsed.output.ast.definition_span(symbol)?;
+    Some(DefLocation { file, byte_range })
 }
 
 /// Folder module containing a bundle export such as `folder.Symbol` or `Sym`.
@@ -82,11 +91,7 @@ pub fn public_symbol_in_module_dir(
     if segments.len() == 1 {
         let def_file = crate::public_symbols::find_public_def_in_module(module_dir, segments[0])?;
         let parsed = file_reader(&def_file)?;
-        let byte_range = parsed.output.ast.definition_span(segments[0])?;
-        return Some(DefLocation {
-            file: def_file,
-            byte_range,
-        });
+        return def_location_in_file(def_file, segments[0], &parsed);
     }
     let (module_segs, trailing_member) = split_dep_path_segments(module_dir, &segments);
     let sym = trailing_member?;
@@ -106,7 +111,7 @@ pub fn dep_bundle_member_def_location(
     export: &str,
     file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
 ) -> Option<DefLocation> {
-    let dep_dir = dep_dir_from_file(file_path, b.root.as_str())?;
+    let dep_dir = resolve_dep_dir(file_path, b.root.as_str())?;
     let module_dir = if b.path_segments.is_empty() {
         dep_dir
     } else {
@@ -124,14 +129,14 @@ pub fn local_bundle_def_location(
     file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
 ) -> Option<DefLocation> {
     let base_dir = file_path.parent()?;
-    let mut resolved = normalize_local_path_components(&base_dir.join(local_path));
+    let mut resolved = normalize_path_components(&base_dir.join(local_path));
     if !resolved.exists()
         && let Some(without_suffix) = local_path
             .to_string_lossy()
             .strip_suffix('.')
             .map(PathBuf::from)
     {
-        let alternate = normalize_local_path_components(&base_dir.join(without_suffix));
+        let alternate = normalize_path_components(&base_dir.join(without_suffix));
         if alternate.exists() {
             resolved = alternate;
         }
@@ -146,25 +151,7 @@ pub fn local_bundle_def_location(
         return None;
     }
     let parsed = file_reader(&def_file)?;
-    let byte_range = parsed.output.ast.definition_span(sym)?;
-    Some(DefLocation {
-        file: def_file,
-        byte_range,
-    })
-}
-
-fn normalize_local_path_components(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            std::path::Component::CurDir => {}
-            component => out.push(component.as_os_str()),
-        }
-    }
-    out
+    def_location_in_file(def_file, sym, &parsed)
 }
 
 /// Same-folder sibling: `use Sym` in a `use` line (definition in another file in the folder).
@@ -173,14 +160,7 @@ pub fn current_module_sibling_def_location(
     symbol: &str,
     file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
 ) -> Option<DefLocation> {
-    let file_dir = file_path.parent()?;
-    let def_file = crate::public_symbols::find_public_def(file_dir, symbol)?;
-    let parsed = file_reader(&def_file)?;
-    let byte_range = parsed.output.ast.definition_span(symbol)?;
-    Some(DefLocation {
-        file: def_file,
-        byte_range,
-    })
+    public_symbol_def_location(file_path.parent()?, symbol, file_reader)
 }
 
 /// Package-root def in the current package (`use Sym` body reference).
@@ -206,7 +186,7 @@ pub fn def_location_for_import_target(
     match target {
         ImportTarget::DepRoot { dep_name } => {
             let dep_dir = resolve_dep_dir(file_path, &dep_name)?;
-            let manifest = dep_dir.join(flask::PACKAGE_CONFIG_NAME);
+            let manifest = flask::FlaskConfig::manifest_path(&dep_dir);
             if !manifest.is_file() {
                 return None;
             }
@@ -230,29 +210,14 @@ pub fn def_location_for_import_target(
                 .iter()
                 .map(|s| Intern::new(s.clone()))
                 .collect();
-            package_import_part_location(
-                file_path,
-                &dep_name,
-                &segments,
-                segments.len(),
-                file_reader,
-            )
+            package_import_part_location(file_path, &dep_name, &segments, segments.len())
         }
         ImportTarget::DepBundleMember {
             dep_name,
             path_segments,
             symbol,
         } => {
-            let b = LocalBundleImport {
-                root: Intern::new(dep_name),
-                path_segments: path_segments
-                    .iter()
-                    .map(|s| Intern::new(s.clone()))
-                    .collect(),
-                members: Vec::new(),
-                span: ast::span::SpanId::INVALID,
-                local_path: None,
-            };
+            let b = dep_bundle_import(&dep_name, &path_segments);
             dep_bundle_member_def_location(file_path, &b, &symbol, file_reader)
                 .map(ImportNavLocation::Definition)
         }
@@ -272,11 +237,9 @@ pub fn body_import_def_location(
     file_path: &Path,
     ast: &FileAst,
     source: &str,
-    word: &str,
     byte_pos: usize,
     file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
 ) -> Option<DefLocation> {
-    let _ = word;
     let target = resolve_import_at(ast, source, byte_pos)?;
     match target {
         crate::ImportTarget::LocalBundleSymbol { local_path, symbol } => {
@@ -290,16 +253,7 @@ pub fn body_import_def_location(
             path_segments,
             symbol,
         } => {
-            let b = LocalBundleImport {
-                root: Intern::new(dep_name),
-                path_segments: path_segments
-                    .iter()
-                    .map(|s| Intern::new(s.clone()))
-                    .collect(),
-                members: Vec::new(),
-                span: ast::span::SpanId::INVALID,
-                local_path: None,
-            };
+            let b = dep_bundle_import(&dep_name, &path_segments);
             dep_bundle_member_def_location(file_path, &b, &symbol, file_reader)
         }
         _ => None,
@@ -315,52 +269,61 @@ pub fn is_import_identifier_at(source: &str, byte_pos: usize) -> bool {
         .unwrap_or(false)
 }
 
+fn resolve_local_dir(file_path: &Path, path: &Path) -> Option<PathBuf> {
+    let base_dir = file_path.parent()?;
+    let pkg_root = find_package_root(base_dir)?;
+    normalize_local_import_path(base_dir, &pkg_root, path).ok()
+}
+
 fn nested_package_manifest(start_dir: &Path, segments: &[&str]) -> Option<PathBuf> {
     match start_dir.resolve_nested_package_path(segments).ok()? {
         flask::NestedPackageTarget::FolderModule(dir) => {
-            let cfg = dir.join(flask::PACKAGE_CONFIG_NAME);
+            let cfg = flask::FlaskConfig::manifest_path(&dir);
             if cfg.exists() { Some(cfg) } else { None }
         }
     }
 }
 
-fn dep_dir_from_file(file_path: &Path, dep_name: &str) -> Option<PathBuf> {
-    let base_dir = file_path.parent()?;
-    let handle = flask::FlaskConfigHandle::load(base_dir).ok()?;
-    let cfg = handle.read();
-    let config_dir = handle.source_dir();
-    let dep = cfg.config.dependencies().get(dep_name)?;
-    match &dep.kind {
-        DependencyKind::Path { path } => Some(config_dir.join(path)),
-        _ => None,
-    }
-}
-
 /// `use dep.folder sym, …` — `part_index` 0 = dep root, 1+ = `path_segments`.
-pub fn dep_bundle_import_part_location(
+pub(crate) fn dep_bundle_import_part_location(
     file_path: &Path,
     b: &LocalBundleImport,
     part_index: usize,
-    _file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
 ) -> Option<ImportNavLocation> {
-    let dep_dir = dep_dir_from_file(file_path, b.root.as_str())?;
+    import_part_location(file_path, b.root.as_str(), &b.path_segments, part_index)
+}
+
+/// Dotted package import `use dep.seg.sym` — `part_index` 0 = dep root, 1+ = segments.
+pub(crate) fn package_import_part_location(
+    file_path: &Path,
+    root: &str,
+    segments: &[Intern<String>],
+    part_index: usize,
+) -> Option<ImportNavLocation> {
+    import_part_location(file_path, root, segments, part_index)
+}
+
+fn import_part_location(
+    file_path: &Path,
+    root: &str,
+    segments: &[Intern<String>],
+    part_index: usize,
+) -> Option<ImportNavLocation> {
+    let dep_dir = resolve_dep_dir(file_path, root)?;
 
     if part_index == 0 {
-        let manifest = dep_dir.join(flask::PACKAGE_CONFIG_NAME);
+        let manifest = flask::FlaskConfig::manifest_path(&dep_dir);
         return manifest
             .exists()
             .then_some(ImportNavLocation::Manifest(manifest));
     }
 
     let seg_idx = part_index.saturating_sub(1);
-    if seg_idx >= b.path_segments.len() {
+    if seg_idx >= segments.len() {
         return None;
     }
 
-    let seg_strs: Vec<&str> = b.path_segments[..=seg_idx]
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
+    let seg_strs: Vec<&str> = segments[..=seg_idx].iter().map(|s| s.as_str()).collect();
     if let Some(manifest) = nested_package_manifest(&dep_dir, &seg_strs) {
         return Some(ImportNavLocation::Manifest(manifest));
     }
@@ -368,79 +331,40 @@ pub fn dep_bundle_import_part_location(
     resolve_logical_module_dir(&dep_dir, &seg_strs).map(ImportNavLocation::Manifest)
 }
 
-/// Dotted package import `use dep.seg.sym` — `part_index` 0 = dep root, 1+ = segments.
-pub fn package_import_part_location(
-    file_path: &Path,
-    root: &str,
-    segments: &[Intern<String>],
-    part_index: usize,
-    _file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
-) -> Option<ImportNavLocation> {
-    let dep_dir = dep_dir_from_file(file_path, root)?;
-
-    if part_index == 0 {
-        let manifest = dep_dir.join(flask::PACKAGE_CONFIG_NAME);
-        return manifest
-            .exists()
-            .then_some(ImportNavLocation::Manifest(manifest));
-    }
-
-    let seg_count = segments.len();
-    let seg_idx = part_index.saturating_sub(1);
-    if seg_idx >= seg_count {
-        return None;
-    }
-
-    let seg_strs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
-    if let Some(manifest) = nested_package_manifest(&dep_dir, &seg_strs[..=seg_idx]) {
-        return Some(ImportNavLocation::Manifest(manifest));
-    }
-
-    resolve_logical_module_dir(&dep_dir, &seg_strs[..=seg_idx]).map(ImportNavLocation::Manifest)
-}
-
 /// Resolve a `use` import source to a manifest or definition (folder / dep / local path).
 pub fn import_source_nav_location(
     file_path: &Path,
     source: &ImportSource,
-    file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
 ) -> Option<ImportNavLocation> {
     match source {
         ImportSource::CurrentModule { .. } => {
             Some(ImportNavLocation::FileRoot(file_path.to_path_buf()))
         }
         ImportSource::Local(path, _) => {
-            let base_dir = file_path.parent()?;
-            let pkg_root = find_package_root(base_dir)?;
-            let full = normalize_local_import_path(base_dir, &pkg_root, path).ok()?;
+            let full = resolve_local_dir(file_path, path)?;
             full.is_dir().then_some(ImportNavLocation::Manifest(full))
         }
-        ImportSource::LocalFile(path, _) => {
-            let base_dir = file_path.parent()?;
-            let pkg_root = find_package_root(base_dir)?;
-            let full = normalize_local_import_path(base_dir, &pkg_root, path).ok()?;
-            Some(ImportNavLocation::FileRoot(full))
-        }
+        ImportSource::LocalFile(path, _) => Some(ImportNavLocation::FileRoot(resolve_local_dir(
+            file_path, path,
+        )?)),
         ImportSource::LocalBundle(b) => {
             if let Some(local_path) = &b.local_path {
-                let base_dir = file_path.parent()?;
-                let pkg_root = find_package_root(base_dir)?;
-                let full = normalize_local_import_path(base_dir, &pkg_root, local_path).ok()?;
+                let full = resolve_local_dir(file_path, local_path)?;
                 full.is_dir().then_some(ImportNavLocation::Manifest(full))
             } else if b.path_segments.is_empty() {
-                let dep_dir = dep_dir_from_file(file_path, b.root.as_str())?;
-                let manifest = dep_dir.join(flask::PACKAGE_CONFIG_NAME);
+                let dep_dir = resolve_dep_dir(file_path, b.root.as_str())?;
+                let manifest = flask::FlaskConfig::manifest_path(&dep_dir);
                 manifest
                     .exists()
                     .then_some(ImportNavLocation::Manifest(manifest))
             } else {
-                dep_bundle_import_part_location(file_path, b, b.path_segments.len(), file_reader)
+                dep_bundle_import_part_location(file_path, b, b.path_segments.len())
             }
         }
         ImportSource::Package(mod_path) => {
             if mod_path.segments.is_empty() {
-                let dep_dir = dep_dir_from_file(file_path, mod_path.root.as_str())?;
-                let manifest = dep_dir.join(flask::PACKAGE_CONFIG_NAME);
+                let dep_dir = resolve_dep_dir(file_path, mod_path.root.as_str())?;
+                let manifest = flask::FlaskConfig::manifest_path(&dep_dir);
                 return manifest
                     .exists()
                     .then_some(ImportNavLocation::Manifest(manifest));
@@ -450,14 +374,13 @@ pub fn import_source_nav_location(
                 mod_path.root.as_str(),
                 &mod_path.segments,
                 mod_path.segments.len(),
-                file_reader,
             )
         }
     }
 }
 
 /// Union variant literal in a type pattern (`False` in `Ref(_, False)`).
-pub fn union_variant_def_location(
+pub(crate) fn union_variant_def_location(
     file_path: &Path,
     variant_name: &str,
     file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
@@ -520,7 +443,15 @@ pub fn cursor_definition(
         .word_at_byte(byte_pos, source)
         .or_else(|| source.word_at_byte_offset(byte_pos))?;
 
-    if let Some(span) = parameter_definition_span(ast, &word, byte_pos) {
+    if let Some(loc) = members::definition(file_path, ast, source, byte_pos, file_reader) {
+        return Some(if loc.file == file_path {
+            CursorDefinition::SameFile(loc.byte_range)
+        } else {
+            CursorDefinition::OtherFile(loc)
+        });
+    }
+
+    if let Some(span) = lexical::definition_span(ast, &word, byte_pos) {
         return Some(CursorDefinition::SameFile(span));
     }
 
@@ -557,9 +488,7 @@ pub fn cursor_definition(
         return Some(CursorDefinition::OtherFile(loc));
     }
 
-    if let Some(loc) =
-        body_import_def_location(file_path, ast, source, &word, byte_pos, file_reader)
-    {
+    if let Some(loc) = body_import_def_location(file_path, ast, source, byte_pos, file_reader) {
         return Some(CursorDefinition::OtherFile(loc));
     }
 
@@ -592,90 +521,6 @@ pub fn cursor_definition(
     }
 
     None
-}
-
-fn parameter_definition_span(ast: &FileAst, word: &str, byte_pos: usize) -> Option<Range<usize>> {
-    let span_table = &ast.span_table;
-    let key = internment::Intern::<String>::from_ref(word);
-    // Search standard defs (top-level binds).
-    for bind in ast.defs.values() {
-        if bind.receiver_type.is_some() {
-            continue;
-        }
-        let Some(params) = bind.params.as_ref() else {
-            continue;
-        };
-        if let Some(param) = params.get(&key) {
-            let span = span_table.get(param.name_span);
-            if span.contains(byte_pos) {
-                return Some(span.start()..span.end());
-            }
-        }
-        if !params.contains_key(&key) || !bind_body_contains(span_table, bind, byte_pos) {
-            continue;
-        }
-        if let Some(param) = params.get(&key) {
-            let span = span_table.get(param.name_span);
-            return Some(span.start()..span.end());
-        }
-    }
-    // Search has-body function params.
-    for decl in ast.tags.values() {
-        if !span_table.get(decl.span).contains(byte_pos) {
-            continue;
-        }
-        let members = match &decl.value {
-            ast::DeclareValue::Has(members) => members,
-            _ => continue,
-        };
-        let type_declares_param = decl
-            .params
-            .as_ref()
-            .is_some_and(|params| params.contains_key(&key));
-        for m in members {
-            if let ast::HasMember::Function(f) = m
-                && f.params.contains_key(&key)
-                && !type_declares_param
-            {
-                if let Some(param) = f.params.get(&key) {
-                    let span = span_table.get(param.name_span);
-                    if span.contains(byte_pos) {
-                        return Some(span.start()..span.end());
-                    }
-                }
-                if byte_in_has_function_body(f, byte_pos, span_table) {
-                    let span = span_table.get(f.params.get(&key)?.name_span);
-                    return Some(span.start()..span.end());
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Check if a byte position falls within a HasFunction's body expression.
-fn byte_in_has_function_body(
-    f: &ast::HasFunction,
-    byte_pos: usize,
-    span_table: &ast::span::SpanTable,
-) -> bool {
-    f.body.as_ref().is_some_and(|body| {
-        let value = match body {
-            ast::HasMemberBody::Overrideable(value) | ast::HasMemberBody::Final(value) => value,
-        };
-        match value {
-            ast::BindValue::Expr(expr) => span_table.get(expr.span_id).contains(byte_pos),
-            ast::BindValue::Body { exprs, ret } => {
-                let start = exprs
-                    .first()
-                    .map(|expr| span_table.get(expr.span_id).start())
-                    .unwrap_or_else(|| span_table.get(ret.span_id).start());
-                let end = span_table.get(ret.span_id).end();
-                (start..end).contains(&byte_pos)
-            }
-            ast::BindValue::Unassigned => false,
-        }
-    })
 }
 
 /// Find the tag definition that `self` refers to.
@@ -713,6 +558,7 @@ fn has_method_def_span(ast: &FileAst, byte_pos: usize, word: &str) -> Option<Ran
         for m in members {
             if let ast::HasMember::Function(f) = m
                 && f.name == key
+                && span_table.get(f.name_span).contains(byte_pos)
             {
                 let span = span_table.get(f.name_span);
                 return Some(span.start()..span.end());
@@ -803,19 +649,12 @@ fn type_param_def_span(ast: &FileAst, word: &str, byte_pos: usize) -> Option<Ran
                 ast::HasMember::Property(property) => {
                     has_expr_span_contains(property.ty.as_deref(), span_table, byte_pos, &key)
                 }
-                ast::HasMember::Function(function) => {
-                    has_expr_span_contains(
-                        function.return_ty.as_deref(),
-                        span_table,
-                        byte_pos,
-                        &key,
-                    ) || has_expr_span_contains(
-                        function.error_ty.as_deref(),
-                        span_table,
-                        byte_pos,
-                        &key,
-                    )
-                }
+                ast::HasMember::Function(function) => has_expr_span_contains(
+                    function.return_ty.as_deref(),
+                    span_table,
+                    byte_pos,
+                    &key,
+                ),
             };
             if contains_type_param {
                 let span = span_table.get(params.get(&key)?.name_span);
@@ -837,23 +676,6 @@ fn has_expr_span_contains(
         None => return false,
     };
     span_table.get(ty.span_id).contains(byte_pos)
-}
-
-fn bind_body_contains(
-    span_table: &ast::span::SpanTable,
-    bind: &ast::Bind,
-    byte_pos: usize,
-) -> bool {
-    match &bind.value {
-        ast::BindValue::Expr(expr) => span_table.get(expr.span_id).contains(byte_pos),
-        ast::BindValue::Body { exprs, ret } => {
-            exprs
-                .iter()
-                .any(|expr| span_table.get(expr.span_id).contains(byte_pos))
-                || span_table.get(ret.span_id).contains(byte_pos)
-        }
-        ast::BindValue::Unassigned => false,
-    }
 }
 
 /// Cursor inside a `use` statement (import path or member).
@@ -891,6 +713,7 @@ fn definition_in_use_span(
                             let lb = LocalBundleImport {
                                 root: b.root,
                                 path_segments: b.path_segments.clone(),
+                                module_path: None,
                                 members: vec![member.clone()],
                                 span: member.span,
                                 local_path: b.local_path.clone(),
@@ -930,14 +753,9 @@ fn definition_in_use_span(
                 ImportSource::Package(mp) => {
                     let span_text = source.get(span.start()..span.end()).unwrap_or("");
                     let byte_in_span = byte_pos.saturating_sub(span.start());
-                    let part = crate::part_index_in_dotted_path(span_text, byte_in_span);
-                    package_import_part_location(
-                        file_path,
-                        mp.root.as_str(),
-                        &mp.segments,
-                        part,
-                        file_reader,
-                    )?
+                    let part =
+                        crate::import_query::part_index_in_dotted_path(span_text, byte_in_span);
+                    package_import_part_location(file_path, mp.root.as_str(), &mp.segments, part)?
                 }
                 ImportSource::LocalBundle(b) if b.members.len() == 1 => {
                     let symbol = b.members.first()?.export.as_str();
@@ -962,8 +780,9 @@ fn definition_in_use_span(
                 {
                     let span_text = source.get(span.start()..span.end()).unwrap_or("");
                     let byte_in_span = byte_pos.saturating_sub(span.start());
-                    let part = crate::part_index_in_dotted_path(span_text, byte_in_span);
-                    dep_bundle_import_part_location(file_path, b, part, file_reader)?
+                    let part =
+                        crate::import_query::part_index_in_dotted_path(span_text, byte_in_span);
+                    dep_bundle_import_part_location(file_path, b, part)?
                 }
                 ImportSource::CurrentModule { member } => {
                     ImportNavLocation::Definition(current_module_sibling_def_location(
@@ -972,7 +791,7 @@ fn definition_in_use_span(
                         file_reader,
                     )?)
                 }
-                _ => import_source_nav_location(file_path, &source_ref, file_reader)?,
+                _ => import_source_nav_location(file_path, &source_ref)?,
             };
 
             return Some(CursorDefinition::Import { target, origin });
@@ -980,4 +799,120 @@ fn definition_in_use_span(
     }
 
     None
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::*;
+    use test_fixtures::TempPackage;
+
+    #[test]
+    fn imports_resolve_through_the_current_package_name() {
+        let pkg = TempPackage::new("navigation_imports");
+        pkg.write_flask("navigation");
+        let target = pkg.write("collection/List.gin", "List has\n    value in 0 to 255\n");
+        let source = "use navigation.collection List\nvalue List\n";
+        let path = pkg.write("text/text.gin", source);
+        let ast = parser::parse_from_str(source);
+        for (byte, _) in source.match_indices("List") {
+            let actual = cursor_definition(&path, &ast, source, byte, &ParsedFile::read);
+            let expected = DefLocation {
+                file: target.clone(),
+                byte_range: 0..4,
+            };
+            assert!(
+                matches!(actual,
+                Some(CursorDefinition::OtherFile(ref loc)) |
+                Some(CursorDefinition::Import { target: ImportNavLocation::Definition(ref loc), .. })
+                if *loc == expected),
+                "{actual:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn member_body_bindings_resolve_to_their_declarations() {
+        let source = "Byte is in 0 to 255\nText has\n    bytes Byte\n\n    build(source [in Byte; count]) Self:\n        buffer: 0\n        for index in 0 to count\n            buffer:: source.[index]\n        return Self(buffer)\n\n    copy(self ref) Self: return Self(bytes: self.bytes)\n";
+        let ast = parser::parse_from_str(source);
+        for (needle, word, declaration) in [
+            ("to count", "count", "count]"),
+            ("source.[index]", "source", "source ["),
+            ("source.[index]", "index", "index in"),
+            ("Self(buffer)", "buffer", "buffer: 0"),
+            ("return Self", "Self", "Text has"),
+            ("self.bytes", "self", "self ref"),
+            ("self.bytes", "bytes", "bytes Byte"),
+        ] {
+            let byte = source.find(needle).unwrap() + needle.find(word).unwrap();
+            let start = source.find(declaration).unwrap();
+            let length = if word == "Self" {
+                "Text".len()
+            } else {
+                word.len()
+            };
+            assert_eq!(
+                cursor_definition(
+                    Path::new("/tmp/navigation.gin"),
+                    &ast,
+                    source,
+                    byte,
+                    &|_| None
+                ),
+                Some(CursorDefinition::SameFile(start..start + length)),
+                "{needle}: {word}"
+            );
+        }
+    }
+    #[test]
+    fn member_calls_follow_the_receiver_across_files() {
+        let pkg = TempPackage::new("navigation_members");
+        pkg.write_flask("navigation");
+        let list = "List(element) has\n    with_capacity(element, count) Self: return Self()\n    push(self mut, value element): return\n    copy(self ref) Self: return self\n";
+        let target = pkg.write("collection/List.gin", list);
+        let source = "use navigation.collection List\nByte is in 0 to 255\nText has\n    bytes List(Byte)\n    build(source [in Byte; count]) Self:\n        bytes: List.with_capacity(Byte, count)\n        for index in 0 to count\n            bytes.push(source.[index])\n        return Self(bytes)\n    copy(self ref) Self: return Self(bytes: self.bytes.copy)\n";
+        let path = pkg.write("text/text.gin", source);
+        let ast = parser::parse_from_str(source);
+        for (needle, word) in [
+            ("List.with_capacity", "with_capacity"),
+            ("bytes.push", "push"),
+            ("self.bytes.copy", "copy"),
+        ] {
+            let byte = source.find(needle).unwrap() + needle.find(word).unwrap();
+            let start = list.find(word).unwrap();
+            assert_eq!(
+                cursor_definition(&path, &ast, source, byte, &ParsedFile::read),
+                Some(CursorDefinition::OtherFile(DefLocation {
+                    file: target.clone(),
+                    byte_range: start..start + word.len()
+                })),
+                "{needle}: {:?}",
+                ast.expr_at_byte(byte)
+            );
+        }
+    }
+
+    #[test]
+    fn local_bindings_respect_function_and_loop_scopes() {
+        let source = "Text has\n    first(value):\n        for value in 0 to 10\n            value\n        return value\n    second(other): return other\n";
+        let ast = parser::parse_from_str(source);
+        for (needle, word, declaration) in [
+            ("            value", "value", "value in"),
+            ("return value", "value", "value):"),
+            ("second(other): return other", "other", "other):"),
+        ] {
+            let byte = source.find(needle).unwrap() + needle.rfind(word).unwrap();
+            let start = source.find(declaration).unwrap();
+            assert_eq!(
+                cursor_definition(
+                    Path::new("/tmp/navigation.gin"),
+                    &ast,
+                    source,
+                    byte,
+                    &|_| None
+                ),
+                Some(CursorDefinition::SameFile(start..start + word.len())),
+                "{needle}"
+            );
+        }
+    }
 }

@@ -8,17 +8,10 @@ use flask::FlaskConfigHandle;
 use crate::file_helpers::GinPackageExt;
 use crate::folder_module::normalize_local_import_path;
 use crate::import_merge::{
-    ImportRoot, RawSuggestion, collect_member_imports, symbol_already_imported,
+    ImportRoot, MergedImportSuggestion, RawSuggestion, collect_member_imports,
+    symbol_already_imported,
 };
 use crate::import_query::find_package_root;
-
-/// A single import fix: a full `use …` line (no trailing newline).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImportSuggestion {
-    pub use_line: String,
-    pub replace_line: Option<u32>,
-    pub delete_lines: Vec<u32>,
-}
 
 /// Find import paths that would bring `symbol` into scope at `file_path`.
 ///
@@ -29,7 +22,7 @@ pub fn find_import_suggestions(
     file_path: &Path,
     symbol: &str,
     source: &str,
-) -> Vec<ImportSuggestion> {
+) -> Vec<MergedImportSuggestion> {
     let file_dir = match file_path.parent() {
         Some(d) => d,
         None => return Vec::new(),
@@ -44,7 +37,7 @@ pub fn find_import_suggestions(
     let mut out = Vec::new();
 
     // Same folder module (sibling `.gin` files).
-    if crate::public_symbols::find_public_def(file_dir, symbol).is_some() {
+    if file_dir.find_public_def(symbol).is_some() {
         push_merged_import(
             &mut seen,
             &mut out,
@@ -85,7 +78,7 @@ pub fn find_import_suggestions(
         }
     }
 
-    // Path dependencies from flask.jsonc.
+    // Path dependencies from mod.flask.
     for (dep_name, dep_dir) in dependencies {
         if dep_dir.find_public_def(symbol).is_some() {
             push_merged_import(
@@ -104,7 +97,7 @@ pub fn find_import_suggestions(
 
 fn push_merged_import(
     seen: &mut std::collections::HashSet<String>,
-    out: &mut Vec<ImportSuggestion>,
+    out: &mut Vec<MergedImportSuggestion>,
     collected: &[crate::import_merge::CollectedImport],
     file_path: &Path,
     root: ImportRoot,
@@ -116,11 +109,7 @@ fn push_merged_import(
     };
     let merged = raw.merge(collected, Some(file_path));
     if seen.insert(merged.use_line.clone()) {
-        out.push(ImportSuggestion {
-            use_line: merged.use_line,
-            replace_line: merged.replace_line,
-            delete_lines: merged.delete_lines,
-        });
+        out.push(merged);
     }
 }
 
@@ -193,6 +182,3 @@ fn path_relative(from: &Path, to: &Path) -> Option<String> {
     }
     Some(s)
 }
-#[cfg(test)]
-#[path = "../tests/import_suggest_tests.rs"]
-mod tests;

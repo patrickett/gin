@@ -13,20 +13,6 @@ pub struct ParsedModuleCache {
     pub(crate) files: HashMap<PathBuf, ParsedFile>,
 }
 
-impl ParsedModuleCache {
-    pub fn remove_file(&mut self, path: &Path) -> Option<ParsedFile> {
-        self.files.remove(path)
-    }
-
-    pub fn has_file(&self, path: &Path) -> bool {
-        self.files.contains_key(path)
-    }
-
-    pub fn get_file(&self, path: &Path) -> Option<&ParsedFile> {
-        self.files.get(path)
-    }
-}
-
 pub(crate) struct ModuleLoader {
     inventory: ModuleInventory,
     parsed_files: HashMap<PathBuf, ParsedFile>,
@@ -66,14 +52,23 @@ impl ModuleLoader {
             return paths;
         }
 
+        let profile_context = compiler_profile::Context::current();
         let (tx, rx) = mpsc::channel();
         let handles: Vec<_> = missing
             .iter()
             .map(|path| {
                 let path = path.clone();
                 let tx = tx.clone();
+                let profile_context = profile_context.clone();
                 thread::spawn(move || {
-                    let parsed = std::fs::read_to_string(&path).ok().map(|source| {
+                    let _profile_context = profile_context
+                        .as_ref()
+                        .map(compiler_profile::Context::enter);
+                    let source = {
+                        let _read = compiler_profile::span(compiler_profile::Phase::Read);
+                        std::fs::read_to_string(&path)
+                    };
+                    let parsed = source.ok().map(|source| {
                         (
                             path.clone(),
                             ParsedFile {
@@ -117,10 +112,6 @@ impl ModuleLoader {
         }
     }
 
-    pub(crate) fn module_files(&mut self, module_dir: &Path) -> Vec<PathBuf> {
-        self.load_module(module_dir)
-    }
-
     pub(crate) fn parsed_file(&self, path: &Path) -> Option<&ParsedFile> {
         self.parsed_files.get(path)
     }
@@ -135,6 +126,3 @@ impl ModuleLoader {
         }
     }
 }
-#[cfg(test)]
-#[path = "../tests/module_loader_tests.rs"]
-mod tests;

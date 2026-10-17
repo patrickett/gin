@@ -6,7 +6,7 @@ pub(crate) struct ModuleInventory {
 }
 
 impl ModuleInventory {
-    pub(crate) fn discover(_dependencies: &HashMap<String, PathBuf>) -> Self {
+    pub(crate) fn discover() -> Self {
         Self {
             module_files: HashMap::new(),
         }
@@ -53,7 +53,7 @@ impl ModuleInventory {
 }
 
 pub fn child_folder_module_names(package_dir: &Path) -> Vec<String> {
-    let mut inventory = ModuleInventory::discover(&HashMap::new());
+    let mut inventory = ModuleInventory::discover();
     let Ok(entries) = std::fs::read_dir(package_dir) else {
         return Vec::new();
     };
@@ -68,6 +68,3 @@ pub fn child_folder_module_names(package_dir: &Path) -> Vec<String> {
     names.sort();
     names
 }
-#[cfg(test)]
-#[path = "../tests/module_inventory_tests.rs"]
-mod tests;

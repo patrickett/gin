@@ -1,3 +1,4 @@
+use diagnostic::code::PackageCode;
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
@@ -23,40 +24,46 @@ pub enum UnresolvedDependency {
 impl UnresolvedDependency {
     fn diagnostic(&self, alias: &str) -> Diagnostic {
         match self {
+            // package-unresolved-git-revision
             Self::GitRevision { url } => Diagnostic::new(
-                "package-unresolved-git-revision",
+                PackageCode::UnresolvedGitRevision,
                 format!("Git dependency `{alias}` has no resolved revision"),
             )
             .with_arg("alias", alias)
             .with_arg("url", url),
+            // package-unresolved-registry-instance
             Self::RegistryInstance { version } => Diagnostic::new(
-                "package-unresolved-registry-instance",
+                PackageCode::UnresolvedRegistryInstance,
                 format!("registry dependency `{alias}` has no resolved registry instance"),
             )
             .with_arg("alias", alias)
             .with_arg("version", version),
+            // package-invalid-path-dependency
             Self::InvalidPath { path } => Diagnostic::new(
-                "package-invalid-path-dependency",
+                PackageCode::InvalidPathDependency,
                 format!("path dependency `{alias}` cannot be resolved from `{path}`"),
             )
             .with_arg("alias", alias)
             .with_arg("path", path),
+            // package-dependency-cycle
             Self::DependencyCycle { path } => Diagnostic::new(
-                "package-dependency-cycle",
+                PackageCode::DependencyCycle,
                 format!("path dependency `{alias}` forms a package cycle through `{path}`"),
             )
             .with_arg("alias", alias)
             .with_arg("path", path),
+            // package-conflicting-resolved-instance
             Self::ConflictingInstance { instance } => Diagnostic::new(
-                "package-conflicting-resolved-instance",
+                PackageCode::ConflictingResolvedInstance,
                 format!(
                     "dependency `{alias}` conflicts with an existing resolved package instance"
                 ),
             )
             .with_arg("alias", alias)
             .with_arg("instance", format!("{instance:?}")),
+            // package-manifest-identity-mismatch
             Self::ManifestIdentityMismatch { expected } => Diagnostic::new(
-                "package-manifest-identity-mismatch",
+                PackageCode::ManifestIdentityMismatch,
                 format!(
                     "dependency `{alias}` manifest does not match its supplied package identity"
                 ),
@@ -113,6 +120,8 @@ pub struct ResolvedPackageGraph {
     pub root: ResolvedPackageId,
     pub diagnostics: Vec<Diagnostic>,
     registry: Option<(flask::GinHome, String, flask::PackageResolution)>,
+    instances: HashMap<PackageInstanceKey, ResolvedPackageId>,
+    roots: HashMap<PathBuf, ResolvedPackageId>,
 }
 
 impl ResolvedPackageGraph {
@@ -121,25 +130,70 @@ impl ResolvedPackageGraph {
     }
 
     pub fn discover_with_home(entry_path: &Path, home: Option<&flask::GinHome>) -> Self {
-        let Some((config, root)) = FlaskConfig::find_package_config(entry_path) else {
-            let root = entry_path.parent().unwrap_or(entry_path).to_path_buf();
-            return Self {
-                nodes: vec![ResolvedPackageNode {
-                    instance: PackageInstanceKey::workspace("anonymous", "0"),
-                    root,
-                    config: FlaskConfig::new("anonymous".to_string(), "0".to_string()),
-                    dependencies: Vec::new(),
-                }],
-                root: ResolvedPackageId(0),
-                diagnostics: Vec::new(),
-                registry: None,
-            };
+        let (config, root) = match FlaskConfig::discover(entry_path) {
+            Ok(Some(found)) => found,
+            result => {
+                let root = entry_path.parent().unwrap_or(entry_path).to_path_buf();
+                let mut graph =
+                    Self::from_config(FlaskConfig::new("anonymous".into(), "0".into()), root);
+                if let Err(error) = result {
+                    graph
+                        .diagnostics
+                        // package-invalid-manifest
+                        .push(Diagnostic::new(PackageCode::InvalidManifest, error));
+                }
+                return graph;
+            }
         };
+        let root = if config.minimum_version_selection {
+            root.canonicalize().unwrap_or(root)
+        } else {
+            normalize_operational(&root)
+        };
+        let mut graph = Self::from_config(config, root);
+        let workspace_config = match graph.nodes[0]
+            .config
+            .with_workspace_requirements(&graph.nodes[0].root)
+        {
+            Ok(config) => config,
+            Err(error) => {
+                // package-invalid-workspace
+                graph.diagnostics.push(Diagnostic::new(
+                    PackageCode::InvalidWorkspace,
+                    error.to_string(),
+                ));
+                return graph;
+            }
+        };
+        if workspace_config
+            .dependencies()
+            .values()
+            .any(|dep| matches!(dep.kind, DependencyKind::Version { .. }))
+        {
+            let verified = Self::verified_registry(&workspace_config, home);
+            match verified {
+                Ok(context) => graph.registry = Some(context),
+                Err(error) => {
+                    // package-registry-verification-failed
+                    graph.diagnostics.push(Diagnostic::new(
+                        PackageCode::RegistryVerificationFailed,
+                        error.to_string(),
+                    ));
+                    return graph;
+                }
+            }
+        }
+        graph.resolve_all_dependencies();
+        graph
+    }
 
-        let root = normalize_operational(&root);
-        let mut graph = Self {
+    fn from_config(config: FlaskConfig, root: PathBuf) -> Self {
+        let instance = PackageInstanceKey::workspace(config.name(), config.version());
+        Self {
+            instances: HashMap::from([(instance.clone(), ResolvedPackageId(0))]),
+            roots: HashMap::from([(root.clone(), ResolvedPackageId(0))]),
             nodes: vec![ResolvedPackageNode {
-                instance: PackageInstanceKey::workspace(config.name(), config.version()),
+                instance,
                 root,
                 config,
                 dependencies: Vec::new(),
@@ -147,60 +201,49 @@ impl ResolvedPackageGraph {
             root: ResolvedPackageId(0),
             diagnostics: Vec::new(),
             registry: None,
-        };
-        if graph.nodes[0]
-            .config
-            .dependencies()
-            .values()
-            .any(|dep| matches!(dep.kind, DependencyKind::Version { .. }))
-        {
-            let verified = (|| -> Result<_, std::io::Error> {
-                let home = home
-                    .cloned()
-                    .map(Ok)
-                    .unwrap_or_else(flask::GinHome::discover)?;
-                let client = flask::RegistryClient::load(home.clone())?;
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(std::io::Error::other)?
-                    .as_secs();
-                let resolution = client.verify_cached(&graph.nodes[0].config, now)?;
-                Ok((home, client.registry_name().to_owned(), resolution))
-            })();
-            match verified {
-                Ok(context) => graph.registry = Some(context),
-                Err(error) => {
-                    graph.diagnostics.push(Diagnostic::new(
-                        "package-registry-verification-failed",
-                        error.to_string(),
-                    ));
-                    return graph;
-                }
-            }
         }
-        let mut active = HashSet::from([graph.nodes[0].root.clone()]);
-        graph.resolve_dependencies(ResolvedPackageId(0), &mut active);
-        graph
+    }
+
+    fn verified_registry(
+        config: &FlaskConfig,
+        home: Option<&flask::GinHome>,
+    ) -> std::io::Result<(flask::GinHome, String, flask::PackageResolution)> {
+        let home = home
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(flask::GinHome::discover)?;
+        let client = flask::RegistryClient::load(home.clone())?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(std::io::Error::other)?
+            .as_secs();
+        let resolution = client.verify_cached(config, now)?;
+        Ok((home, client.registry_name().to_owned(), resolution))
+    }
+
+    fn resolve_all_dependencies(&mut self) {
+        if self.nodes[0].config.minimum_version_selection {
+            let mut index = 0;
+            while index < self.nodes.len() {
+                if self.nodes.len() > 4352 {
+                    // package-graph-limit
+                    self.diagnostics.push(Diagnostic::new(
+                        PackageCode::GraphLimit,
+                        "too many package instances",
+                    ));
+                    break;
+                }
+                self.resolve_dependencies(ResolvedPackageId(index), &mut HashSet::new());
+                index += 1;
+            }
+        } else {
+            let mut active = HashSet::from([self.nodes[0].root.clone()]);
+            self.resolve_dependencies(ResolvedPackageId(0), &mut active);
+        }
     }
 
     pub fn node(&self, id: ResolvedPackageId) -> &ResolvedPackageNode {
         &self.nodes[id.0]
-    }
-
-    pub fn validate_instance_metadata(
-        &mut self,
-        package: ResolvedPackageId,
-        supplied: &PackageInstanceKey,
-    ) -> Result<(), UnresolvedDependency> {
-        if self.nodes[package.0].instance == *supplied {
-            return Ok(());
-        }
-        let error = UnresolvedDependency::ManifestIdentityMismatch {
-            expected: self.nodes[package.0].instance.clone(),
-        };
-        self.diagnostics
-            .push(error.diagnostic(self.nodes[package.0].config.name()));
-        Err(error)
     }
 
     pub fn package_for_file(&self, path: &Path) -> Option<ResolvedPackageId> {
@@ -246,18 +289,20 @@ impl ResolvedPackageGraph {
         if parent == self.root
             && let Err(error) = self.nodes[parent.0].config.validate_resolution()
         {
+            // package-invalid-resolution
             self.diagnostics.push(Diagnostic::new(
-                "package-invalid-resolution",
+                PackageCode::InvalidResolution,
                 error.to_string(),
             ));
             return;
         }
-        let declarations: Vec<_> = self.nodes[parent.0]
+        let mut declarations: Vec<_> = self.nodes[parent.0]
             .config
             .dependencies()
             .iter()
             .map(|(alias, dependency)| (alias.clone(), dependency.kind.clone()))
             .collect();
+        declarations.sort_unstable_by(|left, right| left.0.cmp(&right.0));
         let mut edges = Vec::with_capacity(declarations.len());
 
         for (alias, dependency) in declarations {
@@ -281,6 +326,59 @@ impl ResolvedPackageGraph {
         self.nodes[parent.0].dependencies = edges;
     }
 
+    fn registry_key<'a>(
+        &self,
+        parent: ResolvedPackageId,
+        alias: &str,
+        requirement: &str,
+        resolution: &'a flask::PackageResolution,
+    ) -> Option<&'a String> {
+        if self.nodes[self.root.0].config.minimum_version_selection {
+            let requirement = if self.nodes[parent.0].config.minimum_version_selection {
+                flask::MinimumRequirement::parse(alias, requirement).ok()?
+            } else {
+                flask::MinimumRequirement::from_legacy(alias, requirement).ok()?
+            };
+            return resolution.minimum_key(&requirement);
+        }
+        if parent == self.root {
+            resolution.direct.get(alias)
+        } else {
+            resolution
+                .packages
+                .get(self.nodes[parent.0].instance.instance.as_str())?
+                .dependencies
+                .get(alias)
+        }
+    }
+
+    fn package_root(&self, path: &Path) -> PathBuf {
+        if self.nodes[self.root.0].config.minimum_version_selection {
+            path.canonicalize()
+                .unwrap_or_else(|_| normalize_operational(path))
+        } else {
+            normalize_operational(path)
+        }
+    }
+
+    fn insert_node(
+        &mut self,
+        instance: PackageInstanceKey,
+        root: PathBuf,
+        config: FlaskConfig,
+    ) -> ResolvedPackageId {
+        let id = ResolvedPackageId(self.nodes.len());
+        self.instances.insert(instance.clone(), id);
+        self.roots.insert(root.clone(), id);
+        self.nodes.push(ResolvedPackageNode {
+            instance,
+            root,
+            config,
+            dependencies: Vec::new(),
+        });
+        id
+    }
+
     fn resolve_registry(
         &mut self,
         parent: ResolvedPackageId,
@@ -296,15 +394,7 @@ impl ResolvedPackageGraph {
         let Some((home, registry, resolution)) = &self.registry else {
             return unresolved();
         };
-        let edges = if parent == self.root {
-            Some(&resolution.direct)
-        } else {
-            resolution
-                .packages
-                .get(self.nodes[parent.0].instance.instance.as_str())
-                .map(|p| &p.dependencies)
-        };
-        let Some(key) = edges.and_then(|edges| edges.get(alias)) else {
+        let Some(key) = self.registry_key(parent, alias, requirement, resolution) else {
             return unresolved();
         };
         let Some(package) = resolution.packages.get(key) else {
@@ -313,8 +403,8 @@ impl ResolvedPackageGraph {
         let Ok(root) = home.dependency(&package.name, &package.version) else {
             return unresolved();
         };
-        let root = normalize_operational(&root);
-        if active.contains(&root) {
+        let root = self.package_root(&root);
+        if active.contains(&root) && !self.nodes[self.root.0].config.minimum_version_selection {
             return ResolvedDependencyState::Unresolved(UnresolvedDependency::DependencyCycle {
                 path: root.display().to_string(),
             });
@@ -327,21 +417,16 @@ impl ResolvedPackageGraph {
             },
             instance: Intern::new(key.clone()),
         };
-        if let Some((index, _)) = self
-            .nodes
-            .iter()
-            .enumerate()
-            .find(|(_, node)| node.instance == instance)
-        {
+        if let Some(id) = self.instances.get(&instance) {
             return ResolvedDependencyState::Resolved {
-                package: ResolvedPackageId(index),
+                package: *id,
                 import_root: root,
             };
         }
         let Some((config, manifest_root)) = FlaskConfig::find_package_config(&root) else {
             return unresolved();
         };
-        if normalize_operational(&manifest_root) != root
+        if self.package_root(&manifest_root) != root
             || config.name() != package.name
             || config.version() != package.version.to_string()
         {
@@ -349,16 +434,12 @@ impl ResolvedPackageGraph {
                 UnresolvedDependency::ManifestIdentityMismatch { expected: instance },
             );
         }
-        let id = ResolvedPackageId(self.nodes.len());
-        self.nodes.push(ResolvedPackageNode {
-            instance,
-            root: root.clone(),
-            config,
-            dependencies: Vec::new(),
-        });
-        active.insert(root.clone());
-        self.resolve_dependencies(id, active);
-        active.remove(&root);
+        let id = self.insert_node(instance, root.clone(), config);
+        if !self.nodes[self.root.0].config.minimum_version_selection {
+            active.insert(root.clone());
+            self.resolve_dependencies(id, active);
+            active.remove(&root);
+        }
         ResolvedDependencyState::Resolved {
             package: id,
             import_root: root,
@@ -377,8 +458,7 @@ impl ResolvedPackageGraph {
                 path: declared_path.to_string(),
             });
         };
-        let operational_root =
-            normalize_operational(&self.nodes[parent.0].root.join(&relative_path));
+        let operational_root = self.package_root(&self.nodes[parent.0].root.join(&relative_path));
         let Some((config, manifest_root)) = FlaskConfig::find_package_config(&operational_root)
         else {
             return ResolvedDependencyState::Unresolved(UnresolvedDependency::InvalidPath {
@@ -386,7 +466,15 @@ impl ResolvedPackageGraph {
             });
         };
 
-        let manifest_root = normalize_operational(&manifest_root);
+        let manifest_root = self.package_root(&manifest_root);
+        if self.nodes[self.root.0].config.minimum_version_selection {
+            if let Some(id) = self.roots.get(&manifest_root) {
+                return ResolvedDependencyState::Resolved {
+                    package: *id,
+                    import_root: operational_root,
+                };
+            }
+        }
         if manifest_root == self.nodes[parent.0].root {
             return ResolvedDependencyState::Resolved {
                 package: parent,
@@ -411,15 +499,10 @@ impl ResolvedPackageGraph {
             instance: instance_name,
         };
 
-        if let Some((index, existing)) = self
-            .nodes
-            .iter()
-            .enumerate()
-            .find(|(_, node)| node.instance == instance)
-        {
-            return if existing.root == manifest_root {
+        if let Some(id) = self.instances.get(&instance) {
+            return if self.nodes[id.0].root == manifest_root {
                 ResolvedDependencyState::Resolved {
-                    package: ResolvedPackageId(index),
+                    package: *id,
                     import_root: operational_root,
                 }
             } else {
@@ -429,16 +512,12 @@ impl ResolvedPackageGraph {
             };
         }
 
-        let id = ResolvedPackageId(self.nodes.len());
-        self.nodes.push(ResolvedPackageNode {
-            instance,
-            root: manifest_root.clone(),
-            config,
-            dependencies: Vec::new(),
-        });
-        active.insert(manifest_root.clone());
-        self.resolve_dependencies(id, active);
-        active.remove(&manifest_root);
+        let id = self.insert_node(instance, manifest_root.clone(), config);
+        if !self.nodes[self.root.0].config.minimum_version_selection {
+            active.insert(manifest_root.clone());
+            self.resolve_dependencies(id, active);
+            active.remove(&manifest_root);
+        }
         ResolvedDependencyState::Resolved {
             package: id,
             import_root: operational_root,
@@ -487,46 +566,26 @@ fn normalize_operational(path: &Path) -> PathBuf {
     normalized
 }
 #[cfg(test)]
-#[path = "../tests/resolved_package_graph_tests.rs"]
-mod tests;
-
-#[cfg(test)]
 mod resolution_tests {
     use super::*;
     use test_fixtures::TempPackage;
 
     #[test]
-    fn stale_root_resolution_is_rejected() {
-        let pkg = TempPackage::new("stale_resolution");
-        pkg.write(
-            "flask.jsonc",
-            r#"{
-            "name":"pkg", "version":"1.0.0", "authors":[],
-            "resolution":{"direct":{"missing":"missing@1.0.0"},"packages":{}}
-        }"#,
-        );
-        let graph = ResolvedPackageGraph::discover(pkg.path());
-        assert!(
-            graph
-                .diagnostics
-                .iter()
-                .any(|d| d.code.slug() == "package-invalid-resolution")
-        );
-    }
-
-    #[test]
-    fn dependency_checkout_resolution_does_not_control_the_consumer() {
-        let pkg = TempPackage::new("consumer_resolution");
-        pkg.write_flask_with_deps("consumer", r#"{"dep":{"path":"dep"}}"#);
-        pkg.write(
-            "dep/flask.jsonc",
-            r#"{
-            "name":"dep", "version":"1.0.0", "authors":[],
-            "resolution":{"direct":{"missing":"missing@1.0.0"},"packages":{}}
-        }"#,
-        );
-        let graph = ResolvedPackageGraph::discover(pkg.path());
-        assert!(graph.diagnostics.is_empty(), "{:?}", graph.diagnostics);
-        assert_eq!(graph.nodes.len(), 2);
+    fn embedded_resolutions_are_rejected_in_root_and_local_manifests() {
+        for relative in ["mod.flask", "dep/mod.flask"] {
+            let pkg = TempPackage::new("embedded_resolution");
+            pkg.write_flask_with_deps(
+                "consumer",
+                r#"dep: "./dep"
+"#,
+            );
+            pkg.write_nested_flask("dep", "dep");
+            pkg.write(
+                relative,
+                "#settings\nmodule: 'pkg'\nversion: 1.0.0\nresolution: {}\n",
+            );
+            let graph = ResolvedPackageGraph::discover(pkg.path());
+            assert!(!graph.diagnostics.is_empty(), "{relative}");
+        }
     }
 }

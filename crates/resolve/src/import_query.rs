@@ -5,6 +5,10 @@ use ast::{FileAst, HasSpanId, ImportSource};
 use flask::{FlaskConfig, FlaskConfigHandle};
 
 use crate::ParsedFile;
+use crate::symbol_location::{
+    DefLocation, current_module_package_def_location, dep_bundle_import,
+    dep_bundle_member_def_location, local_bundle_def_location,
+};
 
 #[derive(Debug, Clone)]
 pub enum ImportTarget {
@@ -85,11 +89,7 @@ pub fn resolve_import_at(ast: &FileAst, source: &str, byte_pos: usize) -> Option
                 for member in &b.members {
                     let mspan = span_table.get(member.span);
                     if byte_pos >= mspan.start() && byte_pos <= mspan.end() {
-                        let symbol = member
-                            .alias
-                            .as_ref()
-                            .map(|a| a.to_string())
-                            .unwrap_or_else(|| member.export.to_string());
+                        let symbol = member.export.to_string();
                         if let Some(local_path) = &b.local_path {
                             return Some(ImportTarget::LocalBundleSymbol {
                                 local_path: local_path.clone(),
@@ -134,11 +134,7 @@ pub fn resolve_import_at(ast: &FileAst, source: &str, byte_pos: usize) -> Option
                 let span_table = &ast.span_table;
                 let mspan = span_table.get(member.span);
                 if byte_pos >= mspan.start() && byte_pos <= mspan.end() {
-                    let symbol = member
-                        .alias
-                        .as_ref()
-                        .map(|a| a.to_string())
-                        .unwrap_or_else(|| member.export.to_string());
+                    let symbol = member.export.to_string();
                     return Some(ImportTarget::CurrentModuleSymbol { symbol });
                 }
             }
@@ -209,6 +205,9 @@ pub fn resolve_dep_dir(file_path: &Path, dep_name: &str) -> Option<PathBuf> {
     let handle = FlaskConfigHandle::load(base_dir).ok()?;
     let cfg = handle.read();
     let config_dir = handle.source_dir();
+    if cfg.config.name() == dep_name {
+        return Some(config_dir.to_path_buf());
+    }
     let dep = cfg.config.dependencies().get(dep_name)?;
     match &dep.kind {
         flask::DependencyKind::Path { path } => Some(config_dir.join(path)),
@@ -261,53 +260,6 @@ pub fn hover_for_import_target(
     }
 }
 
-/// Resolve definition byte range for an import target.
-pub fn def_span_for_import_target(
-    file_path: &Path,
-    target: ImportTarget,
-    byte_pos: usize,
-    ast: &FileAst,
-    file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
-) -> Option<std::ops::Range<usize>> {
-    use ast::ImportSource;
-
-    match target {
-        ImportTarget::DepRoot { dep_name } => {
-            resolve_dep_dir(file_path, &dep_name)?;
-            for import in &ast.uses {
-                for mi in &import.0 {
-                    if let ImportSource::Package(mp) = &mi.source {
-                        let span_table = &ast.span_table;
-                        let span = span_table.get(mp.span_id());
-                        if byte_pos >= span.start() && byte_pos <= span.end() {
-                            return Some(span.start()..span.start());
-                        }
-                    }
-                }
-            }
-            None
-        }
-        ImportTarget::DepModule { .. } => None,
-        ImportTarget::DepBundleMember {
-            dep_name,
-            path_segments,
-            symbol,
-        } => resolve_dep_bundle_symbol_def_span(
-            file_path,
-            &dep_name,
-            &path_segments,
-            &symbol,
-            file_reader,
-        ),
-        ImportTarget::LocalBundleSymbol { local_path, symbol } => {
-            resolve_local_symbol_def_span(file_path, &local_path, &symbol, file_reader)
-        }
-        ImportTarget::CurrentModuleSymbol { symbol } => {
-            resolve_current_module_def_span(file_path, &symbol, file_reader)
-        }
-    }
-}
-
 pub fn resolve_dep_hover(file_path: &Path, dep_name: &str) -> Option<String> {
     let dep_dir = resolve_dep_dir(file_path, dep_name)?;
     let dep_config = FlaskConfig::find_package_config(&dep_dir).map(|(cfg, _)| cfg)?;
@@ -323,32 +275,6 @@ pub fn resolve_dep_hover(file_path: &Path, dep_name: &str) -> Option<String> {
     Some(text)
 }
 
-pub fn resolve_symbol_hover(
-    file_path: &Path,
-    dep_name: &str,
-    symbol: &str,
-    file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
-) -> Option<String> {
-    let def_loc =
-        crate::symbol_location::dep_symbol_def_location(file_path, dep_name, symbol, file_reader)?;
-    let parsed = file_reader(&def_loc.file)?;
-    let typed = typecheck::transform::transform_file(parsed.output.ast, typecheck::FileId(0));
-    let source = &parsed.source;
-    let byte = def_loc.byte_range.start;
-    let (line, character) = source.byte_offset_to_position(byte);
-    typed.hover_at(source, line, character)
-}
-
-pub fn resolve_symbol_def_span(
-    file_path: &Path,
-    dep_name: &str,
-    symbol: &str,
-    file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
-) -> Option<std::ops::Range<usize>> {
-    crate::symbol_location::dep_symbol_def_location(file_path, dep_name, symbol, file_reader)
-        .map(|loc| loc.byte_range)
-}
-
 pub fn resolve_dep_bundle_symbol_hover(
     file_path: &Path,
     dep_name: &str,
@@ -356,56 +282,20 @@ pub fn resolve_dep_bundle_symbol_hover(
     symbol: &str,
     file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
 ) -> Option<String> {
-    use ast::LocalBundleImport;
-    use ast::span::SpanId;
-    use internment::Intern;
+    let import = dep_bundle_import(dep_name, path_segments);
+    let def_loc = dep_bundle_member_def_location(file_path, &import, symbol, file_reader)?;
+    hover_at_def_location(&def_loc, file_reader)
+}
 
-    let import = LocalBundleImport {
-        root: Intern::new(dep_name.to_string()),
-        path_segments: path_segments
-            .iter()
-            .map(|segment| Intern::new(segment.clone()))
-            .collect(),
-        members: Vec::new(),
-        span: SpanId::INVALID,
-        local_path: None,
-    };
-    let def_loc = crate::symbol_location::dep_bundle_member_def_location(
-        file_path,
-        &import,
-        symbol,
-        file_reader,
-    )?;
+fn hover_at_def_location(
+    def_loc: &DefLocation,
+    file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
+) -> Option<String> {
     let parsed = file_reader(&def_loc.file)?;
     let typed = typecheck::transform::transform_file(parsed.output.ast, typecheck::FileId(0));
     let source = &parsed.source;
     let (line, character) = source.byte_offset_to_position(def_loc.byte_range.start);
     typed.hover_at(source, line, character)
-}
-
-pub fn resolve_dep_bundle_symbol_def_span(
-    file_path: &Path,
-    dep_name: &str,
-    path_segments: &[String],
-    symbol: &str,
-    file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
-) -> Option<std::ops::Range<usize>> {
-    use ast::LocalBundleImport;
-    use ast::span::SpanId;
-    use internment::Intern;
-
-    let b = LocalBundleImport {
-        root: Intern::new(dep_name.to_string()),
-        path_segments: path_segments
-            .iter()
-            .map(|s| Intern::new(s.clone()))
-            .collect(),
-        members: Vec::new(),
-        span: SpanId::INVALID,
-        local_path: None,
-    };
-    crate::symbol_location::dep_bundle_member_def_location(file_path, &b, symbol, file_reader)
-        .map(|loc| loc.byte_range)
 }
 
 pub fn resolve_local_symbol_hover(
@@ -414,35 +304,11 @@ pub fn resolve_local_symbol_hover(
     symbol: &str,
     file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
 ) -> Option<String> {
-    let def_loc = crate::symbol_location::local_bundle_def_location(
-        file_path,
-        local_import_path,
-        symbol,
-        file_reader,
-    )?;
-    let parsed = file_reader(&def_loc.file)?;
-    let typed = typecheck::transform::transform_file(parsed.output.ast, typecheck::FileId(0));
-    let source = &parsed.source;
-    let (line, character) = source.byte_offset_to_position(def_loc.byte_range.start);
-    typed.hover_at(source, line, character)
+    let def_loc = local_bundle_def_location(file_path, local_import_path, symbol, file_reader)?;
+    hover_at_def_location(&def_loc, file_reader)
 }
 
-pub fn resolve_local_symbol_def_span(
-    file_path: &Path,
-    local_import_path: &Path,
-    symbol: &str,
-    file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
-) -> Option<std::ops::Range<usize>> {
-    crate::symbol_location::local_bundle_def_location(
-        file_path,
-        local_import_path,
-        symbol,
-        file_reader,
-    )
-    .map(|loc| loc.byte_range)
-}
-
-/// Walk up from `file_path` to find the package root (containing `flask.jsonc`).
+/// Walk up from `file_path` to find the package root (containing `mod.flask`).
 pub fn find_package_root(path: &Path) -> Option<PathBuf> {
     let mut search = if path.is_dir() {
         path.to_path_buf()
@@ -450,7 +316,7 @@ pub fn find_package_root(path: &Path) -> Option<PathBuf> {
         path.parent()?.to_path_buf()
     };
     loop {
-        let candidate = search.join(flask::PACKAGE_CONFIG_NAME);
+        let candidate = flask::FlaskConfig::manifest_path(&search);
         if candidate.exists() {
             return Some(search);
         }
@@ -468,29 +334,6 @@ pub fn resolve_current_module_hover(
     symbol: &str,
     file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
 ) -> Option<String> {
-    let def_loc = crate::symbol_location::current_module_package_def_location(
-        file_path,
-        symbol,
-        file_reader,
-    )?;
-    let parsed = file_reader(&def_loc.file)?;
-    let typed = typecheck::transform::transform_file(parsed.output.ast, typecheck::FileId(0));
-    let source = &parsed.source;
-    let byte = def_loc.byte_range.start;
-    let (line, character) = source.byte_offset_to_position(byte);
-    typed.hover_at(source, line, character)
+    let def_loc = current_module_package_def_location(file_path, symbol, file_reader)?;
+    hover_at_def_location(&def_loc, file_reader)
 }
-
-pub fn resolve_current_module_def_span(
-    file_path: &Path,
-    symbol: &str,
-    file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
-) -> Option<std::ops::Range<usize>> {
-    crate::symbol_location::current_module_package_def_location(file_path, symbol, file_reader)
-        .map(|loc| loc.byte_range)
-}
-
-/// Resolve the definition span for a `use Symbol` import (current module).
-#[cfg(test)]
-#[path = "../tests/import_query_tests.rs"]
-mod tests;

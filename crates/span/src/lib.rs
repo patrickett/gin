@@ -140,20 +140,6 @@ impl Span {
         self.end as usize
     }
 
-    /// Return the start offset as `u32` (for comparison with other `u32` span offsets).
-    #[inline]
-    #[must_use]
-    pub fn start_u32(&self) -> u32 {
-        self.start
-    }
-
-    /// Return the end offset as `u32` (for comparison with other `u32` span offsets).
-    #[inline]
-    #[must_use]
-    pub fn end_u32(&self) -> u32 {
-        self.end
-    }
-
     /// Extract the substring from source text that this span covers.
     #[inline]
     pub fn extract(self, source: &str) -> &str {
@@ -166,7 +152,7 @@ impl Span {
 /// Used inside expression variant structs that always live inside `Typed<T>`.
 /// The full expression span is on the `Typed<T>` wrapper; `SubSpan` values
 /// are more specific ranges within it (e.g. the body of an `if` excluding
-/// the keyword, or just the `loop` keyword inside a while-loop).
+/// the keyword, or just the `while` keyword inside a while-loop).
 ///
 /// This is a newtype rather than a bare `SpanId` to make the relationship
 /// explicit at the type level: a `SubSpan` is *always* a subset of the
@@ -239,15 +225,6 @@ impl SpanTable {
         }
     }
 
-    /// Get the span data for a given SpanId, returning None if invalid.
-    pub fn try_get(&self, id: SpanId) -> Option<Span> {
-        if id.is_valid() {
-            self.spans.get(id.into_inner() as usize).copied()
-        } else {
-            None
-        }
-    }
-
     /// Create a new span that merges two existing spans by their IDs.
     /// The merged span is automatically added to the table.
     pub fn merge(&mut self, a: SpanId, b: SpanId) -> SpanId {
@@ -259,28 +236,6 @@ impl SpanTable {
     /// Check if a byte position is within a span by its ID.
     pub fn contains(&self, id: SpanId, byte_pos: usize) -> bool {
         self.get(id).contains(byte_pos)
-    }
-
-    /// Get the total number of spans in the table.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.spans.len()
-    }
-
-    /// Check if the table is empty.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.spans.is_empty()
-    }
-
-    /// Reserve capacity for additional spans to reduce allocations.
-    pub fn reserve(&mut self, additional: usize) {
-        self.spans.reserve(additional);
-    }
-
-    /// Clear all spans from the table.
-    pub fn clear(&mut self) {
-        self.spans.clear()
     }
 }
 
@@ -302,22 +257,10 @@ impl<T> Spanned<T> {
         Self { span_id, value }
     }
 
-    /// Split into the value and span ID.
-    #[inline]
-    pub fn into_parts(self) -> (T, SpanId) {
-        (self.value, self.span_id)
-    }
-
     /// Get a reference to the inner value.
     #[inline]
     pub fn value(&self) -> &T {
         &self.value
-    }
-
-    /// Get the inner value by value.
-    #[inline]
-    pub fn into_value(self) -> T {
-        self.value
     }
 
     /// Get the span ID.
@@ -332,24 +275,6 @@ impl<T> Spanned<T> {
         Spanned {
             value: f(self.value),
             span_id: self.span_id,
-        }
-    }
-
-    /// Map the inner value with a fallible function while preserving the span ID.
-    #[inline]
-    pub fn try_map<U, E>(self, f: impl FnOnce(T) -> Result<U, E>) -> Result<Spanned<U>, E> {
-        Ok(Spanned {
-            value: f(self.value)?,
-            span_id: self.span_id,
-        })
-    }
-
-    /// Create a Spanned value by inserting a span into the table.
-    #[inline]
-    pub fn with_span(table: &mut SpanTable, value: T, span: Span) -> Self {
-        Self {
-            value,
-            span_id: table.insert(span),
         }
     }
 

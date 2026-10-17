@@ -7,6 +7,7 @@
 //! Import resolution (matching import statements to files) is delegated to
 //! [`super::resolve_module_import`] and related functions in `package_resolver.rs`.
 
+use diagnostic::code::{ImportCode, PackageCode};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -27,6 +28,7 @@ pub struct ResolveNode {
     pub path: PathBuf,
     pub qualifier: String,
     pub package: ResolvedPackageId,
+    pub is_entry: bool,
 }
 
 /// The full import dependency graph for a package.
@@ -37,21 +39,7 @@ pub struct ResolveGraph {
     pub node_aliases: Vec<Vec<SymbolAlias>>,
     pub symptoms: Vec<(usize, Diagnostic)>,
     pub packages: ResolvedPackageGraph,
-}
-
-/// Collect all `.gin` files for a package, parse any that aren't already
-/// parsed, discover their imports, and build the [`ResolveGraph`].
-pub(crate) fn build_import_closure(
-    entry_files: Vec<ParsedFile>,
-    dependencies: &HashMap<String, PathBuf>,
-) -> (ResolveGraph, HashMap<PathBuf, ParsedFile>) {
-    let (graph, cache) = build_import_closure_with_cache(
-        entry_files,
-        dependencies,
-        ParsedModuleCache::default(),
-        None,
-    );
-    (graph, cache.files)
+    pub(crate) staged_asts: HashMap<PathBuf, ast::FileAst>,
 }
 
 pub(crate) fn build_import_closure_with_cache(
@@ -60,14 +48,26 @@ pub(crate) fn build_import_closure_with_cache(
     cache: ParsedModuleCache,
     home: Option<&flask::GinHome>,
 ) -> (ResolveGraph, ParsedModuleCache) {
+    let entry_files = entry_files
+        .into_iter()
+        .map(|mut file| {
+            file.path = file.path.canonicalize().unwrap_or(file.path);
+            file
+        })
+        .collect::<Vec<_>>();
     let entry_paths: Vec<PathBuf> = entry_files.iter().map(|f| f.path.clone()).collect();
     let packages = entry_paths
         .first()
         .map(|path| ResolvedPackageGraph::discover_with_home(path, home))
         .unwrap_or_else(|| ResolvedPackageGraph::discover_with_home(Path::new("."), home));
-    let inventory = ModuleInventory::discover(dependencies);
+    let inventory = ModuleInventory::discover();
     let mut loader = ModuleLoader::with_cache(inventory, entry_files, cache);
-    let graph = discovery_with_packages(&mut loader, &entry_paths, dependencies, packages);
+    let graph = crate::conditional_import_graph::discover(
+        &mut loader,
+        &entry_paths,
+        dependencies,
+        packages,
+    );
 
     (graph, loader.into_cache())
 }
@@ -76,11 +76,12 @@ pub(crate) fn build_import_closure_with_cache(
 ///
 /// Processes nodes iteratively, resolving each file's imports and adding
 /// newly discovered files to the graph. Detects cycles and duplicate qualifiers.
-fn discovery_with_packages(
+pub(crate) fn discovery_with_packages(
     loader: &mut ModuleLoader,
     entry_paths: &[PathBuf],
     deps: &HashMap<String, PathBuf>,
     packages: ResolvedPackageGraph,
+    staged_input: &HashMap<PathBuf, ast::FileAst>,
 ) -> ResolveGraph {
     let mut nodes: Vec<ResolveNode> = Vec::new();
     let mut adj: Vec<Vec<ImportEdge>> = Vec::new();
@@ -105,6 +106,7 @@ fn discovery_with_packages(
                 path,
                 qualifier: String::new(),
                 package: packages.root,
+                is_entry: true,
             });
             adj.push(Vec::new());
             node_aliases.push(Vec::new());
@@ -124,10 +126,9 @@ fn discovery_with_packages(
 
         let from_path = nodes[from_idx].path.clone();
         let from_dir = from_path.parent().unwrap_or(Path::new("")).to_path_buf();
-        let Some(from_parsed) = loader.parsed_file_cloned(&from_path) else {
+        let Some(mut from_parsed) = loader.parsed_file_cloned(&from_path) else {
             continue;
         };
-        let spans = &from_parsed.output.ast.span_table;
         let package_dependencies = packages
             .node(nodes[from_idx].package)
             .resolved_dependency_roots();
@@ -138,12 +139,18 @@ fn discovery_with_packages(
                 &package_dependencies
             };
 
+        if let Some(ast) = staged_input.get(&from_path) {
+            from_parsed.output.ast = ast.clone();
+        }
+        let spans = &from_parsed.output.ast.span_table;
+
         for import in &from_parsed.output.ast.uses {
             for module_import in &import.0 {
                 let span_id = HasSpanId::span_id(module_import);
                 let owner = packages.node(nodes[from_idx].package);
                 if !local_import_allowed(owner, &from_dir, &module_import.source) {
-                    symptoms.push((from_idx, Diagnostic::new("package-import-escapes-registry-source",
+                    // package-import-escapes-registry-source
+                    symptoms.push((from_idx, Diagnostic::new(PackageCode::ImportEscapesRegistrySource,
                         "a registry package can only use local imports within its verified source directory")
                         .at_span(spans.get(span_id))));
                     continue;
@@ -171,8 +178,9 @@ fn discovery_with_packages(
                     if loader.parsed_file(&file_path).is_none() {
                         symptoms.push((
                             from_idx,
+                            // use-target-not-found
                             Diagnostic::new(
-                                "use-target-not-found",
+                                ImportCode::TargetNotFound,
                                 format!("import target not found: `{}`", file_path.display()),
                             )
                             .with_help("ensure the import path points to an existing `.gin` file or folder module")
@@ -184,12 +192,13 @@ fn discovery_with_packages(
 
                     if let Some(prev) = seen.get(&file_path)
                         && prev != &qual
-                        && !entry_path_set.contains(file_path.as_path())
+                        && !(prev.is_empty() && entry_path_set.contains(file_path.as_path()))
                     {
                         symptoms.push((
                             from_idx,
+                            // use-conflict
                             Diagnostic::new(
-                                "use-conflict",
+                                ImportCode::Conflict,
                                 format!(
                                     "import conflict: {} is pulled in as `{}` and `{}`",
                                     file_path.display(),
@@ -207,12 +216,17 @@ fn discovery_with_packages(
                     }
 
                     let to_idx = if let Some(i) = node_by_path.get(&file_path).copied() {
+                        if nodes[i].qualifier.is_empty() {
+                            nodes[i].qualifier = qual.clone();
+                            seen.insert(file_path.clone(), qual.clone());
+                        }
                         i
                     } else {
                         let i = nodes.len();
                         nodes.push(ResolveNode {
                             path: file_path.clone(),
                             qualifier: qual.clone(),
+                            is_entry: false,
                             package: packages
                                 .package_for_import(nodes[from_idx].package, &file_path)
                                 .unwrap_or(nodes[from_idx].package),
@@ -251,7 +265,8 @@ fn discovery_with_packages(
             .unwrap_or(Span::new(0, 0));
         symptoms.push((
             cycle.closing_from,
-            Diagnostic::new("use-cycle", "import cycle detected")
+            // use-cycle
+            Diagnostic::new(ImportCode::Cycle, "import cycle detected")
                 .with_help(format!("cycle: {chain}"))
                 .at_span(cycle_span),
         ));
@@ -263,12 +278,9 @@ fn discovery_with_packages(
         node_aliases,
         symptoms,
         packages,
+        staged_asts: staged_input.clone(),
     }
 }
-
-#[cfg(test)]
-#[path = "../tests/graph_tests.rs"]
-mod tests;
 
 fn local_import_allowed(
     owner: &crate::ResolvedPackageNode,

@@ -32,7 +32,10 @@ fn package_semantics_include_redundant_terminal_help() {
     assert_eq!(outputs.len(), 1);
     assert_eq!(outputs[0].symptoms.len(), 1, "{:?}", outputs[0].symptoms);
     let diagnostic = &outputs[0].symptoms[0];
-    assert_eq!(diagnostic.code.slug(), "type-redundant-terminal-method");
+    assert_eq!(
+        diagnostic.code.slug().as_str(),
+        "type-redundant-terminal-method"
+    );
     assert_eq!(diagnostic.category, diagnostic::Category::Help);
     assert_eq!(
         &source[diagnostic.span.start() as usize..diagnostic.span.end() as usize],

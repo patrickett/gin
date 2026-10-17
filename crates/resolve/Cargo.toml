@@ -7,6 +7,7 @@ edition = "2024"
 workspace = true
 
 [dependencies]
+compiler-profile = { workspace = true }
 ast = { workspace = true }
 diagnostic = { workspace = true }
 interface = { workspace = true }

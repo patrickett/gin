@@ -109,3 +109,42 @@ fn imported_files_precede_importers_and_keep_diagnostic_provenance_with_cached_i
         cache = output.cache;
     }
 }
+
+#[test]
+fn relative_transform_selection_survives_import_path_normalization() {
+    let package = TempPackage::new("relative_transform_selection");
+    package.write_flask("fixture");
+    package.write("math/values.gin", "answer: 42\n");
+    package.write("main.gin", "use './math' answer\nmain: 42\n");
+    let root = package.path().canonicalize().unwrap();
+    let cwd = std::env::current_dir().unwrap();
+    let common = cwd
+        .ancestors()
+        .find(|ancestor| root.starts_with(ancestor))
+        .unwrap();
+    let relative = cwd
+        .strip_prefix(common)
+        .unwrap()
+        .components()
+        .fold(PathBuf::new(), |path, _| path.join(".."))
+        .join(root.strip_prefix(common).unwrap())
+        .join("main.gin");
+    assert!(relative.is_relative());
+    let mut options = options();
+    options.resolve_imports = true;
+    options.transform_paths = Some(vec![relative.clone()]);
+    let output = run_package_front_end(
+        vec![ParsedFile::read(&relative).unwrap()],
+        &HashMap::new(),
+        ParsedModuleCache::default(),
+        options,
+    );
+    let selected = output
+        .files
+        .iter()
+        .filter(|file| file.typed.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].parsed.path, root.join("main.gin"));
+    assert!(selected[0].typed.as_ref().unwrap().all_flaws().is_empty());
+}

@@ -82,7 +82,7 @@ fn package_semantics_includes_deprecated_token_flaw() {
         "parse output should contain deprecation error for `=`, got symptoms: {:?}",
         po.symptoms
             .iter()
-            .map(|d| (d.code.slug().to_string(), d.message.clone()))
+            .map(|d| (d.code.to_string(), d.message.clone()))
             .collect::<Vec<_>>()
     );
 
@@ -99,7 +99,7 @@ fn package_semantics_includes_deprecated_token_flaw() {
         outputs[0]
             .symptoms
             .iter()
-            .map(|d| (d.code.slug().to_string(), d.message.clone()))
+            .map(|d| (d.code.to_string(), d.message.clone()))
             .collect::<Vec<_>>()
     );
 
@@ -117,7 +117,7 @@ fn package_semantics_includes_deprecated_token_flaw() {
         file_diags
             .unwrap()
             .iter()
-            .map(|d| (d.code.slug().to_string(), d.message.clone()))
+            .map(|d| (d.code.to_string(), d.message.clone()))
             .collect::<Vec<_>>()
     );
 }

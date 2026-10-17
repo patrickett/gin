@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use crate::module_inventory::ModuleInventory;
 use crate::module_loader::{ModuleLoader, ParsedModuleCache};
 use flask::{DependencyKind, FlaskConfig};
+use parser::query::SourceParseExt;
 
 /// Extension trait adding Gin-package queries to [`Path`].
 ///
@@ -18,7 +19,7 @@ use flask::{DependencyKind, FlaskConfig};
 pub trait GinPackageExt {
     /// Collect `.gin` file paths under this directory, honoring `.gitignore`.
     ///
-    /// If the directory is a folder module (contains `flask.jsonc`), all package
+    /// If the directory is a folder module (contains `mod.flask`), all package
     /// `.gin` files are collected recursively. Otherwise, the directory is scanned
     /// recursively. A single file returns itself.
     fn collect_gin_files(&self) -> Vec<PathBuf>;
@@ -40,11 +41,8 @@ pub trait GinPackageExt {
     /// Resolve path dependencies from a flask config relative to this package root.
     fn resolve_flask_dependencies(&self, config: &FlaskConfig) -> HashMap<String, PathBuf>;
 
-    /// Path dependencies for the package containing this path (walks up to `flask.jsonc`).
+    /// Path dependencies for the package containing this path (walks up to `mod.flask`).
     fn flask_path_dependencies(&self) -> HashMap<String, PathBuf>;
-
-    /// Collect `.gin` paths to scan for public symbols under this directory.
-    fn gin_paths_for_symbol_lookup(&self) -> Vec<PathBuf>;
 }
 
 impl GinPackageExt for Path {
@@ -58,13 +56,13 @@ impl GinPackageExt for Path {
     }
 
     fn collect_gin_files_recursive(&self) -> Vec<PathBuf> {
-        let inventory = ModuleInventory::discover(&HashMap::new());
+        let inventory = ModuleInventory::discover();
         let mut loader = ModuleLoader::with_cache(inventory, [], ParsedModuleCache::default());
         let mut files = Vec::new();
         let mut queue = VecDeque::from([self.to_path_buf()]);
 
         while let Some(dir) = queue.pop_front() {
-            files.extend(loader.module_files(&dir));
+            files.extend(loader.load_module(&dir));
 
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
@@ -72,7 +70,7 @@ impl GinPackageExt for Path {
 
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_dir() && (path == self || !path.join("flask.jsonc").is_file()) {
+                if path.is_dir() && (path == self || !FlaskConfig::manifest_path(&path).is_file()) {
                     queue.push_back(path);
                 }
             }
@@ -84,11 +82,30 @@ impl GinPackageExt for Path {
     }
 
     fn list_public_symbols(&self) -> Vec<String> {
-        crate::public_symbols::list_public_symbols(self)
+        let mut symbols = Vec::new();
+        for path in self.collect_gin_files_recursive() {
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let output = source.parse_source_full();
+            symbols.extend(
+                output
+                    .ast
+                    .public_symbol_names()
+                    .into_iter()
+                    .map(|name| name.as_str().to_string()),
+            );
+        }
+        symbols.sort();
+        symbols.dedup();
+        symbols
     }
 
     fn find_public_def(&self, symbol_name: &str) -> Option<PathBuf> {
-        crate::public_symbols::find_public_def(self, symbol_name)
+        crate::public_symbols::find_public_def_in_paths(
+            self.collect_gin_files_recursive(),
+            symbol_name,
+        )
     }
 
     fn resolve_flask_dependencies(&self, config: &FlaskConfig) -> HashMap<String, PathBuf> {
@@ -111,9 +128,5 @@ impl GinPackageExt for Path {
             return HashMap::new();
         };
         package_root.resolve_flask_dependencies(&config)
-    }
-
-    fn gin_paths_for_symbol_lookup(&self) -> Vec<PathBuf> {
-        self.collect_gin_files_recursive()
     }
 }

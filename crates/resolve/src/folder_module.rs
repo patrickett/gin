@@ -1,4 +1,4 @@
-//! Logical folder-module discovery within a single `flask.jsonc` package root.
+//! Logical folder-module discovery within a single `mod.flask` package root.
 //!
 //! A **folder module** is a directory under the package root. Only immediate `*.gin`
 //! files in that directory contribute to its public symbol surface; subdirectories
@@ -40,13 +40,13 @@ pub fn normalize_local_import_path(
                 });
             }
             normalized = canon;
-        } else if !path_starts_with(&normalized, package_root) {
+        } else if !normalized.starts_with(package_root) {
             return Err(NormalizePathError::EscapesPackageRoot {
                 path: normalized.clone(),
                 package_root: package_root.to_path_buf(),
             });
         }
-    } else if !path_starts_with(&normalized, package_root) {
+    } else if !normalized.starts_with(package_root) {
         return Err(NormalizePathError::EscapesPackageRoot {
             path: normalized.clone(),
             package_root: package_root.to_path_buf(),
@@ -62,7 +62,7 @@ pub fn normalize_local_import_path(
     }
 }
 
-fn normalize_path_components(path: &Path) -> PathBuf {
+pub(crate) fn normalize_path_components(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in path.components() {
         match comp {
@@ -74,14 +74,6 @@ fn normalize_path_components(path: &Path) -> PathBuf {
         }
     }
     out
-}
-
-fn path_starts_with(path: &Path, prefix: &Path) -> bool {
-    path.components().zip(prefix.components()).count() >= prefix.components().count()
-        && path
-            .components()
-            .zip(prefix.components())
-            .all(|(a, b)| a == b)
 }
 
 /// Resolve a logical folder module under `package_root` from slash/dot path segments.
@@ -142,6 +134,3 @@ pub fn split_dep_path_segments(
 
     (module_segs, None)
 }
-#[cfg(test)]
-#[path = "../tests/folder_module_tests.rs"]
-mod tests;

@@ -386,7 +386,7 @@ fn main() {
                 active.check_stats(&paths[0])
             };
             if sample > 0 {
-                observations.push(serde_json::json!({
+                let mut observation = serde_json::json!({
                     "profile": profile,
                     "milliseconds": milliseconds,
                     "edit_ms": edit_ms,
@@ -428,7 +428,10 @@ fn main() {
                     "inference_ms": stats.as_ref().map(|s| s.inference.as_secs_f64() * 1000.0),
                     "finishing_ms": stats.as_ref().map(|s| s.finishing.as_secs_f64() * 1000.0),
                     "finishing_reused": stats.as_ref().map(|s| s.finishing_reused),
-                }));
+                });
+                observation["finished_files"] =
+                    serde_json::json!(stats.as_ref().map(|s| s.finished_files));
+                observations.push(observation);
             }
         }
         println!(

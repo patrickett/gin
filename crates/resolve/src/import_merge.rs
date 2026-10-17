@@ -164,8 +164,8 @@ impl ImportRoot {
     }
 }
 
-/// Format `use A, B` for sibling folder imports (sorted case-insensitively).
-fn format_current_module_line(members: &[BundleMember]) -> String {
+/// Format a member list (sorted case-insensitively), without the `use` keyword.
+fn format_member_list(members: &[BundleMember]) -> String {
     let mut sorted: Vec<&BundleMember> = members.iter().collect();
     sorted.sort_by_key(|m| m.export.to_lowercase());
 
@@ -179,30 +179,17 @@ fn format_current_module_line(members: &[BundleMember]) -> String {
             }
         })
         .collect();
-    format!("use {}", member_strs.join(", "))
+    member_strs.join(", ")
 }
 
 /// Format a bundle `use` line for the given root and members (sorted case-insensitively).
 fn format_bundle_line(root: &ImportRoot, members: &[BundleMember]) -> String {
-    let mut sorted: Vec<&BundleMember> = members.iter().collect();
-    sorted.sort_by_key(|m| m.export.to_lowercase());
-
-    let member_strs: Vec<String> = sorted
-        .iter()
-        .map(|m| {
-            if let Some(alias) = &m.alias {
-                format!("{} as {}", m.export, alias)
-            } else {
-                m.export.clone()
-            }
-        })
-        .collect();
-    let bundle = member_strs.join(", ");
+    let bundle = format_member_list(members);
 
     match root {
         ImportRoot::Dependency(dep) => format!("use {dep} {bundle}"),
         ImportRoot::LocalPath(path) => format!("use '{path}' {bundle}"),
-        ImportRoot::CurrentModule => format_current_module_line(members),
+        ImportRoot::CurrentModule => format!("use {bundle}"),
     }
 }
 
@@ -242,19 +229,11 @@ impl RawSuggestion {
         }
 
         let display_root = matching
-            .iter()
-            .map(|c| match &c.root {
-                ImportRoot::LocalPath(p) => ImportRoot::LocalPath(p.clone()),
-                ImportRoot::Dependency(d) => ImportRoot::Dependency(d.clone()),
-                ImportRoot::CurrentModule => ImportRoot::CurrentModule,
-            })
-            .next()
+            .first()
+            .map(|c| c.root.clone())
             .unwrap_or_else(|| self.root.clone());
 
-        let use_line = match &display_root {
-            ImportRoot::CurrentModule => format_current_module_line(&members),
-            _ => format_bundle_line(&display_root, &members),
-        };
+        let use_line = format_bundle_line(&display_root, &members);
         let replace_line = *lines.iter().min().unwrap();
         let mut delete_lines: Vec<u32> = lines.into_iter().filter(|l| *l != replace_line).collect();
         delete_lines.sort_by(|a, b| b.cmp(a));

@@ -34,7 +34,6 @@ fn span_table() {
     let mut table = SpanTable::new();
     let id1 = table.insert_range(10..20);
     let id2 = table.insert_range(30..40);
-    assert_eq!(table.len(), 2);
     assert_eq!(table.get(id1), Span::new(10, 20));
     assert_eq!(table.get(id2), Span::new(30, 40));
     assert!(table.contains(id1, 15));
