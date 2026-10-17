@@ -55,11 +55,7 @@ impl PackageResolution {
         for (key, pkg) in &self.packages {
             if *key != format!("{}@{}", pkg.name, pkg.version)
                 || !valid_package_name(&pkg.name)
-                || pkg.sha256.len() != 64
-                || !pkg
-                    .sha256
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                || !valid_sha256(&pkg.sha256)
             {
                 return Err(ResolutionError(format!(
                     "invalid package identity or checksum `{key}`"
@@ -112,4 +108,10 @@ pub fn valid_package_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_'))
+}
+
+pub(crate) fn valid_sha256(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }

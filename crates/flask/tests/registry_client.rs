@@ -35,10 +35,7 @@ fn archive(files: &[(&str, &[u8])]) -> Vec<u8> {
 }
 fn package_archive() -> Vec<u8> {
     archive(&[
-        (
-            "flask.jsonc",
-            br#"{"name":"http","version":"1.0.0","authors":[]}"#,
-        ),
+        ("mod.flask", b"#settings\nmodule: 'http'\nversion: 1.0.0\n"),
         ("http.gin", b"let value = 1\n"),
     ])
 }
@@ -73,6 +70,7 @@ impl Fixture {
                 interface_sha256: "b".repeat(64),
                 published_at: 0,
                 dependencies: BTreeMap::new(),
+                minimum_dependencies: Some(BTreeMap::new()),
             })
             .unwrap();
         registry
@@ -87,8 +85,8 @@ impl Fixture {
             },
             transport.clone(),
         );
-        let config = json5::from_str(
-            r#"{name:'app',version:'1.0.0',authors:[],dependencies:{http:{version:'^1'}}}"#,
+        let config = FlaskConfig::parse_manifest(
+            "#settings\nmodule: 'app'\nversion: 0.1.0\n#dependencies\nhttp: 1.0.0\n",
         )
         .unwrap();
         let fixture = Self {
@@ -116,7 +114,7 @@ impl Fixture {
         );
     }
     fn resolve(&mut self) {
-        self.config.resolution = Some(self.client.resolve(&self.config, 310_000).unwrap());
+        self.client.resolve(&self.config, 310_000).unwrap();
     }
 }
 fn format_hex(bytes: &[u8]) -> String {
@@ -150,7 +148,11 @@ fn verified_download_is_shared_and_cached_verification_never_uses_network() {
 
 #[test]
 fn malformed_archive_and_manifest_mismatch_never_install() {
-    for bytes in [b"not a tar".to_vec(), archive(&[("flask.jsonc", br#"{"name":"other","version":"1.0.0","authors":[]}"#)]), archive(&[("flask.jsonc", br#"{"name":"http","version":"1.0.0","authors":[],"dependencies":{"local":{"path":"/tmp"}}}"#)])] {
+    for bytes in [
+        b"not a tar".to_vec(),
+        minimum_archive("other", "1.0.0", ""),
+        minimum_archive("http", "1.0.0", "local: './local'\n"),
+    ] {
         let mut f = Fixture::new(bytes);
         f.resolve();
         assert!(f.client.fetch(&f.config, 310_000, false).is_err());
@@ -294,4 +296,165 @@ fn audit_refreshes_security_without_downloading_sources_and_reports_the_reason()
             .iter()
             .all(|resource| resource == "v1/snapshot.json")
     );
+}
+
+fn minimum_archive(name: &str, version: &str, dependencies: &str) -> Vec<u8> {
+    let manifest =
+        format!("#settings\nmodule: '{name}'\nversion: {version}\n#dependencies\n{dependencies}");
+    archive(&[
+        ("mod.flask", manifest.as_bytes()),
+        ("lib.gin", b"Choice is Left or Right\n"),
+    ])
+}
+
+fn add_minimum(f: &mut Fixture, name: &str, version: &str, dependencies: &str) {
+    let bytes = minimum_archive(name, version, dependencies);
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let manifest =
+        format!("#settings\nmodule: '{name}'\nversion: {version}\n#dependencies\n{dependencies}");
+    let config = FlaskConfig::parse_manifest(&manifest).unwrap();
+    let version = Version::parse(version).unwrap();
+    f.registry
+        .insert(Release {
+            name: name.into(),
+            version: version.clone(),
+            archive_sha256: digest.clone(),
+            interface_sha256: "b".repeat(64),
+            published_at: 0,
+            dependencies: BTreeMap::new(),
+            minimum_dependencies: Some(config.registry_minimum_requirements().unwrap()),
+        })
+        .unwrap();
+    f.registry
+        .set_status(name, &version, ReleaseStatus::Eligible)
+        .unwrap();
+    f.transport
+        .blobs
+        .borrow_mut()
+        .insert(format!("v1/blobs/{digest}"), bytes);
+}
+
+#[test]
+fn signed_minimum_fetch_and_offline_reconstruction_need_no_project_resolution() {
+    let mut f = Fixture::new(minimum_archive("http", "1.0.0", ""));
+    add_minimum(&mut f, "json", "1.0.0", "http: 1.2.0\n");
+    add_minimum(&mut f, "http", "1.2.0", "socket: 1.0.0\n");
+    add_minimum(&mut f, "socket", "1.0.0", "");
+    f.publish(2);
+    f.config = FlaskConfig::parse_manifest(
+        "#settings\nmodule: 'app'\nversion: 0.1.0\n#dependencies\nhttp: 1.0.0\njson: 1.0.0\n",
+    )
+    .unwrap();
+    let before = serde_json::to_value(&f.config).unwrap();
+    f.client.fetch(&f.config, 310_000, true).unwrap();
+    let selected = f.client.verify_cached(&f.config, 310_000).unwrap();
+    assert_eq!(selected.direct["http"], "http@1.2.0");
+    assert_eq!(selected.packages.len(), 3);
+    assert!(!f.home.path().join("cache/deps/http@1.0.0").exists());
+    assert_eq!(serde_json::to_value(&f.config).unwrap(), before);
+    assert!(f.config.resolution.is_none());
+    add_minimum(&mut f, "http", "1.9.0", "");
+    f.publish(3);
+    f.client.fetch(&f.config, 310_000, true).unwrap();
+    assert_eq!(
+        f.client.verify_cached(&f.config, 310_000).unwrap(),
+        selected
+    );
+    let calls = f.transport.calls.borrow().len();
+    f.transport.blobs.borrow_mut().clear();
+    assert_eq!(
+        f.client.verify_cached(&f.config, 310_000).unwrap(),
+        selected
+    );
+    assert_eq!(f.transport.calls.borrow().len(), calls);
+    std::fs::write(
+        f.home.path().join("cache/deps/http@1.2.0/lib.gin"),
+        "changed",
+    )
+    .unwrap();
+    assert!(f.client.verify_cached(&f.config, 310_000).is_err());
+}
+
+#[test]
+fn signed_manifest_mismatch_legacy_and_duplicate_manifests_never_install() {
+    for bytes in [
+        minimum_archive("other", "1.0.0", ""),
+        minimum_archive("http", "1.0.0", "socket: 1.0.0\n"),
+        archive(&[("flask.jsonc", b"{}")]),
+        archive(&[
+            ("mod.flask", b"#settings\nmodule: 'http'\nversion: 1.0.0\n"),
+            ("mod.flask", b"{}"),
+        ]),
+    ] {
+        let f = Fixture::new(bytes);
+        assert!(f.client.fetch(&f.config, 310_000, true).is_err());
+        assert!(!f.home.path().join("cache/deps/http@1.0.0").exists());
+    }
+}
+
+#[test]
+fn minimum_security_block_fails_without_choosing_a_newer_release() {
+    let mut f = Fixture::new(minimum_archive("http", "1.0.0", ""));
+    f.client.fetch(&f.config, 310_000, true).unwrap();
+    add_minimum(&mut f, "http", "1.1.0", "");
+    f.registry
+        .set_status(
+            "http",
+            &Version::new(1, 0, 0),
+            ReleaseStatus::Blocked {
+                reason: "compromised".into(),
+            },
+        )
+        .unwrap();
+    f.publish(2);
+    assert!(
+        f.client
+            .fetch(&f.config, 310_000, true)
+            .unwrap_err()
+            .to_string()
+            .contains("compromised")
+    );
+    let update = f.client.update(&f.config, 310_000).unwrap();
+    assert_eq!(update.direct["http"], "http@1.1.0");
+    let next = f.config.with_minimum_floors(&update).unwrap();
+    assert!(next.resolution.is_none());
+    f.client.fetch(&next, 310_000, false).unwrap();
+    assert_eq!(f.client.verify_cached(&next, 310_000).unwrap(), update);
+}
+
+#[test]
+fn minimum_publication_binds_manifest_archive_and_compiled_interface() {
+    let bytes = minimum_archive("http", "1.0.0", "json: 1.0.0\n");
+    let compiled = interface::PublicInterface::from_subject_and_declarations(
+        interface::PackageInstanceId {
+            package: "http".into(),
+            version: "1.0.0".into(),
+            source: "flasks.io".into(),
+            instance: "http".into(),
+        },
+        vec![],
+    );
+    let mut release = Release {
+        name: "http".into(),
+        version: Version::new(1, 0, 0),
+        archive_sha256: format!("{:x}", Sha256::digest(&bytes)),
+        interface_sha256: format!("{:x}", Sha256::digest(compiled.canonical_bytes())),
+        published_at: 0,
+        dependencies: BTreeMap::new(),
+        minimum_dependencies: Some(BTreeMap::new()),
+    };
+    let mut registry = Registry::default();
+    assert!(
+        registry
+            .publish(release.clone(), &bytes, &compiled, None)
+            .is_err()
+    );
+    release.minimum_dependencies = Some(BTreeMap::from([(
+        "json".into(),
+        flask::MinimumRequirement::parse("json", "1.0.0").unwrap(),
+    )]));
+    registry
+        .publish(release.clone(), &bytes, &compiled, None)
+        .unwrap();
+    assert!(registry.publish(release, &bytes, &compiled, None).is_err());
 }

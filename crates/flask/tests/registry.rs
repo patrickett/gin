@@ -18,6 +18,7 @@ fn release(name: &str, version: &str, deps: &[(&str, &str)]) -> Release {
         interface_sha256: format!("{:x}", Sha256::digest(b"interface")),
         published_at: 0,
         dependencies: requirements(deps),
+        minimum_dependencies: None,
     }
 }
 

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::resolution::valid_sha256;
 use crate::{LockedPackage, PackageResolution, ResolutionError, VersionBump, VersionError};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -16,6 +17,8 @@ pub struct Release {
     pub interface_sha256: String,
     pub published_at: u64,
     pub dependencies: BTreeMap<String, VersionReq>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_dependencies: Option<BTreeMap<String, crate::MinimumRequirement>>,
 }
 
 impl Release {
@@ -53,6 +56,15 @@ pub struct SecurityPolicy {
     pub now: u64,
     pub metadata_expires_at: u64,
     pub cooldown_seconds: u64,
+}
+
+impl SecurityPolicy {
+    pub(crate) fn ensure_fresh(&self) -> Result<(), RegistryError> {
+        if self.now >= self.metadata_expires_at {
+            return Err(RegistryError::Expired);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Error)]
@@ -93,6 +105,12 @@ pub struct Registry {
 }
 
 impl Registry {
+    pub(crate) fn releases_for(&self, name: &str) -> impl DoubleEndedIterator<Item = &Release> {
+        self.releases
+            .get(name)
+            .into_iter()
+            .flat_map(|versions| versions.values())
+    }
     pub(crate) fn releases(&self) -> impl Iterator<Item = &Release> {
         self.releases
             .values()
@@ -116,6 +134,10 @@ impl Registry {
         previous: Option<&interface::PublicInterface>,
     ) -> Result<(), RegistryError> {
         release.verify_archive(archive)?;
+        if release.minimum_dependencies.is_some() {
+            crate::registry_client::release_files(release, archive)
+                .map_err(|e| RegistryError::Interface(e.to_string()))?;
+        }
         if self
             .releases
             .get(&release.name)
@@ -154,15 +176,35 @@ impl Registry {
         Ok(())
     }
 
+    pub fn publish(
+        &mut self,
+        release: Release,
+        archive: &[u8],
+        compiled: &interface::PublicInterface,
+        previous: Option<&interface::PublicInterface>,
+    ) -> Result<(), RegistryError> {
+        self.validate_publication(&release, archive, compiled, previous)?;
+        self.insert(release)
+    }
+
     pub fn insert(&mut self, release: Release) -> Result<(), RegistryError> {
-        let valid_digest = |s: &str| {
-            s.len() == 64
-                && s.bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        };
+        if let Some(requirements) = &release.minimum_dependencies {
+            if !release.dependencies.is_empty()
+                || release.version.major == 0
+                || !release.version.pre.is_empty()
+            {
+                return Err(RegistryError::InvalidRelease(release.key()));
+            }
+            for (alias, requirement) in requirements {
+                if !crate::valid_package_name(alias) {
+                    return Err(RegistryError::InvalidRelease(release.key()));
+                }
+                requirement.validate()?;
+            }
+        }
         if !crate::valid_package_name(&release.name)
-            || !valid_digest(&release.archive_sha256)
-            || !valid_digest(&release.interface_sha256)
+            || !valid_sha256(&release.archive_sha256)
+            || !valid_sha256(&release.interface_sha256)
             || !release.version.build.is_empty()
             || release
                 .version
@@ -212,9 +254,7 @@ impl Registry {
     }
 
     pub fn check(&self, release: &Release, policy: SecurityPolicy) -> Result<(), RegistryError> {
-        if policy.now >= policy.metadata_expires_at {
-            return Err(RegistryError::Expired);
-        }
+        policy.ensure_fresh()?;
         if self.release(&release.name, &release.version)? != release {
             return Err(RegistryError::Integrity(release.key()));
         }
@@ -240,9 +280,7 @@ impl Registry {
         requirements: &BTreeMap<String, VersionReq>,
         policy: SecurityPolicy,
     ) -> Result<PackageResolution, RegistryError> {
-        if policy.now >= policy.metadata_expires_at {
-            return Err(RegistryError::Expired);
-        }
+        policy.ensure_fresh()?;
         let pending = requirements
             .iter()
             .map(|(name, req)| (name.clone(), req.clone()))
@@ -305,6 +343,9 @@ impl Registry {
                 .flatten();
         }
         for release in self.releases.get(&name)?.values().rev() {
+            if release.minimum_dependencies.is_some() {
+                continue;
+            }
             if !req.matches(&release.version) || self.check(release, policy).is_err() {
                 continue;
             }
@@ -330,12 +371,15 @@ impl Registry {
         resolution: &PackageResolution,
         policy: SecurityPolicy,
     ) -> Result<(), RegistryError> {
-        if policy.now >= policy.metadata_expires_at {
-            return Err(RegistryError::Expired);
-        }
+        policy.ensure_fresh()?;
         resolution.validate(requirements)?;
         for pkg in resolution.packages.values() {
             let release = self.release(&pkg.name, &pkg.version)?;
+            if release.minimum_dependencies.is_some() {
+                return Err(RegistryError::Resolution(ResolutionError(
+                    "minimum releases require mod.flask".into(),
+                )));
+            }
             self.check(release, policy)?;
             if release.archive_sha256 != pkg.sha256 {
                 return Err(RegistryError::Integrity(release.key()));

@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{Registry, Release, ReleaseStatus, SecurityEvent, SecurityPolicy};
+use crate::registry::SecurityEvent;
+use crate::{Registry, Release, ReleaseStatus, SecurityPolicy};
 
 const DOMAIN: &[u8] = b"flasks.snapshot.v1\0";
 
@@ -127,7 +128,7 @@ impl SignedSnapshot {
         }
         let snapshot: Snapshot = serde_json::from_str(&self.payload)
             .map_err(|e| MetadataError::Invalid(e.to_string()))?;
-        if snapshot.schema != 1
+        if !matches!(snapshot.schema, 1 | 2)
             || snapshot.registry != trust.registry
             || snapshot.revision == 0
             || snapshot.expires_at <= snapshot.issued_at
@@ -135,6 +136,16 @@ impl SignedSnapshot {
         {
             return Err(MetadataError::Invalid(
                 "unsupported schema, registry, revision, or validity period".into(),
+            ));
+        }
+        if snapshot.schema == 1
+            && snapshot
+                .releases
+                .iter()
+                .any(|r| r.minimum_dependencies.is_some())
+        {
+            return Err(MetadataError::Invalid(
+                "minimum requirements need snapshot schema 2".into(),
             ));
         }
         let registry = Registry::from_snapshot(&snapshot)?;
@@ -194,7 +205,11 @@ impl Registry {
         expires_at: u64,
     ) -> Snapshot {
         Snapshot {
-            schema: 1,
+            schema: if self.releases().any(|r| r.minimum_dependencies.is_some()) {
+                2
+            } else {
+                1
+            },
             registry,
             revision,
             issued_at,

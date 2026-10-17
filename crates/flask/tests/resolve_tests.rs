@@ -18,9 +18,21 @@ fn nested_path_two_segments_requires_flask_at_each_level() {
     fs::create_dir_all(&root).unwrap();
     let dep = root.join("dep");
     fs::create_dir_all(dep.join("seg1/seg2")).unwrap();
-    fs::write(dep.join("flask.jsonc"), "{}").unwrap();
-    fs::write(dep.join("seg1/flask.jsonc"), "{}").unwrap();
-    fs::write(dep.join("seg1/seg2/flask.jsonc"), "{}").unwrap();
+    fs::write(
+        dep.join("mod.flask"),
+        "#settings\nmodule: 'module'\nversion: 0.0.0\n",
+    )
+    .unwrap();
+    fs::write(
+        dep.join("seg1/mod.flask"),
+        "#settings\nmodule: 'module'\nversion: 0.0.0\n",
+    )
+    .unwrap();
+    fs::write(
+        dep.join("seg1/seg2/mod.flask"),
+        "#settings\nmodule: 'module'\nversion: 0.0.0\n",
+    )
+    .unwrap();
 
     let t = dep.resolve_nested_package_path(&["seg1", "seg2"]).unwrap();
     match t {
@@ -35,8 +47,16 @@ fn nested_path_missing_intermediate_flask_errors() {
     fs::create_dir_all(&root).unwrap();
     let dep = root.join("dep");
     fs::create_dir_all(dep.join("seg1/seg2")).unwrap();
-    fs::write(dep.join("flask.jsonc"), "{}").unwrap();
-    fs::write(dep.join("seg1/seg2/flask.jsonc"), "{}").unwrap();
+    fs::write(
+        dep.join("mod.flask"),
+        "#settings\nmodule: 'module'\nversion: 0.0.0\n",
+    )
+    .unwrap();
+    fs::write(
+        dep.join("seg1/seg2/mod.flask"),
+        "#settings\nmodule: 'module'\nversion: 0.0.0\n",
+    )
+    .unwrap();
 
     let err = dep
         .resolve_nested_package_path(&["seg1", "seg2"])

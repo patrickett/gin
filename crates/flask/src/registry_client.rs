@@ -4,10 +4,12 @@ use std::io::{self, Read, Write};
 use std::path::{Component, Path};
 use std::time::Duration;
 
-use crate::{PackageResolution, Release, SignedSnapshot, TrustRoot, VerifiedSnapshot};
+use crate::{
+    PackageResolution, Release, SecurityPolicy, SignedSnapshot, TrustRoot, VerifiedSnapshot,
+};
 use serde::{Deserialize, Serialize};
 
-use crate::{DependencyKind, FlaskConfig, GinHome, PACKAGE_CONFIG_NAME};
+use crate::{DependencyKind, FlaskConfig, GinHome, MANIFEST_NAME};
 
 const METADATA_LIMIT: usize = 32 * 1024 * 1024;
 const ARCHIVE_LIMIT: usize = 64 * 1024 * 1024;
@@ -130,7 +132,7 @@ impl<T: RegistryTransport> RegistryClient<T> {
             .open(security.join("registry.lock"))?;
         lock.lock()?;
         let path = security.join("snapshot.json");
-        let previous = match read_bounded(&path, METADATA_LIMIT) {
+        let previous = match read_bounded(&path, METADATA_LIMIT, "cached file exceeds size limit") {
             Ok(bytes) => {
                 if bytes.len() > METADATA_LIMIT {
                     return Err(error("cached metadata exceeds size limit"));
@@ -144,9 +146,7 @@ impl<T: RegistryTransport> RegistryClient<T> {
         if !refresh {
             let previous = previous
                 .ok_or_else(|| error("no authenticated metadata; run begin fetch first"))?;
-            previous
-                .policy(now, self.settings.cooldown_seconds)
-                .map_err(error)?;
+            self.policy(now, &previous)?;
             return Ok(previous);
         }
         let bytes = self.transport.fetch("v1/snapshot.json", METADATA_LIMIT)?;
@@ -166,51 +166,108 @@ impl<T: RegistryTransport> RegistryClient<T> {
 
     pub fn resolve(&self, config: &FlaskConfig, now: u64) -> io::Result<PackageResolution> {
         let metadata = self.metadata(now, true)?;
+        if config.minimum_version_selection {
+            return self.resolve_with_metadata(config, now, &metadata);
+        }
+        self.resolve_exact(config, now, &metadata)
+    }
+
+    fn policy(&self, now: u64, metadata: &VerifiedSnapshot) -> io::Result<SecurityPolicy> {
+        metadata
+            .policy(now, self.settings.cooldown_seconds)
+            .map_err(error)
+    }
+
+    fn resolve_exact(
+        &self,
+        config: &FlaskConfig,
+        now: u64,
+        metadata: &VerifiedSnapshot,
+    ) -> io::Result<PackageResolution> {
         metadata
             .registry()
             .resolve(
                 &config.registry_requirements().map_err(error)?,
-                metadata
-                    .policy(now, self.settings.cooldown_seconds)
-                    .map_err(error)?,
+                self.policy(now, metadata)?,
             )
             .map_err(error)
     }
 
-    pub fn audit(&self, config: &FlaskConfig, now: u64) -> io::Result<()> {
+    fn resolve_with_metadata(
+        &self,
+        config: &FlaskConfig,
+        now: u64,
+        metadata: &VerifiedSnapshot,
+    ) -> io::Result<PackageResolution> {
+        if config.minimum_version_selection {
+            config.validate_resolution().map_err(error)?;
+            return metadata
+                .registry()
+                .resolve_minimum(
+                    &config.registry_minimum_requirements().map_err(error)?,
+                    self.policy(now, metadata)?,
+                )
+                .map_err(error);
+        }
         let resolution = config
             .resolution
             .as_ref()
             .ok_or_else(|| error("manifest has no resolution; run begin update"))?;
-        let metadata = self.metadata(now, true)?;
         metadata
             .registry()
             .validate_resolution(
                 &config.registry_requirements().map_err(error)?,
                 resolution,
-                metadata
-                    .policy(now, self.settings.cooldown_seconds)
-                    .map_err(error)?,
+                self.policy(now, metadata)?,
+            )
+            .map_err(error)?;
+        Ok(resolution.clone())
+    }
+
+    pub fn update(&self, config: &FlaskConfig, now: u64) -> io::Result<PackageResolution> {
+        let metadata = self.metadata(now, true)?;
+        if config.minimum_version_selection {
+            return metadata
+                .registry()
+                .update_minimum(
+                    &config.registry_minimum_requirements().map_err(error)?,
+                    None,
+                    self.policy(now, &metadata)?,
+                )
+                .map_err(error);
+        }
+        self.resolve_exact(config, now, &metadata)
+    }
+
+    pub fn audit(&self, config: &FlaskConfig, now: u64) -> io::Result<()> {
+        let metadata = self.metadata(now, true)?;
+        self.resolve_with_metadata(config, now, &metadata)
+            .map(|_| ())
+    }
+
+    pub fn update_requirement(
+        &self,
+        config: &FlaskConfig,
+        target: &crate::MinimumRequirement,
+        now: u64,
+    ) -> io::Result<PackageResolution> {
+        let metadata = self.metadata(now, true)?;
+        if !config.minimum_version_selection {
+            return Err(error("targeted updates require mod.flask"));
+        }
+        metadata
+            .registry()
+            .update_minimum(
+                &config.registry_minimum_requirements().map_err(error)?,
+                Some(target),
+                self.policy(now, &metadata)?,
             )
             .map_err(error)
     }
 
     pub fn fetch(&self, config: &FlaskConfig, now: u64, refresh: bool) -> io::Result<()> {
-        let resolution = config
-            .resolution
-            .as_ref()
-            .ok_or_else(|| error("manifest has no resolution; run begin update first"))?;
         let metadata = self.metadata(now, refresh)?;
-        metadata
-            .registry()
-            .validate_resolution(
-                &config.registry_requirements().map_err(error)?,
-                resolution,
-                metadata
-                    .policy(now, self.settings.cooldown_seconds)
-                    .map_err(error)?,
-            )
-            .map_err(error)?;
+        let resolution = self.resolve_with_metadata(config, now, &metadata)?;
         for package in resolution.packages.values() {
             let release = metadata
                 .registry()
@@ -222,21 +279,8 @@ impl<T: RegistryTransport> RegistryClient<T> {
     }
 
     pub fn verify_cached(&self, config: &FlaskConfig, now: u64) -> io::Result<PackageResolution> {
-        let resolution = config
-            .resolution
-            .as_ref()
-            .ok_or_else(|| error("manifest has no exact resolution; run begin update"))?;
         let metadata = self.metadata(now, false)?;
-        metadata
-            .registry()
-            .validate_resolution(
-                &config.registry_requirements().map_err(error)?,
-                resolution,
-                metadata
-                    .policy(now, self.settings.cooldown_seconds)
-                    .map_err(error)?,
-            )
-            .map_err(error)?;
+        let resolution = self.resolve_with_metadata(config, now, &metadata)?;
         for package in resolution.packages.values() {
             let release = metadata
                 .registry()
@@ -247,7 +291,7 @@ impl<T: RegistryTransport> RegistryClient<T> {
             let destination = self.home.dependency(&release.name, &release.version)?;
             verify_tree(&destination, &entries)?;
         }
-        Ok(resolution.clone())
+        Ok(resolution)
     }
 
     pub fn interface(
@@ -260,12 +304,7 @@ impl<T: RegistryTransport> RegistryClient<T> {
         let release = metadata.registry().release(name, version).map_err(error)?;
         metadata
             .registry()
-            .check(
-                release,
-                metadata
-                    .policy(now, self.settings.cooldown_seconds)
-                    .map_err(error)?,
-            )
+            .check(release, self.policy(now, &metadata)?)
             .map_err(error)?;
         let bytes = self.transport.fetch(
             &format!("v1/blobs/{}", release.interface_sha256),
@@ -281,18 +320,15 @@ impl<T: RegistryTransport> RegistryClient<T> {
     }
 
     fn archive(&self, release: &Release) -> io::Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        File::open(
-            self.home
+        let bytes = read_bounded(
+            &self
+                .home
                 .root()
                 .join("cache/archives")
                 .join(&release.archive_sha256),
-        )?
-        .take(ARCHIVE_LIMIT as u64 + 1)
-        .read_to_end(&mut bytes)?;
-        if bytes.len() > ARCHIVE_LIMIT {
-            return Err(error("archive exceeds size limit"));
-        }
+            ARCHIVE_LIMIT,
+            "archive exceeds size limit",
+        )?;
         release.verify_archive(&bytes).map_err(error)?;
         Ok(bytes)
     }
@@ -348,27 +384,40 @@ impl<T: RegistryTransport> RegistryClient<T> {
     }
 }
 
-fn read_bounded(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
+fn read_bounded(path: &Path, limit: usize, message: &str) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     File::open(path)?
         .take(limit as u64 + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() > limit {
-        return Err(error("cached file exceeds size limit"));
+        return Err(error(message));
     }
     Ok(bytes)
 }
 
-fn release_files(release: &Release, archive: &[u8]) -> io::Result<BTreeMap<String, Vec<u8>>> {
+pub(crate) fn release_files(
+    release: &Release,
+    archive: &[u8],
+) -> io::Result<BTreeMap<String, Vec<u8>>> {
     let entries = archive_files(archive)?;
     let raw = entries
-        .get(PACKAGE_CONFIG_NAME)
-        .ok_or_else(|| error("archive has no root flask.jsonc"))?;
-    let manifest: FlaskConfig =
-        json5::from_str(std::str::from_utf8(raw).map_err(error)?).map_err(error)?;
+        .get(MANIFEST_NAME)
+        .ok_or_else(|| error("archive has no mod.flask"))?;
+    let manifest =
+        FlaskConfig::parse_manifest(std::str::from_utf8(raw).map_err(error)?).map_err(error)?;
+    let requirements_match = match &release.minimum_dependencies {
+        Some(requirements) => {
+            manifest.minimum_version_selection
+                && manifest.registry_minimum_requirements().map_err(error)? == *requirements
+        }
+        None => {
+            !manifest.minimum_version_selection
+                && manifest.registry_requirements().map_err(error)? == release.dependencies
+        }
+    };
     if manifest.name != release.name
         || manifest.version != release.version.to_string()
-        || manifest.registry_requirements().map_err(error)? != release.dependencies
+        || !requirements_match
         || manifest
             .dependencies()
             .values()

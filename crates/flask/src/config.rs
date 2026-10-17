@@ -1,8 +1,7 @@
 use derive_more::Display;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-pub const PACKAGE_CONFIG_NAME: &str = "flask.jsonc";
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Feature {}
@@ -23,7 +22,7 @@ pub struct DependencyCommon {
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct BugInfo {
     #[serde(default)]
-    url: Option<String>,
+    pub(crate) url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -44,6 +43,21 @@ pub struct Dependency {
     pub common: DependencyCommon,
 }
 
+impl Dependency {
+    pub fn new(kind: DependencyKind) -> Self {
+        Self {
+            kind,
+            common: Default::default(),
+        }
+    }
+
+    pub fn minimum(alias: &str, requirement: &crate::MinimumRequirement) -> Self {
+        Self::new(DependencyKind::Version {
+            version: requirement.manifest_value(alias),
+        })
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Display)]
 #[display("{_0}")]
 pub struct Author(pub String);
@@ -55,21 +69,23 @@ pub struct FlaskConfig {
     pub description: Option<String>,
     pub version: String,
     #[serde(default)]
-    keywords: Option<Vec<String>>,
-    authors: Vec<Author>,
+    pub(crate) keywords: Option<Vec<String>>,
+    pub(crate) authors: Vec<Author>,
     #[serde(default)]
-    repository: Option<String>,
+    pub(crate) repository: Option<String>,
     #[serde(default)]
-    license: Option<Vec<String>>,
+    pub(crate) license: Option<Vec<String>>,
     #[serde(default)]
-    bugs: Option<BugInfo>,
+    pub(crate) bugs: Option<BugInfo>,
     #[serde(default)]
-    funding: Option<Vec<String>>,
+    pub(crate) funding: Option<Vec<String>>,
     /// `"library"` or full target triple (`arch-vendor-os`).
     #[serde(default)]
     pub target: Option<String>,
     #[serde(default)]
-    dependencies: HashMap<String, Dependency>,
+    pub(crate) dependencies: HashMap<String, Dependency>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub minimum_version_selection: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<crate::PackageResolution>,
 }
@@ -88,12 +104,11 @@ impl FlaskConfig {
             funding: None,
             target: None,
             dependencies: HashMap::new(),
+            minimum_version_selection: false,
             resolution: None,
         }
     }
-}
 
-impl FlaskConfig {
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -114,22 +129,6 @@ impl FlaskConfig {
         self.target.as_deref()
     }
 
-    /// Qualified module name (e.g. `core.arch`) for a directory inside the package.
-    ///
-    /// `dir` must be a child of `root_dir`. When `dir == root_dir`, the bare
-    /// package name is returned.
-    pub fn qualified_name_for(&self, dir: &std::path::Path, root_dir: &std::path::Path) -> String {
-        if let Ok(rel) = dir.strip_prefix(root_dir)
-            && let Some(rel_str) = rel.to_str()
-            && !rel_str.is_empty()
-        {
-            let subpath = rel_str.replace('/', ".");
-            format!("{}.{subpath}", self.name)
-        } else {
-            self.name.clone()
-        }
-    }
-
     pub fn dependency_names(&self) -> Vec<&str> {
         self.dependencies.keys().map(|s| s.as_str()).collect()
     }
@@ -138,45 +137,149 @@ impl FlaskConfig {
         &self.dependencies
     }
 
-    /// Find the package configuration and its root directory by walking up from `dir`.
-    /// Returns `Some((config, root_dir))` when a `flask.jsonc` is found.
-    pub fn find_package_config(dir: &std::path::Path) -> Option<(FlaskConfig, std::path::PathBuf)> {
-        let mut search = dir.to_path_buf();
-        loop {
-            search.push(PACKAGE_CONFIG_NAME);
-            if let Ok(raw) = std::fs::read_to_string(&search)
-                && let Ok(config) = json5::from_str::<FlaskConfig>(&raw)
-            {
-                search.pop(); // remove flask.jsonc
-                return Some((config, search));
-            }
-            search.pop(); // remove flask.jsonc
-            if !search.pop() {
-                return None;
+    /// Absolute roots for every `Path` dependency, resolved against `base`.
+    pub fn resolve_path_dependencies(&self, base: &Path) -> HashMap<String, PathBuf> {
+        let mut dependencies = HashMap::new();
+        for (name, dependency) in &self.dependencies {
+            if let DependencyKind::Path { path } = &dependency.kind {
+                dependencies.insert(name.clone(), base.join(path));
             }
         }
+        dependencies
     }
-}
 
-impl FlaskConfig {
+    /// Find the package configuration and its root directory by walking up from `dir`.
+    /// Returns `Some((config, root_dir))` when a `mod.flask` is found.
+    pub fn find_package_config(dir: &std::path::Path) -> Option<(FlaskConfig, std::path::PathBuf)> {
+        Self::discover(dir).ok().flatten()
+    }
+
+    pub fn discover(
+        from: &std::path::Path,
+    ) -> Result<Option<(FlaskConfig, std::path::PathBuf)>, String> {
+        for root in from.ancestors() {
+            let path = Self::manifest_path(root);
+            match std::fs::read_to_string(&path) {
+                Ok(raw) => {
+                    return Self::parse_manifest(&raw)
+                        .map(|config| Some((config, root.to_path_buf())))
+                        .map_err(|error| format!("{}: {error}", path.display()));
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) => {}
+                Err(error) => return Err(format!("{}: {error}", path.display())),
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn registry_minimum_requirements(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, crate::MinimumRequirement>, crate::ResolutionError>
+    {
+        self.version_deps()
+            .map(|(alias, version)| {
+                crate::MinimumRequirement::parse(alias, version)
+                    .map(|requirement| (alias.clone(), requirement))
+            })
+            .collect()
+    }
+
+    pub fn with_minimum_requirement(
+        &self,
+        alias: &str,
+        requirement: crate::MinimumRequirement,
+    ) -> Result<Self, crate::ResolutionError> {
+        if !self.minimum_version_selection || !crate::valid_package_name(alias) {
+            return Err(crate::ResolutionError(
+                "minimum dependencies require mod.flask and a valid alias".into(),
+            ));
+        }
+        requirement.validate()?;
+        let mut next = self.clone();
+        next.dependencies
+            .insert(alias.to_owned(), Dependency::minimum(alias, &requirement));
+        Ok(next)
+    }
+
+    pub fn with_minimum_floors(
+        &self,
+        resolution: &crate::PackageResolution,
+    ) -> Result<Self, crate::ResolutionError> {
+        let mut result = self.clone();
+        let requirements = self.registry_minimum_requirements()?;
+        for package in resolution.packages.values() {
+            let alias = requirements
+                .iter()
+                .find(|(_, r)| r.name == package.name && r.version.major == package.version.major)
+                .map(|(alias, _)| alias.clone())
+                .unwrap_or_else(|| {
+                    if result.dependencies.contains_key(&package.name) {
+                        format!("{}_v{}", package.name, package.version.major)
+                    } else {
+                        package.name.clone()
+                    }
+                });
+            if let Some(dependency) = result.dependencies.get(&alias) {
+                let DependencyKind::Version { version } = &dependency.kind else {
+                    return Err(crate::ResolutionError(format!(
+                        "dependency alias collision: {alias}"
+                    )));
+                };
+                let existing = crate::MinimumRequirement::parse(&alias, version)?;
+                if existing.name != package.name || existing.version.major != package.version.major
+                {
+                    return Err(crate::ResolutionError(format!(
+                        "dependency alias collision: {alias}"
+                    )));
+                }
+            }
+            let minimum = crate::MinimumRequirement {
+                name: package.name.clone(),
+                version: package.version.clone(),
+            };
+            result
+                .dependencies
+                .insert(alias.clone(), Dependency::minimum(&alias, &minimum));
+        }
+        Ok(result)
+    }
+
+    fn version_deps(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.dependencies
+            .iter()
+            .filter_map(|(alias, dependency)| match &dependency.kind {
+                DependencyKind::Version { version } => Some((alias, version)),
+                _ => None,
+            })
+    }
+
     pub fn registry_requirements(
         &self,
     ) -> Result<std::collections::BTreeMap<String, semver::VersionReq>, crate::ResolutionError>
     {
-        self.dependencies
-            .iter()
-            .filter_map(|(name, dep)| match &dep.kind {
-                DependencyKind::Version { version } => Some(
-                    semver::VersionReq::parse(version)
-                        .map(|req| (name.clone(), req))
-                        .map_err(|e| crate::ResolutionError(e.to_string())),
-                ),
-                _ => None,
+        self.version_deps()
+            .map(|(name, version)| {
+                semver::VersionReq::parse(version)
+                    .map(|req| (name.clone(), req))
+                    .map_err(|e| crate::ResolutionError(e.to_string()))
             })
             .collect()
     }
 
     pub fn validate_resolution(&self) -> Result<(), crate::ResolutionError> {
+        if self.minimum_version_selection {
+            if self.resolution.is_some() {
+                return Err(crate::ResolutionError(
+                    "mod.flask cannot contain a locked resolution".into(),
+                ));
+            }
+            self.registry_minimum_requirements()?;
+            return Ok(());
+        }
         if let Some(resolution) = &self.resolution {
             resolution.validate(&self.registry_requirements()?)?;
         }

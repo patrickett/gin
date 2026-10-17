@@ -1,4 +1,4 @@
-use crate::{FlaskConfig, PACKAGE_CONFIG_NAME};
+use crate::FlaskConfig;
 use std::{
     fs::File,
     io::Write,
@@ -70,74 +70,40 @@ impl FlaskConfigHandle {
                 "manifest version changed during compilation",
             )));
         }
-        self.update_field("version", serde_json::Value::String(next.to_owned()))
+        let (path, raw, _) = self.read_unmodified_config()?;
+        let updated = crate::manifest::set_entry(&raw, "#settings", "version", next)
+            .map_err(|e| ConfigError::Io(std::io::Error::other(e)))?;
+        self.persist_update(&path, &raw, &updated)
     }
 
-    pub fn update_resolution(
-        &self,
-        resolution: crate::PackageResolution,
-    ) -> Result<(), ConfigError> {
-        resolution
-            .validate(
-                &self
-                    .read()
-                    .config
-                    .registry_requirements()
-                    .map_err(|e| ConfigError::Io(std::io::Error::other(e)))?,
-            )
+    fn persist_update(&self, path: &Path, raw: &str, updated: &str) -> Result<(), ConfigError> {
+        let next = FlaskConfig::parse_manifest(updated)
             .map_err(|e| ConfigError::Io(std::io::Error::other(e)))?;
-        self.update_field(
-            "resolution",
-            serde_json::to_value(resolution)
-                .map_err(|e| ConfigError::Io(std::io::Error::other(e)))?,
-        )
-    }
-
-    fn update_field(&self, field: &str, value: serde_json::Value) -> Result<(), ConfigError> {
-        let path = self.source_dir().join(PACKAGE_CONFIG_NAME);
-        let raw = std::fs::read_to_string(&path).map_err(ConfigError::Io)?;
-        let config: FlaskConfig = json5::from_str(&raw).map_err(|e| {
-            ConfigError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-        })?;
-        let encode = |config: &FlaskConfig| {
-            serde_json::to_value(config).map_err(|e| ConfigError::Io(std::io::Error::other(e)))
-        };
-        if encode(&config)? != encode(&self.read().config)? {
-            return Err(ConfigError::Io(std::io::Error::other(
-                "manifest changed during operation",
-            )));
-        }
-        let encoded = serde_json::to_string_pretty(&value)
-            .map_err(|e| ConfigError::Io(std::io::Error::other(e)))?;
-        let updated = crate::manifest_edit::set_field(&raw, field, &encoded).ok_or_else(|| {
-            ConfigError::Io(std::io::Error::other("cannot update manifest field"))
-        })?;
-        let next: FlaskConfig =
-            json5::from_str(&updated).map_err(|e| ConfigError::Io(std::io::Error::other(e)))?;
         let mut tmp =
             tempfile::NamedTempFile::new_in(self.source_dir()).map_err(ConfigError::Io)?;
         tmp.write_all(updated.as_bytes()).map_err(ConfigError::Io)?;
         tmp.as_file()
             .set_permissions(
-                std::fs::metadata(&path)
+                std::fs::metadata(path)
                     .map_err(ConfigError::Io)?
                     .permissions(),
             )
             .map_err(ConfigError::Io)?;
-        if std::fs::read_to_string(&path).map_err(ConfigError::Io)? != raw {
+        if std::fs::read_to_string(path).map_err(ConfigError::Io)? != raw {
             return Err(ConfigError::Io(std::io::Error::other(
                 "manifest changed during operation",
             )));
         }
-        tmp.persist(&path).map_err(|e| ConfigError::Io(e.error))?;
+        tmp.persist(path).map_err(|e| ConfigError::Io(e.error))?;
         self.write().config = next;
         Ok(())
     }
 
-    /// Load config from a directory, searching upward for flask.jsonc.
+    /// Load config from a directory, searching upward for mod.flask.
     pub fn load(from_dir: &Path) -> Result<Self, ConfigError> {
-        let (config, source_dir) =
-            FlaskConfig::find_package_config(from_dir).ok_or_else(|| ConfigError::NotFound {
+        let (config, source_dir) = FlaskConfig::discover(from_dir)
+            .map_err(|e| ConfigError::Io(std::io::Error::other(e)))?
+            .ok_or_else(|| ConfigError::NotFound {
                 searched_from: from_dir.to_path_buf(),
             })?;
         Ok(Self {
@@ -173,16 +139,66 @@ impl FlaskConfigHandle {
 
     pub fn save(&self) -> Result<(), ConfigError> {
         let config = self.read().config.clone();
-        let json = json5::to_string(&config).map_err(|_| {
-            ConfigError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "failed to serialize config",
-            ))
-        })?;
-        let source_dir = self.source_dir();
-        let mut file =
-            File::create(source_dir.join(PACKAGE_CONFIG_NAME)).map_err(ConfigError::Io)?;
-        file.write_all(json.as_bytes()).map_err(ConfigError::Io)?;
+        let manifest = config
+            .format_manifest()
+            .map_err(|e| ConfigError::Io(std::io::Error::other(e)))?;
+        let path = FlaskConfig::manifest_path(&self.source_dir());
+        if path.exists() {
+            let raw = std::fs::read_to_string(&path).map_err(ConfigError::Io)?;
+            return self.persist_update(&path, &raw, &manifest);
+        }
+        let mut file = File::create(path).map_err(ConfigError::Io)?;
+        file.write_all(manifest.as_bytes())
+            .map_err(ConfigError::Io)?;
         Ok(())
+    }
+
+    fn read_unmodified_config(&self) -> Result<(PathBuf, String, FlaskConfig), ConfigError> {
+        let path = FlaskConfig::manifest_path(&self.source_dir());
+        let raw = std::fs::read_to_string(&path).map_err(ConfigError::Io)?;
+        let current = FlaskConfig::parse_manifest(&raw)
+            .map_err(|e| ConfigError::Io(std::io::Error::other(e)))?;
+        if serde_json::to_value(&current).unwrap()
+            != serde_json::to_value(&self.read().config).unwrap()
+        {
+            return Err(ConfigError::Io(std::io::Error::other(
+                "manifest changed during operation",
+            )));
+        }
+        Ok((path, raw, current))
+    }
+
+    pub fn update_minimums(
+        &self,
+        requirements: &std::collections::BTreeMap<String, crate::MinimumRequirement>,
+    ) -> Result<(), ConfigError> {
+        let (path, raw, current) = self.read_unmodified_config()?;
+        if !current.minimum_version_selection {
+            return Err(ConfigError::Io(std::io::Error::other(
+                "minimum edits require mod.flask",
+            )));
+        }
+        let mut updated = raw.clone();
+        for (alias, requirement) in requirements {
+            requirement
+                .validate()
+                .map_err(|e| ConfigError::Io(std::io::Error::other(e)))?;
+            updated = crate::manifest::set_entry(
+                &updated,
+                "#dependencies",
+                alias,
+                &requirement.manifest_value(alias),
+            )
+            .map_err(|e| ConfigError::Io(std::io::Error::other(e)))?;
+        }
+        self.persist_update(&path, &raw, &updated)
+    }
+
+    pub fn add_path(&self, alias: &str, dependency: &str) -> Result<(), ConfigError> {
+        let (path, raw, _) = self.read_unmodified_config()?;
+        let value = serde_json::to_string(dependency).expect("strings serialize");
+        let updated = crate::manifest::set_entry(&raw, "#dependencies", alias, &value)
+            .map_err(|e| ConfigError::Io(std::io::Error::other(e)))?;
+        self.persist_update(&path, &raw, &updated)
     }
 }

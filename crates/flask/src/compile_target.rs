@@ -1,30 +1,17 @@
-//! Entry-package compile target from `flask.jsonc` and CLI overrides.
+//! Entry-package compile target from `mod.flask` and CLI overrides.
 
-use crate::FlaskConfig;
+use std::borrow::Cow;
+
+use target_lexicon::{Architecture, Triple};
 use thiserror::Error;
 
-/// Parsed target triple components for inject into `target Target`.
+use crate::FlaskConfig;
+
+/// A parsed [`target_lexicon::Triple`] plus its canonical string form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetTriple {
     pub raw: String,
-    pub arch: TargetArch,
-    pub vendor: String,
-    pub os: TargetOs,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TargetArch {
-    X86_64,
-    Arm64,
-    Wasm32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TargetOs {
-    Linux,
-    MacOs,
-    Windows,
-    Unknown,
+    triple: Triple,
 }
 
 /// Active compile target for a build / IDE session.
@@ -38,7 +25,7 @@ pub enum CompileTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TargetError {
-    #[error("entry package must set `target` to a full target triple in flask.jsonc")]
+    #[error("entry package must set `target` to a full target triple in mod.flask")]
     MissingTarget,
     #[error("invalid target triple `{value}`: {reason}")]
     InvalidTriple { value: String, reason: String },
@@ -62,24 +49,17 @@ impl CompileTarget {
         }
     }
 
-    pub fn arch_literal(&self) -> Option<&'static str> {
+    pub fn arch_literal(&self) -> Option<Cow<'static, str>> {
         match self {
             Self::Library => None,
-            Self::Concrete(t) => Some(t.arch.as_str()),
+            Self::Concrete(t) => Some(t.arch_literal()),
         }
     }
 
-    pub fn os_literal(&self) -> Option<&'static str> {
+    pub fn os_literal(&self) -> Option<Cow<'static, str>> {
         match self {
             Self::Library => None,
-            Self::Concrete(t) => Some(t.os.as_str()),
-        }
-    }
-
-    pub fn vendor_literal(&self) -> Option<&str> {
-        match self {
-            Self::Library => None,
-            Self::Concrete(t) => Some(t.vendor.as_str()),
+            Self::Concrete(t) => Some(t.os_literal()),
         }
     }
 
@@ -91,53 +71,33 @@ impl CompileTarget {
     }
 }
 
-impl TargetArch {
-    pub fn parse(s: &str) -> Result<Self, TargetError> {
-        match s {
-            "x86_64" | "amd64" => Ok(TargetArch::X86_64),
-            "aarch64" | "arm64" => Ok(TargetArch::Arm64),
-            "wasm32" => Ok(TargetArch::Wasm32),
-            _ => Err(TargetError::InvalidTriple {
-                value: s.to_string(),
-                reason: format!("unknown arch `{s}`"),
-            }),
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::X86_64 => "x86_64",
-            Self::Arm64 => "arm64",
-            Self::Wasm32 => "wasm32",
-        }
-    }
-}
-
-impl TargetOs {
-    pub fn parse(s: &str) -> Result<Self, TargetError> {
-        match s.to_lowercase().as_str() {
-            "linux" => Ok(TargetOs::Linux),
-            "darwin" | "macos" => Ok(TargetOs::MacOs),
-            "windows" => Ok(TargetOs::Windows),
-            "unknown" => Ok(TargetOs::Unknown),
-            _ => Err(TargetError::InvalidTriple {
-                value: s.to_string(),
-                reason: format!("unknown os `{s}`"),
-            }),
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Linux => "linux",
-            Self::MacOs => "macOS",
-            Self::Windows => "windows",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
 impl TargetTriple {
+    /// The triple of the machine running this code, for native toolchain defaults.
+    pub fn host() -> Result<Self, TargetError> {
+        let arch = match std::env::consts::ARCH {
+            "aarch64" => "aarch64",
+            "x86_64" => "x86_64",
+            _ => {
+                return Err(TargetError::InvalidTriple {
+                    value: std::env::consts::ARCH.to_string(),
+                    reason: "unsupported host architecture".into(),
+                });
+            }
+        };
+        let suffix = match std::env::consts::OS {
+            "linux" => "unknown-linux-gnu",
+            "macos" => "apple-darwin",
+            "windows" => "pc-windows-msvc",
+            _ => {
+                return Err(TargetError::InvalidTriple {
+                    value: std::env::consts::OS.to_string(),
+                    reason: "unsupported host operating system".into(),
+                });
+            }
+        };
+        Self::parse(&format!("{arch}-{suffix}"))
+    }
+
     pub fn parse(raw: &str) -> Result<Self, TargetError> {
         let raw = raw.trim();
         if raw == "library" {
@@ -146,31 +106,38 @@ impl TargetTriple {
                 reason: "library is not a target triple".into(),
             });
         }
-        let parts: Vec<&str> = raw.split('-').collect();
-        if parts.len() < 3 {
+        if raw.split('-').count() < 3 {
             return Err(TargetError::InvalidTriple {
                 value: raw.to_string(),
                 reason: "expected arch-vendor-os (at least three components)".into(),
             });
         }
-        let arch = TargetArch::parse(parts[0])?;
-        let vendor = parts[1].to_string();
-        let os = TargetOs::parse(parts[2])?;
+        let triple = raw
+            .parse::<Triple>()
+            .map_err(|error| TargetError::InvalidTriple {
+                value: raw.to_string(),
+                reason: error.to_string(),
+            })?;
         Ok(Self {
-            raw: raw.to_string(),
-            arch,
-            vendor,
-            os,
+            raw: triple.to_string(),
+            triple,
         })
     }
 
-    /// Field overrides for merging into a `Target` const record.
-    pub fn field_overrides(&self) -> [(&'static str, String); 3] {
-        [
-            ("arch", self.arch.as_str().to_string()),
-            ("vendor", self.vendor.clone()),
-            ("os", self.os.as_str().to_string()),
-        ]
+    pub fn architecture(&self) -> Architecture {
+        self.triple.architecture
+    }
+
+    pub fn arch_literal(&self) -> Cow<'static, str> {
+        self.triple.architecture.into_str()
+    }
+
+    pub fn os_literal(&self) -> Cow<'static, str> {
+        self.triple.operating_system.into_str()
+    }
+
+    pub fn vendor_literal(&self) -> &str {
+        self.triple.vendor.as_str()
     }
 }
 

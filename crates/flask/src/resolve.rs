@@ -1,10 +1,10 @@
-use crate::PACKAGE_CONFIG_NAME;
+use crate::MANIFEST_NAME;
 use std::path::{Path, PathBuf};
 
 /// Result of resolving `use dep.seg1.seg2...` to a folder on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NestedPackageTarget {
-    /// Directory containing `flask.jsonc` (a folder module / nested package root).
+    /// Directory containing `mod.flask` (a folder module / nested package root).
     FolderModule(PathBuf),
 }
 
@@ -13,7 +13,7 @@ pub enum NestedPackageResolveError {
     MissingConfig {
         dir: PathBuf,
     },
-    /// Expected `parent/segment/` to be a directory with `flask.jsonc`.
+    /// Expected `parent/segment/` to be a directory with `mod.flask`.
     NestedPackageNotFound {
         parent: PathBuf,
         segment: String,
@@ -26,7 +26,7 @@ pub enum NestedPackageResolveError {
 
 /// Extension trait providing Flask-package path utilities on [`Path`].
 pub trait FlaskPathExt {
-    /// Whether `self` is a directory containing `flask.jsonc` (a folder module / nested package root).
+    /// Whether `self` is a directory containing `mod.flask` (a folder module / nested package root).
     fn is_folder_module_dir(&self) -> bool;
 
     /// All `*.gin` files directly in `self` (non-recursive). Sorted for stable builds.
@@ -34,7 +34,7 @@ pub trait FlaskPathExt {
 
     /// Resolve `use dep.seg1.seg2` as nested directories under `self` (the resolved dependency root).
     ///
-    /// For each segment in order, the path must be `previous/segment/` with a `flask.jsonc` in that
+    /// For each segment in order, the path must be `previous/segment/` with a `mod.flask` in that
     /// directory. The last segment's directory is returned; there is no resolution to a single `.gin` file.
     fn resolve_nested_package_path(
         &self,
@@ -44,7 +44,7 @@ pub trait FlaskPathExt {
 
 impl FlaskPathExt for Path {
     fn is_folder_module_dir(&self) -> bool {
-        self.is_dir() && self.join(PACKAGE_CONFIG_NAME).is_file()
+        self.is_dir() && self.join(MANIFEST_NAME).is_file()
     }
 
     fn list_package_gin_files(&self) -> Vec<PathBuf> {

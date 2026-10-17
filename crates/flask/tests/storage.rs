@@ -44,55 +44,31 @@ fn cache_paths_are_external_and_separate_inputs_builds_profiles_and_targets() {
 #[test]
 fn version_update_preserves_manifest_and_rejects_stale_versions() {
     let source = tempfile::tempdir().unwrap();
-    let raw = "{\n // description stays\n name: 'pkg', version: '1.2.3', authors: [], dependencies: { http: { version: '^1' } }\n}\n";
-    let path = source.path().join("flask.jsonc");
+    let raw = "-- description stays\n#settings\nmodule: 'pkg'\nversion: 1.2.3\n#dependencies\nhttp: 1.0.0\n";
+    let path = source.path().join("mod.flask");
     std::fs::write(&path, raw).unwrap();
     let config = FlaskConfigHandle::load(source.path()).unwrap();
     config.update_version("1.2.3", "1.3.0").unwrap();
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
-        raw.replace("'1.2.3'", "\"1.3.0\"")
+        raw.replace("version: 1.2.3", "version: 1.3.0")
     );
     assert!(config.update_version("1.2.3", "2.0.0").is_err());
     assert_eq!(config.read().config.version, "1.3.0");
 }
 
 #[test]
-fn embedded_resolution_round_trips_and_checks_requirements() {
-    let raw = format!(
-        r#"{{"name":"pkg","version":"1.0.0","authors":[],
-        "dependencies":{{"http":{{"version":"^1"}}}},
-        "resolution":{{"direct":{{"http":"http@1.0.1"}},"packages":{{"http@1.0.1":{{"name":"http","version":"1.0.1","sha256":"{}"}}}}}}
-    }}"#,
-        "0".repeat(64)
-    );
-    let config: FlaskConfig = json5::from_str(&raw).unwrap();
-    config.validate_resolution().unwrap();
-    let json = serde_json::to_string(&config).unwrap();
-    let restored: FlaskConfig = json5::from_str(&json).unwrap();
-    restored.validate_resolution().unwrap();
-    let changed: FlaskConfig = json5::from_str(&raw.replace("^1", "^2")).unwrap();
-    assert!(changed.validate_resolution().is_err());
-}
-
-#[test]
-fn resolution_updates_preserve_requirements_and_other_comments() {
+fn save_round_trips_manifest_metadata_and_minimums() {
     let source = tempfile::tempdir().unwrap();
-    let raw = "{ // keep\n name: 'pkg', version: '1.0.0', authors: [] // tail\n}\n";
-    let path = source.path().join("flask.jsonc");
+    let raw = "#settings\nmodule: 'pkg'\nversion: 1.0.0\nauthors: ['Jane', \"Jo\"]\ndescription: 'sample'\n#dependencies\nhttp: 1.2.0\ncore: '../core'\n";
+    let path = source.path().join("mod.flask");
     std::fs::write(&path, raw).unwrap();
-    let config = FlaskConfigHandle::load(source.path()).unwrap();
-    config
-        .update_resolution(flask::PackageResolution::default())
-        .unwrap();
-    let updated = std::fs::read_to_string(&path).unwrap();
-    assert!(updated.contains("// keep"));
-    assert!(updated.contains("// tail"));
-    config
-        .update_resolution(flask::PackageResolution::default())
-        .unwrap();
-    assert_eq!(updated, std::fs::read_to_string(&path).unwrap());
-    let parsed: FlaskConfig = json5::from_str(&updated).unwrap();
-    parsed.validate_resolution().unwrap();
-    assert!(parsed.resolution.is_some());
+    let handle = FlaskConfigHandle::load(source.path()).unwrap();
+    handle.save().unwrap();
+    let saved = FlaskConfig::parse_manifest(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&handle.read().config).unwrap(),
+        serde_json::to_value(saved).unwrap()
+    );
+    assert_eq!(std::fs::read_dir(source.path()).unwrap().count(), 1);
 }
