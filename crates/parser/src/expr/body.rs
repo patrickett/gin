@@ -5,6 +5,8 @@
 //! with a fast-path for binds. [`can_start_expr`] is the token-class check used by
 //! `parse_body_exprs` and other expression-context entry points.
 
+use diagnostic::DiagnosticCode;
+use diagnostic::code::{ParseCode, SyntaxCode};
 use internment::Intern;
 use lexer::Token;
 
@@ -16,14 +18,14 @@ use crate::cursor::TokenCursor;
 impl<'src, 't> TokenCursor<'src, 't> {
     /// Tokens that can begin an expression in body position.
     ///
-    /// `Token::Return` is intentionally excluded — `return` after `if` belongs to
-    /// `parse_if_expr`'s trailing `parse_return`, not the indented body block.
     pub fn can_start_expr(token: &Token) -> bool {
         matches!(
             token,
             Token::Id(_)
+                | Token::Pound
                 | Token::Tag(_)
                 | Token::SelfTag
+                | Token::Domain
                 | Token::Int(_)
                 | Token::Float(_)
                 | Token::String(_)
@@ -35,7 +37,9 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 | Token::Ref
                 | Token::Mut
                 | Token::ParenOpen
+                | Token::BracketOpen
                 | Token::If
+                | Token::Return
                 | Token::When
                 | Token::For
                 | Token::While
@@ -78,6 +82,15 @@ impl<'src, 't> TokenCursor<'src, 't> {
         let mut exprs = Vec::new();
         loop {
             self.skip_expr_body_trivia();
+            if self.is_at(&Token::Use) && !self.starts_reserved_binding() {
+                let start = self.current_span();
+                if let Some(import) = self.parse_import() {
+                    let span = self.merge_span(start, self.last_consumed_span());
+                    exprs.push(Typed::infer(Expr::Import(import), span));
+                    continue;
+                }
+                break;
+            }
             if self.starts_reserved_binding()
                 && let Some(bind) = self.parse_bind(expr_parser)
             {
@@ -167,10 +180,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     self.advance_pop();
                     self.try_consume_body_comma();
                     if self.pos() == pos_before {
-                        self.error(
-                            "parse-parser-progress",
+                        // parse-parser-progress
+                        self.error_here(
+                            DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::ProgressStalled)),
                             "expression parser made no progress",
-                            self.current_span(),
                         );
                         self.advance();
                     }

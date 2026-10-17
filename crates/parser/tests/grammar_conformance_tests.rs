@@ -9,9 +9,9 @@ fn ranges_use_to_across_surface_forms() {
         "Byte is in 0 to 255\n",
         "Window is -10 to 10\n",
         "Offset(unit) is in min_offset to max_count\n",
-        "read(value in 0 to max_count): value\n",
+        "read(value in 0 to max_count): return value\n",
         "values := low to max\n",
-        "check(value) True thus value in low to max: True\n",
+        "check(value) True thus value in low to max: return True\n",
     ] {
         let out = source.parse_source_full();
         assert_eq!(count_errors(&out), 0, "{source}: {:?}", out.symptoms);
@@ -32,7 +32,7 @@ fn parse_local_and_package_import_forms() {
 
 #[test]
 fn pointer_types_are_valid_parameter_annotations() {
-    let out = "Byte is in 0 to 255\nwrite(buf @Byte) SignedBigInt: 0\n".parse_source_full();
+    let out = "Byte is in 0 to 255\nwrite(buf @Byte) SignedBigInt: return 0\n".parse_source_full();
     assert_eq!(count_errors(&out), 0, "symptoms: {:?}", out.symptoms);
     assert!(has_def(&out, "write"));
 }
@@ -72,46 +72,35 @@ fn bracket_literals_parse_as_neutral_sequence_nodes() {
 }
 
 #[test]
-fn for_loop_requires_loop_keyword() {
-    let without_loop = "sum: for i in items\n    i\n".parse_source_full();
-    assert!(
-        count_errors(&without_loop) > 0,
-        "`for` loop without trailing `loop` must be rejected"
-    );
-
-    let with_loop = "sum: for i in items\n    i\nloop\n".parse_source_full();
-    assert_eq!(count_errors(&with_loop), 0);
-    assert!(has_def(&with_loop, "sum"));
+fn for_loop_ends_on_dedent() {
+    let source = "sum: for i in items\n    i\n".parse_source_full();
+    assert_eq!(count_errors(&source), 0, "{:?}", source.symptoms);
+    assert!(has_def(&source, "sum"));
 }
 
 #[test]
-fn while_loop_requires_loop_keyword() {
-    let without_loop = "run: while x is True\n    0\n".parse_source_full();
-    assert!(count_errors(&without_loop) > 0);
-
-    let with_loop = "run: while x is True\n    0\nloop\n".parse_source_full();
-    assert_eq!(count_errors(&with_loop), 0);
-    assert!(has_def(&with_loop, "run"));
+fn while_loop_ends_on_dedent() {
+    let source = "run: while x is True do\n    0\n".parse_source_full();
+    assert_eq!(count_errors(&source), 0, "{:?}", source.symptoms);
+    assert!(has_def(&source, "run"));
 }
 
 #[test]
-fn if_requires_trailing_return_clause() {
+fn removed_if_is_rejected_and_when_accepts_value_blocks() {
     let missing = "is_true: if x is True\n    1\n".parse_source_full();
     assert!(count_errors(&missing) > 0);
 
-    let with_return = "is_true: if x is True\n    1\nreturn\n".parse_source_full();
+    let with_return = "is_true: when x is True then\n    1\n    return\n".parse_source_full();
     assert_eq!(count_errors(&with_return), 0);
 }
 
 #[test]
 fn when_subject_is_patterns_parse() {
-    let out = "\
-what: when x is\n    1 then 'yes'\n    else 'no'\n";
+    let out = "what: when x is\n    1 then 'yes'\n    else 'no'\n";
     let out = out.parse_source_full();
     assert_eq!(count_errors(&out), 0);
 
-    let out2 = "\
-x: when x is\n    1 then 2\n    2 then 3\n";
+    let out2 = "x: when x is\n    1 then 2\n    2 then 3\n";
     let out2 = out2.parse_source_full();
     assert_eq!(count_errors(&out2), 0);
 }

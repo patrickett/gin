@@ -609,3 +609,33 @@ coord_ty := NamedTy(name: \"Coord\", ty: Primitive(width: 64, signed: True))
         other => panic!("second arg should be Expr::Bind, got {other:?}"),
     }
 }
+
+#[test]
+fn named_argument_span_includes_the_field_name() {
+    use ast::BindValue;
+    use parser::query::SourceParseExt;
+    let source = "value: Box(field: item)\n";
+    let parsed = source.parse_source_full();
+    let bind = parsed.ast.defs.values().next().unwrap();
+    let BindValue::Expr(expr) = &bind.value else {
+        panic!("expression body")
+    };
+    let Expr::TagCall(call) = &expr.value else {
+        panic!("constructor")
+    };
+    assert_eq!(
+        parsed
+            .ast
+            .span_table
+            .get(call.args[0].span_id)
+            .extract(source),
+        "field: item"
+    );
+    let Expr::Bind(arg) = &call.args[0].value else {
+        panic!("named argument")
+    };
+    assert_eq!(
+        parsed.ast.span_table.get(arg.name_span).extract(source),
+        "field"
+    );
+}

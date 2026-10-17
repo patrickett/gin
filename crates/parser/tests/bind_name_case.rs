@@ -7,7 +7,7 @@ use support::*;
 
 #[test]
 fn lower_start_camel_case_lexes_as_one_identifier() {
-    let tokens: Vec<_> = Lexer::new("regConstraint(reg Register) String: ''")
+    let tokens: Vec<_> = Lexer::new("regConstraint(reg Register) String: return ''")
         .map(|(token, _)| token)
         .collect();
 
@@ -16,7 +16,7 @@ fn lower_start_camel_case_lexes_as_one_identifier() {
 
 #[test]
 fn camel_case_bind_name_parses_with_snake_case_warning() {
-    let out = "regConstraint(reg Register) String: ''\n".parse_source_full();
+    let out = "regConstraint(reg Register) String: return ''\n".parse_source_full();
 
     assert!(
         out.ast.defs.contains_key(&intern("regConstraint")),

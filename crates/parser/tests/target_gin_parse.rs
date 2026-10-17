@@ -7,7 +7,7 @@ use parser::query::SourceParseExt;
 #[test]
 fn parse_target_gin_fixture() {
     let src = r#"
-Architecture is 'x86_64' or 'arm64' or 'wasm32'
+Architecture is 'x86_64' or 'aarch64' or 'wasm32'
 Vendor is 'unknown'
 OperatingSystem is 'unknown'
 Default(value) has default value

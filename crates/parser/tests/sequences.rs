@@ -89,7 +89,7 @@ fn duplicate_names_and_removed_parenthesized_values_are_rejected() {
     for (source, code) in [
         ("value: [x: 1, x: 2]\n", "parse-duplicate-sequence-name"),
         (
-            "get(value [x Int, x Int]): value\n",
+            "get(value [x Int, x Int]): return value\n",
             "parse-duplicate-sequence-name",
         ),
         ("value: (1, 2)\n", "parse-parenthesized-sequence"),
@@ -99,7 +99,7 @@ fn duplicate_names_and_removed_parenthesized_values_are_rejected() {
     ] {
         let parsed = source.parse_source_full();
         assert!(
-            parsed.symptoms.iter().any(|d| d.code.0 == code),
+            parsed.symptoms.iter().any(|d| d.code.slug() == code),
             "{source}: {:?}",
             parsed.symptoms
         );

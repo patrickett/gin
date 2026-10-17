@@ -1,34 +1,254 @@
+use diagnostic::DiagnosticCode;
+use diagnostic::code::{ExpectedSyntaxCode, ParseCode, RemovedSyntaxCode, SyntaxCode};
 use internment::Intern;
 use lexer::Token;
 
 use ast::span::SpanId;
 use ast::{
-    Bind, BindValue, Expr, GroupPath, Parameter, ParameterKind, Parameters, Pattern, Spanned,
-    TypeExpr, Typed,
+    Bind, BindValue, Expr, GroupPath, Parameter, ParameterKind, Pattern, Spanned, TypeExpr, Typed,
 };
 
 use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
+use crate::expr::path_call;
+use crate::int_range::in_range_expr;
+
+/// Parsed type surface shared by expression-position and pattern-position parses.
+///
+/// Variants carry the spans each consumer recorded before the two parsers were
+/// unified, so both conversions keep their original diagnostics geometry.
+enum TypeSurface {
+    Sequence(Typed<Expr>),
+    InRange {
+        bounds: ast::InRangeBounds,
+        span: SpanId,
+        outer_span: SpanId,
+    },
+    Pointer {
+        inner: Box<Spanned<TypeSurface>>,
+    },
+    Ref {
+        inner: Box<Spanned<TypeSurface>>,
+        mutable: bool,
+        group: Option<GroupPath>,
+    },
+    Unit,
+    Qualified {
+        path: Spanned<ast::ModPath>,
+        params: Option<ParsedTagParams>,
+        span: SpanId,
+    },
+    Name {
+        name: Intern<String>,
+        name_span: SpanId,
+        is_lowercase: bool,
+        params: Option<ParsedTagParams>,
+        span: SpanId,
+    },
+}
+
+fn surface_to_expr(surface: Spanned<TypeSurface>) -> Spanned<Expr> {
+    let Spanned { value, span_id } = surface;
+    let expr = match value {
+        TypeSurface::Sequence(typed) => {
+            return Spanned {
+                value: typed.value,
+                span_id: typed.span_id,
+            };
+        }
+        TypeSurface::InRange { bounds, span, .. } => in_range_expr(bounds, span),
+        TypeSurface::Pointer { inner, .. } => {
+            let inner = surface_to_expr(*inner);
+            Expr::TakePtr(Box::new(Typed::infer(inner.value, inner.span_id)))
+        }
+        TypeSurface::Ref {
+            inner,
+            mutable,
+            group,
+            ..
+        } => {
+            let inner = surface_to_expr(*inner);
+            Expr::Ref {
+                inner: Box::new(Typed::infer(inner.value, inner.span_id)),
+                mutable,
+                group,
+            }
+        }
+        TypeSurface::Unit => Expr::ResultValues(Vec::new()),
+        TypeSurface::Qualified { path, params, span } => {
+            if let Some(params) = params
+                && !params.params.is_empty()
+            {
+                let name = *path.value.segments.last().unwrap_or(&path.value.root);
+                return Spanned {
+                    value: Expr::TagCall(ast::TagCall {
+                        name,
+                        qual_path: None,
+                        args: type_params_to_expr_args(params),
+                    }),
+                    span_id: span,
+                };
+            }
+            path_call(path)
+        }
+        TypeSurface::Name {
+            name,
+            name_span,
+            is_lowercase,
+            params,
+            span,
+        } => {
+            if let Some(params) = params
+                && !params.params.is_empty()
+            {
+                return Spanned {
+                    value: Expr::TagCall(ast::TagCall {
+                        name,
+                        qual_path: None,
+                        args: type_params_to_expr_args(params),
+                    }),
+                    span_id: span,
+                };
+            }
+            if is_lowercase {
+                return Spanned {
+                    value: path_call(Spanned::new(ast::ModPath::new(name, Vec::new()), name_span)),
+                    span_id: name_span,
+                };
+            }
+            return Spanned {
+                value: Expr::AnonymousTag(name),
+                span_id: name_span,
+            };
+        }
+    };
+    Spanned {
+        value: expr,
+        span_id,
+    }
+}
+
+fn surface_to_type_expr(surface: Spanned<TypeSurface>) -> Option<Spanned<TypeExpr>> {
+    let Spanned { value, span_id } = surface;
+    let type_expr = match value {
+        TypeSurface::Sequence(_) => return None,
+        TypeSurface::InRange {
+            bounds,
+            span,
+            outer_span,
+        } => {
+            return Some(Spanned {
+                value: TypeExpr::InRange { bounds, span },
+                span_id: outer_span,
+            });
+        }
+        TypeSurface::Pointer { inner, .. } => {
+            TypeExpr::Pointer(Box::new(surface_to_type_expr(*inner)?))
+        }
+        TypeSurface::Ref {
+            inner,
+            mutable,
+            group,
+            ..
+        } => TypeExpr::Ref {
+            inner: Box::new(surface_to_type_expr(*inner)?),
+            mutable,
+            group,
+        },
+        TypeSurface::Unit => TypeExpr::Unit,
+        TypeSurface::Qualified { path, params, span } => match params {
+            Some(params) if !params.params.is_empty() => {
+                let name = *path.value.segments.last().unwrap_or(&path.value.root);
+                let name_span = path.span_id;
+                let (params, param_spans) = params.into_ordered_param_spans();
+                return Some(Spanned {
+                    value: TypeExpr::Generic {
+                        name,
+                        params,
+                        param_spans,
+                        span: name_span,
+                    },
+                    span_id: span,
+                });
+            }
+            Some(_) => {
+                return Some(Spanned {
+                    value: TypeExpr::Qualified(path),
+                    span_id: span,
+                });
+            }
+            None => {
+                let span_id = path.span_id;
+                return Some(Spanned {
+                    value: TypeExpr::Qualified(path),
+                    span_id,
+                });
+            }
+        },
+        TypeSurface::Name {
+            name,
+            name_span,
+            params,
+            span,
+            ..
+        } => match params {
+            Some(params) if !params.params.is_empty() => {
+                let (params, param_spans) = params.into_ordered_param_spans();
+                return Some(Spanned {
+                    value: TypeExpr::Generic {
+                        name,
+                        params,
+                        param_spans,
+                        span: name_span,
+                    },
+                    span_id: span,
+                });
+            }
+            Some(_) => {
+                return Some(Spanned {
+                    value: TypeExpr::Nominal(name, span),
+                    span_id: span,
+                });
+            }
+            None => {
+                return Some(Spanned {
+                    value: TypeExpr::Nominal(name, name_span),
+                    span_id: name_span,
+                });
+            }
+        },
+    };
+    Some(Spanned {
+        value: type_expr,
+        span_id,
+    })
+}
 
 impl<'src, 't> TokenCursor<'src, 't> {
     /// Type surface after `is` in `if … is …` / `when … is …` — structural [`TypeExpr`].
     #[inline]
     pub fn parse_is_pattern_tag(&mut self, expr_parser: ExprFn) -> Option<Spanned<Pattern>> {
-        self.parse_pattern_node(expr_parser)
-    }
-
-    fn parse_pattern_node(&mut self, expr_parser: ExprFn) -> Option<Spanned<Pattern>> {
+        if matches!(
+            self.peek(),
+            Some(Token::Int(_) | Token::Float(_) | Token::String(_))
+        ) {
+            let literal = self.parse_literal()?;
+            return Some(Spanned::new(
+                Pattern::Literal(literal.value, literal.span_id),
+                literal.span_id,
+            ));
+        }
         if self.is_at(&Token::BracketOpen) {
             return self.parse_pattern_list_node(expr_parser);
         }
         if self.is_at(&Token::ParenOpen) {
             return self.parse_pattern_value_row_node(expr_parser);
         }
-        self.parse_type_expr_structural(expr_parser)
-            .map(|pattern| Spanned {
-                value: Pattern::from(pattern.value),
-                span_id: pattern.span_id,
-            })
+        let surface = self.parse_type_surface(expr_parser, false)?;
+        surface_to_type_expr(surface).map(|pattern| Spanned {
+            value: Pattern::from(pattern.value),
+            span_id: pattern.span_id,
+        })
     }
 
     fn parse_pattern_value_row_node(&mut self, expr_parser: ExprFn) -> Option<Spanned<Pattern>> {
@@ -42,13 +262,13 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 span_id: self.merge_span(start, end),
             });
         }
-        self.parse_pattern_node(expr_parser)?;
+        self.parse_is_pattern_tag(expr_parser)?;
         loop {
             if self.is_at(&Token::ParenClose) {
                 break;
             }
             if self.eat_list_separator() {
-                self.parse_pattern_node(expr_parser)?;
+                self.parse_is_pattern_tag(expr_parser)?;
                 continue;
             }
             break;
@@ -57,8 +277,9 @@ impl<'src, 't> TokenCursor<'src, 't> {
         self.expect(&Token::ParenClose);
         let end = self.last_consumed_span();
         let pattern_span = self.merge_span(start, end);
+        // parse-positional-destructure-removed
         self.error(
-            "parse-positional-destructure-removed",
+            DiagnosticCode::Parse(ParseCode::Removed(RemovedSyntaxCode::PositionalDestructure)),
             "positional destructuring patterns are not supported; use named result projection",
             pattern_span,
         );
@@ -80,7 +301,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             });
         }
 
-        let mut heads = vec![self.parse_pattern_node(expr_parser)?];
+        let mut heads = vec![self.parse_is_pattern_tag(expr_parser)?];
         loop {
             if self.is_at(&Token::BracketClose) {
                 break;
@@ -90,7 +311,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
             if self.is_at(&Token::Infer) {
                 self.advance();
-                let tail = self.parse_pattern_node(expr_parser)?;
+                let tail = self.parse_is_pattern_tag(expr_parser)?;
                 self.skip_layout();
                 self.expect(&Token::BracketClose);
                 let end = self.last_consumed_span();
@@ -100,7 +321,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             if self.is_at(&Token::BracketClose) {
                 break;
             }
-            heads.push(self.parse_pattern_node(expr_parser)?);
+            heads.push(self.parse_is_pattern_tag(expr_parser)?);
         }
         self.skip_layout();
         self.expect(&Token::BracketClose);
@@ -153,7 +374,43 @@ impl<'src, 't> TokenCursor<'src, 't> {
     }
 
     pub fn parse_type_expr(&mut self, expr_parser: ExprFn) -> Option<Spanned<Expr>> {
-        self.parse_type_expr_expr(expr_parser)
+        let surface = self.parse_type_surface(expr_parser, true)?;
+        Some(surface_to_expr(surface))
+    }
+
+    pub(crate) fn parse_type_argument(&mut self, expr_parser: ExprFn) -> Typed<Expr> {
+        if matches!(self.peek(), Some(Token::Id(_))) && self.peek_at(1) == Some(&Token::Colon) {
+            let name_span = self.current_span();
+            let name = self.parse_name().expect("named type argument");
+            self.advance();
+            let value = self.parse_type_argument(expr_parser);
+            let span = self.merge_span(name_span, value.span_id);
+            return Typed::infer(
+                Expr::Bind(Box::new(Bind::new(
+                    name,
+                    name_span,
+                    BindValue::Expr(Box::new(value)),
+                ))),
+                span,
+            );
+        }
+        let unit = self.is_at(&Token::ParenOpen) && self.peek_at(1) == Some(&Token::ParenClose);
+        if unit || self.is_at(&Token::BracketOpen) {
+            let checkpoint = self.checkpoint();
+            let errors = self.errors.len();
+            if let Some(expr) = self.parse_type_expr(expr_parser)
+                && self.errors.len() == errors
+                && matches!(
+                    self.peek(),
+                    Some(Token::Comma | Token::ParenClose | Token::Newline)
+                )
+            {
+                return Typed::infer(expr.value, expr.span_id);
+            }
+            self.rewind(checkpoint);
+            self.errors.truncate(errors);
+        }
+        expr_parser(self)
     }
 
     fn parse_sequence_type(&mut self, expr_parser: ExprFn) -> Typed<Expr> {
@@ -179,8 +436,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
             let expr = Typed::infer(ty.value, ty.span_id);
             if self.eat(&Token::ColonSemi) {
                 if name.is_some() || !elems.is_empty() {
+                    // parse-sequence-repeat-elements
                     self.error(
-                        "parse-sequence-repeat-elements",
+                        DiagnosticCode::Parse(ParseCode::Syntax(
+                            SyntaxCode::SequenceRepeatElements,
+                        )),
                         "a repeated type requires one unnamed element type",
                         start,
                     );
@@ -210,28 +470,44 @@ impl<'src, 't> TokenCursor<'src, 't> {
         self.sequence_value(elems, start)
     }
 
-    fn parse_type_expr_expr(&mut self, expr_parser: ExprFn) -> Option<Spanned<Expr>> {
+    fn parse_type_surface(
+        &mut self,
+        expr_parser: ExprFn,
+        allow_sequence: bool,
+    ) -> Option<Spanned<TypeSurface>> {
         let start_span = self.current_span();
 
-        // Structural fixed-array type syntax: `[Element; length]`.
-        if self.is_at(&Token::BracketOpen) {
+        // Fixed-array type syntax `[Element; length]` is expression-position only.
+        if allow_sequence && self.is_at(&Token::BracketOpen) {
             let array = self.parse_sequence_type(expr_parser);
+            let span_id = array.span_id;
             return Some(Spanned {
-                value: array.value,
-                span_id: array.span_id,
+                value: TypeSurface::Sequence(array),
+                span_id,
             });
         }
 
         if self.eat(&Token::In) {
-            return self.parse_in_range_expr();
+            let (bounds, span) = self.parse_in_range_bounds()?;
+            let outer_span = self.current_span();
+            return Some(Spanned {
+                value: TypeSurface::InRange {
+                    bounds,
+                    span,
+                    outer_span,
+                },
+                span_id: span,
+            });
         }
 
         if self.eat(&Token::At) {
-            let inner = self.parse_type_expr_expr(expr_parser)?;
-            let span_id = self.merge_span(start_span, inner.span_id);
+            let inner = self.parse_type_surface(expr_parser, allow_sequence)?;
+            let span = self.merge_span(start_span, inner.span_id);
             return Some(Spanned {
-                value: Expr::TakePtr(Box::new(Typed::infer(inner.value, inner.span_id))),
-                span_id,
+                value: TypeSurface::Pointer {
+                    inner: Box::new(inner),
+                },
+                span_id: span,
             });
         }
 
@@ -247,15 +523,15 @@ impl<'src, 't> TokenCursor<'src, 't> {
             } else {
                 None
             };
-            let inner = self.parse_type_expr_expr(expr_parser)?;
-            let span_id = self.merge_span(start_span, inner.span_id);
+            let inner = self.parse_type_surface(expr_parser, allow_sequence)?;
+            let span = self.merge_span(start_span, inner.span_id);
             return Some(Spanned {
-                value: Expr::Ref {
-                    inner: Box::new(Typed::infer(inner.value, inner.span_id)),
+                value: TypeSurface::Ref {
+                    inner: Box::new(inner),
                     mutable,
                     group,
                 },
-                span_id,
+                span_id: span,
             });
         }
 
@@ -263,37 +539,29 @@ impl<'src, 't> TokenCursor<'src, 't> {
             let open_span = self.peek_span()?;
             self.advance();
             self.advance();
-            let span_id = self.merge_span(open_span, self.last_consumed_span());
+            let span = self.merge_span(open_span, self.last_consumed_span());
             return Some(Spanned {
-                value: Expr::Lit(ast::Literal::Number(0)),
-                span_id,
+                value: TypeSurface::Unit,
+                span_id: span,
             });
         }
 
         if self.peek_at(1) == Some(&Token::Dot) {
             let checkpoint = self.checkpoint();
-            if let Some(path) = self.parse_tag_variant_path() {
-                if self.is_at(&Token::ParenOpen) {
-                    let params = self.parse_tag_type_params_delimited(
+            if let Some(path) = self.parse_tag_rooted_path(true) {
+                let params = if self.is_at(&Token::ParenOpen) {
+                    Some(self.parse_tag_type_params_delimited(
                         expr_parser,
                         Token::ParenOpen,
                         Token::ParenClose,
-                    );
-                    if !params.params.is_empty() {
-                        let name = *path.segments.last().unwrap_or(&path.root);
-                        return Some(Spanned {
-                            value: Expr::TagCall(ast::TagCall {
-                                name,
-                                qual_path: None,
-                                args: type_params_to_expr_args(params),
-                            }),
-                            span_id: self.merge_span(start_span, self.last_consumed_span()),
-                        });
-                    }
-                }
+                    ))
+                } else {
+                    None
+                };
+                let span = self.merge_span(start_span, self.last_consumed_span());
                 return Some(Spanned {
-                    value: Expr::FnCall(ast::FnCall { path, args: None }),
-                    span_id: self.merge_span(start_span, self.last_consumed_span()),
+                    value: TypeSurface::Qualified { path, params, span },
+                    span_id: span,
                 });
             }
             self.rewind(checkpoint);
@@ -320,199 +588,29 @@ impl<'src, 't> TokenCursor<'src, 't> {
             _ => return None,
         };
 
-        if self.is_at(&Token::ParenOpen) {
-            let params = self.parse_tag_type_params_delimited(
+        let params = if self.is_at(&Token::ParenOpen) {
+            Some(self.parse_tag_type_params_delimited(
                 expr_parser,
                 Token::ParenOpen,
                 Token::ParenClose,
-            );
-            if !params.params.is_empty() {
-                return Some(Spanned {
-                    value: Expr::TagCall(ast::TagCall {
-                        name,
-                        qual_path: None,
-                        args: type_params_to_expr_args(params),
-                    }),
-                    span_id: self.merge_span(name_span, self.last_consumed_span()),
-                });
-            }
-        }
-
-        let value = if is_lowercase {
-            Expr::FnCall(ast::FnCall {
-                path: Spanned::new(ast::ModPath::new(name, Vec::new()), name_span),
-                args: None,
-            })
+            ))
         } else {
-            Expr::AnonymousTag(name)
+            None
+        };
+        let span = if params.is_some() {
+            self.merge_span(name_span, self.last_consumed_span())
+        } else {
+            name_span
         };
         Some(Spanned {
-            value,
-            span_id: name_span,
-        })
-    }
-
-    pub(crate) fn parse_type_expr_structural(
-        &mut self,
-        expr_parser: ExprFn,
-    ) -> Option<Spanned<TypeExpr>> {
-        let start_span = self.current_span();
-
-        // Range type: `in N to M` or `in Tag`
-        if self.eat(&Token::In) {
-            if let Some(range) = self.parse_in_range_type() {
-                let span = self.current_span();
-                return Some(Spanned {
-                    value: range,
-                    span_id: span,
-                });
-            }
-            return None;
-        }
-
-        // Pointer type: `@TypeExpr`
-        if self.eat(&Token::At) {
-            let inner = self.parse_type_expr_structural(expr_parser)?;
-            let end_span = inner.span_id;
-            let span = self.merge_span(start_span, end_span);
-
-            return Some(Spanned {
-                value: TypeExpr::Pointer(Box::new(inner)),
-                span_id: span,
-            });
-        }
-
-        if matches!(self.peek(), Some(Token::Ref) | Some(Token::Mut)) {
-            let mutable = self.eat(&Token::Mut);
-            if !mutable {
-                self.advance();
-            }
-            let group = if self.eat(&Token::CurlyOpen) {
-                let group = self.parse_group_path()?;
-                self.expect(&Token::CurlyClose)?;
-                Some(group)
-            } else {
-                None
-            };
-            let inner = self.parse_type_expr_structural(expr_parser)?;
-            let end_span = inner.span_id;
-            let span = self.merge_span(start_span, end_span);
-            return Some(Spanned {
-                value: TypeExpr::Ref {
-                    inner: Box::new(inner),
-                    mutable,
-                    group,
-                },
-                span_id: span,
-            });
-        }
-
-        // Unit type: `()`
-        if self.is_at(&Token::ParenOpen) && self.peek_at(1) == Some(&Token::ParenClose) {
-            let open_span = self.peek_span()?;
-            self.advance(); // eat (
-            self.advance(); // eat )
-            let close_span = self.last_consumed_span();
-            let span = self.merge_span(open_span, close_span);
-            return Some(Spanned {
-                value: TypeExpr::Unit,
-                span_id: span,
-            });
-        }
-
-        if self.peek_at(1) == Some(&Token::Dot) {
-            let qual_checkpoint = self.checkpoint();
-            if let Some(path) = self.parse_tag_variant_path() {
-                if self.is_at(&Token::ParenOpen) {
-                    let params = self.parse_tag_type_params_delimited(
-                        expr_parser,
-                        Token::ParenOpen,
-                        Token::ParenClose,
-                    );
-                    let end_span = self.last_consumed_span();
-                    let span = self.merge_span(start_span, end_span);
-                    if !params.params.is_empty() {
-                        let name = *path.segments.last().unwrap_or(&path.root);
-                        // `span` on the type is the head name only (diagnostics); full site is `span_id`.
-                        let name_span = path.span_id;
-                        let (params, param_spans) = params.into_ordered_param_spans();
-                        return Some(Spanned {
-                            value: TypeExpr::Generic {
-                                name,
-                                params,
-                                param_spans,
-                                span: name_span,
-                            },
-                            span_id: span,
-                        });
-                    }
-                    return Some(Spanned {
-                        value: TypeExpr::Qualified(path),
-                        span_id: span,
-                    });
-                }
-                let span = path.span_id;
-                return Some(Spanned {
-                    value: TypeExpr::Qualified(path),
-                    span_id: span,
-                });
-            }
-            self.rewind(qual_checkpoint);
-        }
-
-        let (name, name_span) = match *self.peek()? {
-            Token::Tag(n) => {
-                let name = self.intern(n);
-                let span = self.peek_span()?;
-                self.advance();
-                (name, span)
-            }
-            Token::SelfTag => {
-                let name = Intern::from_ref("Self");
-                let span = self.peek_span()?;
-                self.advance();
-                (name, span)
-            }
-            Token::Id(n) => {
-                // Lowercase identifiers in type position are type variables
-                // (e.g., `x` in `@x` or `x` in `Range[x]`).
-                let name = self.intern(n);
-                let span = self.peek_span()?;
-                self.advance();
-                (name, span)
-            }
-            _ => return None,
-        };
-
-        if self.is_at(&Token::ParenOpen) {
-            let params = self.parse_tag_type_params_delimited(
-                expr_parser,
-                Token::ParenOpen,
-                Token::ParenClose,
-            );
-            let end_span = self.last_consumed_span();
-            let span = self.merge_span(name_span, end_span);
-            if !params.params.is_empty() {
-                let (params, param_spans) = params.into_ordered_param_spans();
-                return Some(Spanned {
-                    value: TypeExpr::Generic {
-                        name,
-                        params,
-                        param_spans,
-                        span: name_span,
-                    },
-                    span_id: span,
-                });
-            }
-            return Some(Spanned {
-                value: TypeExpr::Nominal(name, span),
-                span_id: span,
-            });
-        }
-
-        Some(Spanned {
-            value: TypeExpr::Nominal(name, name_span),
-            span_id: name_span,
+            value: TypeSurface::Name {
+                name,
+                name_span,
+                is_lowercase,
+                params,
+                span,
+            },
+            span_id: span,
         })
     }
 
@@ -524,14 +622,14 @@ impl<'src, 't> TokenCursor<'src, 't> {
     ) -> ParsedTagParams {
         if self.expect(&open_token).is_none() {
             return ParsedTagParams {
-                params: Parameters::new(),
+                params: Vec::new(),
                 param_spans: Vec::new(),
             };
         }
 
         self.skip_layout();
 
-        let mut params = Parameters::new();
+        let mut params = Vec::new();
         let mut param_spans = Vec::new();
 
         if !self.is_at(&close_token) {
@@ -541,7 +639,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 {
                     parameter.name_span = span;
                     param_spans.push((name, span));
-                    params.insert(name, parameter);
+                    params.push((name, parameter));
                 }
 
                 if self.is_at(&close_token) {
@@ -552,10 +650,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     continue;
                 }
 
-                self.error(
-                    "parse-expected-param-separator",
+                // parse-expected-param-separator
+                self.error_here(
+                    DiagnosticCode::Parse(ParseCode::Expected(
+                        ExpectedSyntaxCode::ParameterSeparator,
+                    )),
                     "expected ',' or newline between type parameters",
-                    self.current_span(),
                 );
                 break;
             }
@@ -569,6 +669,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
     }
 
+    fn ends_param_list(&mut self) -> bool {
+        self.is_at(&Token::ParenClose)
+            || self.is_at(&Token::Comma)
+            || self.previous_token_was_newline_separator()
+    }
+
     fn parse_one_tag_param(
         &mut self,
         expr_parser: ExprFn,
@@ -579,10 +685,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             let span = self.peek_span()?;
             let expr_checkpoint = self.checkpoint();
             self.advance();
-            let expression_ends_parameter = self.is_at(&Token::ParenClose)
-                || self.is_at(&Token::Comma)
-                || self.previous_token_was_newline_separator();
-            if expression_ends_parameter {
+            if self.ends_param_list() {
                 let key = Intern::<String>::from_ref(&n.to_string());
                 return Some((
                     key,
@@ -601,16 +704,8 @@ impl<'src, 't> TokenCursor<'src, 't> {
         if matches!(self.peek(), Some(&Token::Tag(_))) {
             let expr_checkpoint = self.checkpoint();
             let expr = expr_parser(self);
-            let expression_ends_parameter = self.is_at(&Token::ParenClose)
-                || self.is_at(&Token::Comma)
-                || self.previous_token_was_newline_separator();
-            if expression_ends_parameter
-                && !is_parse_error_expr(&expr.value)
-                && !matches!(&expr.value, ast::Expr::Bind(bind) if bind.params.is_none())
-                && !matches!(
-                    &expr.value,
-                    ast::Expr::FnCall(call) if call.args.is_none() && call.path.value.segments.is_empty()
-                )
+            if self.ends_param_list()
+                && usable_param_expr(&expr)
                 && matches!(
                     &expr.value,
                     ast::Expr::AnonymousTag(_)
@@ -635,20 +730,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         let expr_checkpoint = self.checkpoint();
         let expr = expr_parser(self);
-        let expression_ends_parameter = self.is_at(&Token::ParenClose)
-            || self.is_at(&Token::Comma)
-            || self.previous_token_was_newline_separator();
-        if expression_ends_parameter
-            && !is_parse_error_expr(&expr.value)
-            && !matches!(
-                &expr.value,
-                ast::Expr::Bind(bind) if bind.params.is_none()
-            )
-            && !matches!(
-                &expr.value,
-                ast::Expr::FnCall(call) if call.args.is_none() && call.path.value.segments.is_empty()
-            )
-        {
+        if self.ends_param_list() && usable_param_expr(&expr) {
             let span = expr.span_id;
             return Some((
                 Intern::new(format!("__expr_{param_index}")),
@@ -658,20 +740,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
         self.rewind(expr_checkpoint);
         let expr = self.parse_expression();
-        let expression_ends_parameter = self.is_at(&Token::ParenClose)
-            || self.is_at(&Token::Comma)
-            || self.previous_token_was_newline_separator();
-        if expression_ends_parameter
-            && !is_parse_error_expr(&expr.value)
-            && !matches!(
-                &expr.value,
-                ast::Expr::Bind(bind) if bind.params.is_none()
-            )
-            && !matches!(
-                &expr.value,
-                ast::Expr::FnCall(call) if call.args.is_none() && call.path.value.segments.is_empty()
-            )
-        {
+        if self.ends_param_list() && usable_param_expr(&expr) {
             let span = expr.span_id;
             return Some((
                 Intern::new(format!("__expr_{param_index}")),
@@ -721,6 +790,15 @@ impl<'src, 't> TokenCursor<'src, 't> {
             name_span,
         ))
     }
+}
+
+fn usable_param_expr(expr: &Typed<Expr>) -> bool {
+    !is_parse_error_expr(&expr.value)
+        && !matches!(&expr.value, ast::Expr::Bind(bind) if bind.params.is_none())
+        && !matches!(
+            &expr.value,
+            ast::Expr::FnCall(call) if call.args.is_none() && call.path.value.segments.is_empty()
+        )
 }
 
 fn is_parse_error_expr(expr: &ast::Expr) -> bool {
@@ -789,7 +867,12 @@ fn is_parse_error_expr(expr: &ast::Expr) -> bool {
 
 fn is_parse_error_condition(condition: &ast::Condition) -> bool {
     match condition {
-        ast::Condition::Is { subject, .. } => is_parse_error_expr(&subject.value),
+        ast::Condition::Compare { left, right, .. } => {
+            is_parse_error_expr(&left.value) || is_parse_error_expr(&right.value)
+        }
+        ast::Condition::Proposition { subject } | ast::Condition::Is { subject, .. } => {
+            is_parse_error_expr(&subject.value)
+        }
         ast::Condition::Not(inner) => is_parse_error_condition(inner),
         ast::Condition::And(left, right) | ast::Condition::Or(left, right) => {
             is_parse_error_condition(left) || is_parse_error_condition(right)
@@ -802,11 +885,14 @@ fn type_params_to_expr_args(params: ParsedTagParams) -> Vec<Typed<Expr>> {
         .params
         .into_iter()
         .map(|(name, parameter)| match parameter.kind {
+            ParameterKind::Proposition(_) => {
+                unreachable!("type applications do not parse proposition parameters")
+            }
             ParameterKind::Generic => Typed::infer(
-                Expr::FnCall(ast::FnCall {
-                    path: Spanned::new(ast::ModPath::new(name, Vec::new()), ast::SpanId::INVALID),
-                    args: None,
-                }),
+                path_call(Spanned::new(
+                    ast::ModPath::new(name, Vec::new()),
+                    ast::SpanId::INVALID,
+                )),
                 parameter.name_span,
             ),
             ParameterKind::Tagged(sp)
@@ -831,7 +917,7 @@ type OrderedTagParams = (
 
 /// Ordered type parameters plus per-name spans for IDE hover.
 struct ParsedTagParams {
-    params: Parameters,
+    params: Vec<(Intern<String>, Parameter)>,
     param_spans: Vec<(Intern<String>, ast::SpanId)>,
 }
 

@@ -7,7 +7,7 @@ use parser::query::SourceParseExt;
 #[test]
 fn parse_top_level_unassigned_declare_like_bind() {
     let src = "\
-Architecture is 'x86_64' or 'arm64'
+Architecture is 'x86_64' or 'aarch64'
 
 arch Architecture
 ";
@@ -37,7 +37,7 @@ fn parse_full_arch_gin_fixture() {
     let src = "\
 --- Target CPU architectures for conditional compilation.
 Architecture is 'x86_64'
-             or 'arm64'
+             or 'aarch64'
              or 'wasm32'
 
 arch Architecture

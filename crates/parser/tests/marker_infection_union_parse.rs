@@ -2,7 +2,6 @@
 //! continuation `or` on an indented line, and no doc on the declare itself.
 
 use ast::DeclareValue;
-use parser::query::SourceParseExt;
 
 mod support;
 use support::*;
@@ -13,12 +12,7 @@ fn parse_infection_union_minimal_inline_fixture() {
 Infection is AnyField  --- AND-like
           or AllFields --- OR-like
 ";
-    let out = src.parse_source_full();
-    assert!(
-        out.symptoms.is_empty(),
-        "parse errors: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
+    let out = parse_ok(src);
 
     let infection = out.ast.tags.get(&intern("Infection")).expect("Infection");
     assert!(infection.doc_comment.is_none());

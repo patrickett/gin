@@ -31,7 +31,7 @@ fn index_bits_query_preserves_pointer_to_unit_operand() {
 #[test]
 fn target_query_predicate_is_not_encoded_as_a_variable() {
     let binding = parsed_binding(
-        "layout(element, alignment Alignment and >= #alignment(element)): alignment\n",
+        "layout(element, alignment Alignment and >= #alignment(element)): return alignment\n",
         "layout",
     );
     assert_eq!(
@@ -46,18 +46,36 @@ fn target_query_predicate_is_not_encoded_as_a_variable() {
 #[test]
 fn applied_nominal_cast_preserves_type_arguments() {
     let binding = parsed_binding(
-        "convert(value, element): value as Count(element)\n",
+        "convert(value, element): return value as Count(element)\n",
         "convert",
     );
-    let BindValue::Expr(expression) = binding.value else {
+    let BindValue::Body { ret, .. } = binding.value else {
         panic!("expression body");
     };
     assert!(matches!(
-        expression.value,
+        ret.values.into_iter().next().unwrap().value,
         Expr::Cast {
             ty: TypeReference::Application { name, arguments },
             ..
         } if name.as_str() == "Count"
             && arguments == vec![TypeReference::Nominal(Intern::from_ref("element"))]
     ));
+}
+
+#[test]
+fn unknown_query_name_is_rejected_in_predicates_and_expressions() {
+    for source in [
+        "layout(element, alignment Alignment and >= #sizes(element)): return alignment\n",
+        "width := #sizes(@())\n",
+    ] {
+        let parsed = source.parse_source_full();
+        assert!(
+            parsed
+                .symptoms
+                .iter()
+                .any(|diagnostic| diagnostic.code.slug() == "parse-expected-query-name"),
+            "accepted unknown query name in {source:?}: {:?}",
+            parsed.symptoms
+        );
+    }
 }

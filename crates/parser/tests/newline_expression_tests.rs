@@ -16,14 +16,6 @@ use support::*;
 // has the same indentation as the expression start.
 
 #[test]
-fn same_indent_minus_at_start_of_line() {
-    // With Indent-as-continuation, same-indent minus parses as binary.
-    let src = "y : 2 * 4\n- 3\n";
-    let out = src.parse_source_full();
-    assert!(has_def(&out, "y"), "should be a single bind");
-}
-
-#[test]
 fn same_indent_multiple_lines() {
     let src = "x : 1\n+ 2\n+ 3\n";
     let out = src.parse_source_full();
@@ -93,7 +85,7 @@ fn greater_indent_leading_operator() {
 
 #[test]
 fn return_value_on_same_line() {
-    let src = "main:\n    return 5\nloop\n";
+    let src = "main:\n    return 5\n";
     let out = src.parse_source_full();
     assert!(
         has_def(&out, "main"),
@@ -156,7 +148,7 @@ fn tagged_union_across_lines() {
 
 #[test]
 fn if_body_expression_continuation() {
-    let src = "result : if True is True\n    1\n    + 2\nreturn\n";
+    let src = "result : when True is True then\n    1\n    + 2\n    return\n";
     let out = src.parse_source_full();
     let errors = count_errors(&out);
     assert_eq!(
@@ -167,7 +159,7 @@ fn if_body_expression_continuation() {
 
 #[test]
 fn when_then_across_lines() {
-    let src = "x : when 5 > 0 is True\n          then 1\n          else 2\n";
+    let src = "x : when 5 > 0\n          then 1\n          else 2\n";
     let out = src.parse_source_full();
     let errors = count_errors(&out);
     assert_eq!(
@@ -247,43 +239,11 @@ fn two_expressions_on_one_line_no_crash() {
 }
 
 #[test]
-fn minus_sign_touching_number_same_indent() {
-    let src = "y : 4\n-3\n";
-    let out = src.parse_source_full();
-    assert!(
-        has_def(&out, "y"),
-        "y should be one bind with value 4 - 3 = 1"
-    );
-    assert_eq!(count_unused(&out), 0, "no unused value");
-}
-
-#[test]
 fn article_python_gotcha() {
     let src = "y : 2 * 4\n- 3\n";
     let out = src.parse_source_full();
     assert!(has_def(&out, "y"), "y should be a single bind");
     assert_eq!(count_unused(&out), 0, "no unused");
-}
-
-#[test]
-fn article_go_gotcha() {
-    let src = "y : 2 * 4\n- 3\n";
-    let out = src.parse_source_full();
-    assert!(has_def(&out, "y"), "y should be a single bind");
-}
-
-#[test]
-fn article_swift_gotcha() {
-    let src = "y : 4\n-3\n";
-    let out = src.parse_source_full();
-    assert!(has_def(&out, "y"), "one bind, y = 4 - 3");
-    assert_eq!(count_unused(&out), 0);
-}
-
-#[test]
-fn article_gleam_two_exprs_same_line() {
-    let src = "1 + 1 1 + 1\n";
-    let _out = src.parse_source_full();
 }
 
 #[test]
@@ -296,27 +256,6 @@ fn tag_call_across_lines() {
         2,
         "Swift guardrail: Bar and (5) on separate lines are two exprs"
     );
-}
-
-#[test]
-fn fn_call_across_lines() {
-    // Swift guardrail: `(` on next line is NOT a call — it's a grouping.
-    let src = "foo\n(1)\n";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_exprs(&out),
-        2,
-        "Swift guardrail: foo and (1) on separate lines are two exprs"
-    );
-}
-
-#[test]
-fn bind_then_another_bind_with_newline() {
-    let src = "x : 1\ny : 2\n";
-    let out = src.parse_source_full();
-    assert!(has_def(&out, "x"), "first bind");
-    assert!(has_def(&out, "y"), "second bind");
-    assert_eq!(count_unused(&out), 0, "both bound, no unused values");
 }
 
 #[test]

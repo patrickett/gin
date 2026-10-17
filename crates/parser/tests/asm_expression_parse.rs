@@ -2,39 +2,26 @@ use ast::Expr;
 use parser::query::SourceParseExt;
 
 #[test]
-fn parses_assembly_as_an_expression_with_named_operands() {
-    let parsed = "f(value Int) Int: #asm('spec', value: value)".parse_source_full();
-    assert!(
-        parsed.symptoms.is_empty(),
-        "parse errors: {:?}",
-        parsed.symptoms
-    );
-    let bind = parsed
-        .ast
-        .defs
-        .values()
-        .find(|bind| bind.name.as_str() == "f")
-        .unwrap();
-    let ast::BindValue::Expr(body) = &bind.value else {
-        panic!("expected expression body");
-    };
-    let Expr::Asm {
-        specification,
-        operands,
-    } = &body.value
-    else {
-        panic!("expected asm expression");
-    };
-    assert!(
-        matches!(specification.value, Expr::Lit(ast::Literal::String(ref value)) if value == "spec")
-    );
-    assert_eq!(operands.len(), 1);
-    assert_eq!(operands[0].name.as_str(), "value");
+fn rejects_removed_assembly_expressions() {
+    for source in [
+        "f(value Int) Int: return #asm('spec', value: value)",
+        "f(): return #asm('spec')",
+    ] {
+        let parsed = source.parse_source_full();
+        assert!(
+            parsed
+                .symptoms
+                .iter()
+                .any(|diagnostic| { diagnostic.code.slug() == "parse-expected-query-name" }),
+            "{:?}",
+            parsed.symptoms
+        );
+    }
 }
 
 #[test]
 fn parses_reserved_target_expression() {
-    let parsed = "f() Int: #target.arch".parse_source_full();
+    let parsed = "f Int: #target.arch".parse_source_full();
     assert!(
         parsed.symptoms.is_empty(),
         "parse errors: {:?}",
@@ -53,14 +40,16 @@ fn parses_reserved_target_expression() {
 }
 
 #[test]
-fn parses_multiline_asm_with_trailing_separator() {
-    let parsed = "write(fd Int, buf @Byte, len Int) Int:\n    return #asm(\n        protocol,\n        fd: fd,\n        buf: buf,\n        len: len,\n    )".parse_source_full();
-    assert!(
-        parsed
-            .symptoms
-            .iter()
-            .all(|symptom| symptom.code.slug() == "parse-unnecessary-comma"),
-        "parse errors: {:?}",
-        parsed.symptoms
-    );
+fn rejects_removed_machine_and_register_syntax() {
+    for source in [
+        "#machine(region)\nwrite(value Word) Word: return value\n",
+        "#machine\nwrite: 0\n",
+        "write: #register(9)\n",
+    ] {
+        let parsed = source.parse_source_full();
+        assert!(
+            !parsed.symptoms.is_empty(),
+            "accepted removed syntax: {source}"
+        );
+    }
 }

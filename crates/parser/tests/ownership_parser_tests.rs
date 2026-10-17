@@ -5,9 +5,47 @@ use internment::Intern;
 use parser::query::SourceParseExt;
 
 #[test]
+fn owning_storage_fields_preserve_value_parameter_ownership() {
+    let output = "Storage(x) has\n    address own x\n    transfer(value own x) x: return value\n"
+        .parse_source_full();
+    assert!(output.symptoms.is_empty(), "{:?}", output.symptoms);
+    let declaration = output.ast.tags.get(&Intern::from_ref("Storage")).unwrap();
+    let ast::DeclareValue::Has(members) = &declaration.value else {
+        panic!("expected members")
+    };
+    let ast::HasMember::Property(field) = &members[0] else {
+        panic!("expected field")
+    };
+    assert!(field.owned_storage);
+    assert!(
+        matches!(&field.ty.as_ref().unwrap().value, Expr::FnCall(call) if call.path.root.as_str() == "x" && call.args.is_none())
+    );
+    let ast::HasMember::Function(method) = &members[1] else {
+        panic!("expected method")
+    };
+    assert_eq!(
+        method.conventions.get(&Intern::from_ref("value")),
+        Some(&ParamConvention::Own)
+    );
+    assert!(
+        matches!(&method.params[&Intern::from_ref("value")].kind, ParameterKind::Tagged(ty) if matches!(ty.value, Expr::AnonymousTag(name) if name.as_str() == "x"))
+    );
+}
+
+#[test]
+fn owning_storage_fields_require_an_element_type() {
+    let output = "Storage has\n    address own\n".parse_source_full();
+    assert!(
+        output
+            .symptoms
+            .iter()
+            .any(|flaw| flaw.code.slug() == "parse-expected-owned-storage-type")
+    );
+}
+
+#[test]
 fn test_parse_bare_param_defaults_to_terminal() {
-    let src = "print(s String): 0
-";
+    let src = "print(s String): return 0\n";
     let ast = src.parse_source_full().ast;
     let bind = ast.defs.get(&Intern::from_ref("print")).unwrap();
     // Terminal is represented by the absence of an explicit convention.
@@ -18,7 +56,7 @@ fn test_parse_bare_param_defaults_to_terminal() {
 fn test_parse_mixed_params() {
     let src = "process(db own Database, txn Transaction, name String):
     return 0
-return
+    return
 ";
     let ast = src.parse_source_full().ast;
     let bind = ast.defs.get(&Intern::from_ref("process")).unwrap();
@@ -43,7 +81,7 @@ return
 fn test_parse_default_owned_param_with_return_type() {
     let src = "consume(s String) Int:
     return 0
-return
+    return
 ";
     let ast = src.parse_source_full().ast;
     let bind = ast.defs.get(&Intern::from_ref("consume")).unwrap();
@@ -78,7 +116,7 @@ fn test_parse_typed_hidden_state_parameters() {
 
 #[test]
 fn test_parse_parameter_refinement_chain() {
-    let src = "get(array ref Array(x, n), index Int and >= 0 and < n) ref x: array.(index)\n";
+    let src = "get(array ref Array(x, n), index Int and >= 0 and < n) ref x: return array.[index]\n";
     let output = src.parse_source_full();
     assert!(output.symptoms.is_empty(), "{:?}", output.symptoms);
     let bind = output.ast.defs.get(&Intern::from_ref("get")).unwrap();
@@ -94,7 +132,7 @@ fn test_parse_parameter_refinement_chain() {
 
 #[test]
 fn test_parse_parameter_equality_refinement() {
-    let src = "select(value Int, expected Int and = value) Int: expected\n";
+    let src = "select(value Int, expected Int and = value) Int: return expected\n";
     let output = src.parse_source_full();
     assert!(output.symptoms.is_empty(), "{:?}", output.symptoms);
     let bind = output.ast.defs.get(&Intern::from_ref("select")).unwrap();
@@ -115,7 +153,7 @@ main:
     x: 42
     dummy(x)
     return 0
-return
+    return
 ";
     let ast = src.parse_source_full().ast;
     assert!(
@@ -137,7 +175,7 @@ return
 
 #[test]
 fn test_tilde_consume_syntax_is_rejected() {
-    let output = "consume(~value Entity): 0\n".parse_source_full();
+    let output = "consume(~value Entity): return 0\n".parse_source_full();
 
     assert!(
         output
@@ -158,7 +196,7 @@ fn test_tilde_consume_syntax_is_rejected() {
 fn test_parse_ref_param() {
     let src = "read(e ref Entity) Int:
     return e.hp
-return
+    return
 ";
     let ast = src.parse_source_full().ast;
     let bind = ast.defs.get(&Intern::from_ref("read")).unwrap();
@@ -172,7 +210,7 @@ return
 fn test_parse_mut_param() {
     let src = "write(e mut Entity, hp Int):
     e.hp:: hp
-return
+    return
 ";
     let ast = src.parse_source_full().ast;
     let bind = ast.defs.get(&Intern::from_ref("write")).unwrap();
@@ -192,7 +230,7 @@ return
 fn test_parse_own_param() {
     let src = "consume(e own Entity) Int:
     return e.hp
-return
+    return
 ";
     let ast = src.parse_source_full().ast;
     let bind = ast.defs.get(&Intern::from_ref("consume")).unwrap();
@@ -204,7 +242,7 @@ return
 
 #[test]
 fn test_parse_leading_ref_param_syntax_is_rejected() {
-    let output = "bad(ref value Int): 0\n".parse_source_full();
+    let output = "bad(ref value Int): return 0\n".parse_source_full();
     assert!(output
         .symptoms
         .iter()
@@ -213,7 +251,7 @@ fn test_parse_leading_ref_param_syntax_is_rejected() {
 
 #[test]
 fn test_parse_leading_mut_param_syntax_is_rejected() {
-    let output = "bad(mut value Int): 0\n".parse_source_full();
+    let output = "bad(mut value Int): return 0\n".parse_source_full();
     assert!(output
         .symptoms
         .iter()
@@ -222,7 +260,7 @@ fn test_parse_leading_mut_param_syntax_is_rejected() {
 
 #[test]
 fn test_parse_leading_eat_param_syntax_is_rejected() {
-    let output = "bad(eat value Int): 0\n".parse_source_full();
+    let output = "bad(eat value Int): return 0\n".parse_source_full();
     assert!(output
         .symptoms
         .iter()
@@ -232,7 +270,7 @@ fn test_parse_leading_eat_param_syntax_is_rejected() {
 #[test]
 fn test_parse_trailing_param_convention_reports_migration_syntax() {
     let output =
-        "add(lhs SignedBigInt own, rhs SignedBigInt own) SignedBigInt: lhs\n".parse_source_full();
+        "add(lhs SignedBigInt own, rhs SignedBigInt own) SignedBigInt: return lhs\n".parse_source_full();
     let diagnostics: Vec<_> = output
         .symptoms
         .iter()
@@ -249,7 +287,7 @@ fn test_parse_trailing_param_convention_reports_migration_syntax() {
 fn test_parse_mixed_ref_and_bare_params() {
     let src = "attack(a ref Entity, d ref Entity):
     d.hp:: d.hp - a.damage
-return
+    return
 ";
     let ast = src.parse_source_full().ast;
     let bind = ast.defs.get(&Intern::from_ref("attack")).unwrap();
@@ -270,7 +308,7 @@ main:
     e: Entity(10, 10)
     ref r Entity: e
     return 0
-return
+    return
 ";
     let ast = src.parse_source_full().ast;
     let main_def = ast.defs.get(&Intern::from_ref("main")).unwrap();
@@ -325,7 +363,7 @@ main:
     e: Entity(10, 10)
     mut r Entity: e
     return 0
-return
+    return
 ";
     let ast = src.parse_source_full().ast;
     let main_def = ast.defs.get(&Intern::from_ref("main")).unwrap();
@@ -376,7 +414,7 @@ fn test_parse_group_annotation_immutable() {
     let src = "\
 process(a ref{r} Entity, d ref{r} Entity) Int:
     return a.hp + d.hp
-return
+    return
 ";
     let ast = src.parse_source_full().ast;
     let bind = ast.defs.get(&Intern::from_ref("process")).unwrap();
@@ -391,7 +429,7 @@ fn test_parse_group_annotation_mutable() {
     let src = "\
 attack(a mut{r} Entity, d mut{r} Entity):
     d.hp:: d.hp - a.calculate_damage(d)
-return
+    return
 ";
     let ast = src.parse_source_full().ast;
     let bind = ast.defs.get(&Intern::from_ref("attack")).unwrap();
@@ -403,7 +441,7 @@ return
 
 #[test]
 fn test_parse_semantic_group_path() {
-    let output = "power_up(entity ref{entities} Entity, ring mut{entities.rings.items} Ring): 0\n"
+    let output = "power_up(entity ref{entities} Entity, ring mut{entities.rings.items} Ring): return 0\n"
         .parse_source_full();
     assert!(output.symptoms.is_empty(), "{:?}", output.symptoms);
     let bind = output.ast.defs.get(&Intern::from_ref("power_up")).unwrap();
@@ -443,7 +481,7 @@ fn test_parse_multiple_group_annotations() {
     let src = "\
 process(entity ref{e} Entity, ring mut{rr} Ring):
     ring.power:: ring.power + entity.energy
-return
+    return
 ";
     let ast = src.parse_source_full().ast;
     let bind = ast.defs.get(&Intern::from_ref("process")).unwrap();
@@ -471,9 +509,7 @@ return
 
 #[test]
 fn test_group_is_preserved_on_parameter_and_return_reference_types() {
-    let src = "\
-borrow(value ref{r} Entity) ref{r} Entity: value
-";
+    let src = "borrow(value ref{r} Entity) ref{r} Entity: return value\n";
     let ast = src.parse_source_full().ast;
     let bind = ast.defs.get(&Intern::from_ref("borrow")).unwrap();
     let parameter = bind
@@ -522,7 +558,7 @@ fn test_parse_group_annotation_param_groups_mapped() {
     let src = "\
 process(entity ref{e} Entity, ring mut{rr} Ring):
     ring.power:: ring.power + entity.energy
-return
+    return
 ";
     let ast = src.parse_source_full().ast;
     let bind = ast.defs.get(&Intern::from_ref("process")).unwrap();

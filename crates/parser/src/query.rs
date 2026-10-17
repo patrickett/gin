@@ -3,14 +3,15 @@
 //! infrastructure.
 
 use ast::span::{HasSpanId, SpanId};
-use diagnostic::{Category, Diagnostic};
+use diagnostic::code::{LexCode, ParseCode, SyntaxCode};
+use diagnostic::{Category, Diagnostic, DiagnosticCode};
 use lexer::{Lexer, Token};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::cursor::TokenCursor;
 use ast::{FileAst, ImportSource};
-use flask::{FlaskPathExt, NestedPackageTarget, PACKAGE_CONFIG_NAME};
+use flask::{FlaskConfig, FlaskPathExt, NestedPackageTarget};
 
 /// Extension trait providing source-text parsing on `str`.
 pub trait SourceParseExt {
@@ -23,10 +24,13 @@ pub trait SourceParseExt {
 
 impl SourceParseExt for str {
     fn parse_source_full(&self) -> ParseOutput {
+        let _profile = compiler_profile::span(compiler_profile::Phase::Parse);
+        let lex_profile = compiler_profile::span(compiler_profile::Phase::Lex);
         let mut lexer = Lexer::new(self);
         let tokens: Vec<_> = std::iter::from_fn(|| lexer.next_raw()).collect();
         let lex_errors = std::mem::take(&mut lexer.errors);
         let mut span_table = lexer.take_span_table();
+        drop(lex_profile);
 
         let mut comments = Vec::new();
         let mut depth = 0usize;
@@ -54,6 +58,7 @@ impl SourceParseExt for str {
 
         let (mut ast, hw_parse_errors) =
             TokenCursor::parse_tokens_with_errors(&filtered_tokens, &mut span_table);
+        ast.blank_lines = lexer.take_blank_lines();
 
         let mut symptoms: Vec<Diagnostic> = Vec::new();
 
@@ -63,7 +68,8 @@ impl SourceParseExt for str {
             .filter(|(t, _)| matches!(t, Token::UnterminatedString(_)))
         {
             symptoms.push(
-                Diagnostic::new("lex-unclosed-string", "unclosed string literal")
+                // lex-unclosed-string
+                Diagnostic::new(LexCode::UnclosedString, "unclosed string literal")
                     .at_span_id(*span_id, &span_table),
             );
         }
@@ -73,40 +79,12 @@ impl SourceParseExt for str {
 
         // Parse errors -- some carry magic prefixes that indicate non-fatal hints.
         for err in &hw_parse_errors {
-            if let Some(hint) = err.message().strip_prefix("__gin_hint__:") {
-                match hint.trim() {
-                    "unnecessary-comma" => {
-                        symptoms.push(
-                            Diagnostic::new("parse-unnecessary-comma", "unnecessary comma")
-                                .with_category(Category::Warn)
-                                .with_help(
-                                    "this comma is not needed since Gin uses newlines \
-                                 to separate items; you can remove it",
-                                )
-                                .at_span_id(err.span(), &span_table),
-                        );
-                    }
-                    _hint => {
-                        symptoms.push(
-                            Diagnostic::new(
-                                "parse-indented-return",
-                                "return is indented inside the if body",
-                            )
-                            .with_category(Category::Warn)
-                            .with_help("dedent this return so it closes the if expression")
-                            .at_span_id(err.span(), &span_table),
-                        );
-                    }
-                }
-            } else {
-                let mut diagnostic = Diagnostic::new(err.code(), err.message().to_string())
-                    .at_span_id(err.span(), &span_table);
-                if err.code() == "parse-reserved-name" {
-                    diagnostic = diagnostic
-                        .with_help("choose a different name, such as `value` or `result`");
-                }
-                symptoms.push(diagnostic);
+            let mut diagnostic = err.to_warning_diagnostic(&span_table);
+            if err.code() == DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::ReservedName)) {
+                diagnostic =
+                    diagnostic.with_help("choose a different name, such as `value` or `result`");
             }
+            symptoms.push(diagnostic);
         }
 
         ast.span_table = span_table;
@@ -123,8 +101,9 @@ impl SourceParseExt for str {
                 match &module_import.source {
                     ImportSource::LocalBundle(b) if module_import.alias.is_some() => {
                         symptoms.push(
+                            // parse-unsupported-import-alias
                             Diagnostic::new(
-                                "parse-unsupported-import-alias",
+                                SyntaxCode::UnsupportedImportAlias,
                                 "alias individual exports with `export as alias`, rather than aliasing the whole import list",
                             )
                             .at_span_id(b.span_id(), spans),
@@ -132,8 +111,9 @@ impl SourceParseExt for str {
                     }
                     ImportSource::Local(path, span) if module_import.alias.is_none() => {
                         symptoms.push(
+                            // parse-missing-import-alias
                             Diagnostic::new(
-                                "parse-missing-import-alias",
+                                SyntaxCode::MissingImportAlias,
                                 format!(
                                     "folder module import requires `as` (e.g. `use '{}' as name`)",
                                     path.display()
@@ -150,7 +130,8 @@ impl SourceParseExt for str {
 
         for (suggested, span_id) in &hints {
             symptoms.push(
-                Diagnostic::new("parse-empty-parens", "unnecessary parentheses")
+                // parse-empty-parens
+                Diagnostic::new(SyntaxCode::EmptyParens, "unnecessary parentheses")
                     .with_help(["use ", suggested, " instead of ", suggested, "()"].concat())
                     .with_category(Category::Warn)
                     .at_span_id(*span_id, spans),
@@ -160,7 +141,8 @@ impl SourceParseExt for str {
         // Unused value info diagnostics
         for (value, span_id) in ast.collect_unused_values() {
             symptoms.push(
-                Diagnostic::new("parse-unused-value", ["unused value ", &value].concat())
+                // parse-unused-value
+                Diagnostic::new(SyntaxCode::UnusedValue, ["unused value ", &value].concat())
                     .with_arg("value", value.clone())
                     .with_category(Category::Help)
                     .at_span_id(span_id, spans),
@@ -235,6 +217,7 @@ fn tokens_are_incomplete(tokens: &[(Token<'_>, SpanId)]) -> bool {
                     | Token::SlashOr
                     | Token::Star
                     | Token::Then
+                    | Token::Do
             )
         )
 }
@@ -328,7 +311,9 @@ pub(crate) mod hints {
 
     impl Folder for EmptyParenCollector {
         fn visit_bind(&mut self, bind: &mut ast::Bind) -> ControlFlow<()> {
-            if bind.params.as_ref().is_some_and(|params| params.is_empty()) {
+            if bind.receiver_type.is_none()
+                && bind.params.as_ref().is_some_and(|params| params.is_empty())
+            {
                 self.hints.push((bind.name.to_string(), bind.name_span));
             }
             walk_bind_mut(self, bind)
@@ -362,8 +347,8 @@ pub trait FileAstQueryExt {
 
     /// Resolve package imports (e.g. `use core`, `use core.subpkg`) against a dependency map.
     ///
-    /// - `use dep`: every `*.gin` in `dep/` next to `flask.jsonc` (non-recursive).
-    /// - `use dep.a.b`: nested folder modules `dep/a/b/` with `flask.jsonc`, then flat `*.gin` there.
+    /// - `use dep`: every `*.gin` in `dep/` next to `mod.flask` (non-recursive).
+    /// - `use dep.a.b`: nested folder modules `dep/a/b/` with `mod.flask`, then flat `*.gin` there.
     /// - `use dep a, b`: each listed name is a nested folder module under `dep/`.
     ///
     /// Returns `(path, span)` pairs for each resolved `.gin` file.
@@ -387,7 +372,7 @@ impl FileAstQueryExt for FileAst {
                         let p = base_dir.join(path);
                         if p.is_file() && p.extension().is_some_and(|e| e == "gin") {
                             paths.push((p, *span));
-                        } else if p.is_dir() && p.join(PACKAGE_CONFIG_NAME).is_file() {
+                        } else if p.is_dir() && FlaskConfig::manifest_path(&p).is_file() {
                             for g in p.list_package_gin_files() {
                                 paths.push((g, *span));
                             }
@@ -423,7 +408,7 @@ impl FileAstQueryExt for FileAst {
 
                         let span = mod_path.span_id();
                         if mod_path.segments.is_empty() {
-                            if dep_dir.join(PACKAGE_CONFIG_NAME).is_file() {
+                            if FlaskConfig::manifest_path(&dep_dir).is_file() {
                                 for p in dep_dir.list_package_gin_files() {
                                     paths.push((p, span));
                                 }
@@ -446,7 +431,7 @@ impl FileAstQueryExt for FileAst {
                             Some(dir) => dir,
                             None => continue,
                         };
-                        if !dep_dir.join(PACKAGE_CONFIG_NAME).is_file() {
+                        if !FlaskConfig::manifest_path(&dep_dir).is_file() {
                             continue;
                         }
                         let module_dir = b
@@ -459,7 +444,7 @@ impl FileAstQueryExt for FileAst {
                         let span = b.span_id();
                         for m in &b.members {
                             let nested = module_dir.join(m.export.as_str());
-                            if nested.join(PACKAGE_CONFIG_NAME).is_file() {
+                            if FlaskConfig::manifest_path(&nested).is_file() {
                                 for p in nested.list_package_gin_files() {
                                     paths.push((p, span));
                                 }

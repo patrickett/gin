@@ -10,38 +10,38 @@ fn sized_gin_includes_tail_helpers() {
     let src = "\
 Size is Const(BigInt) or Dynamic
 
-compute_size(x) Size := when x is
+compute_size(x) Size := return when x is
     Primitive(w, _)     then Const(w / 8)
 
-sum_named(fields) Size := when fields is
+sum_named(fields) Size := return when fields is
     []                  then Const(0)
     [f, ...rest]        then add(compute_size(f.ty), sum_named(rest))
 
-add(a Size, b Size) Size := when (a, b) is
+add(a Size, b Size) Size := return when (a, b) is
     (Const(x), Const(y)) then Const(x + y)
                          else Dynamic
 
-mul_size(size Size, n) Size := when size is
+mul_size(size Size, n) Size := return when size is
     Const(x) then Const(x * n)
              else Dynamic
 
 union_size(variants) Size := add(union_disc(variants), union_max_payload(variants))
 
-union_disc(variants) Size := when variants is
+union_disc(variants) Size := return when variants is
     []           then Const(0)
     [_]          then Const(1)
                  else Const(2)
 
-union_max_payload(variants) Size := when variants is
+union_max_payload(variants) Size := return when variants is
     []              then Const(0)
     [v, ...rest]    then max_size(sum_named(v.fields), union_max_payload(rest))
 
-max_size(a Size, b Size) Size := when (a, b) is
+max_size(a Size, b Size) Size := return when (a, b) is
     (Const(x), Const(y)) then Const(when x > y then x else y)
                          else Dynamic
 ";
     let file = src.parse_source_full().ast;
-    let names: Vec<_> = file.defs.keys().map(|k| k.as_str()).collect();
+    let names: Vec<_> = file.defs.keys().map(|k| k.0.as_str()).collect();
     for name in [
         "union_size",
         "mul_size",
@@ -61,27 +61,27 @@ fn value_row_when_with_dedented_else_allows_following_top_level_bind() {
     let src = r#"
 Size is Const(BigInt) or Dynamic
 
-add(a Size, b Size) Size := when (a, b) is
+add(a Size, b Size) Size := return when (a, b) is
     (Const(x), Const(y)) then Const(x + y)
                          else Dynamic
 
-mul_size(size Size, n BigInt) Size := Const(0)
+mul_size(size Size, n BigInt) Size := return Const(0)
 "#;
     let file = src.parse_source_full().ast;
     assert!(
         file.defs.contains_key(&Intern::new("mul_size".to_string())),
         "defs after positional-row-when-else: {:?}",
-        file.defs.keys().map(|k| k.as_str()).collect::<Vec<_>>()
+        file.defs.keys().map(|k| k.0.as_str()).collect::<Vec<_>>()
     );
 }
 
 #[test]
 fn when_value_row_subject_parses_as_when_not_value_row_of_const() {
-    let src = "f() Size := when (a, b) is\n    (Const(x), Const(y)) then Const(0)\n";
+    let src = "f() Size := return when (a, b) is\n    (Const(x), Const(y)) then Const(0)\n";
     let file = src.parse_source_full().ast;
     let f = file.defs.get(&Intern::new("f".to_string())).unwrap();
     match &f.value {
-        ast::BindValue::Expr(e) => match &e.value {
+        ast::BindValue::Body { ret, .. } => match &ret.values[0].value {
             ast::Expr::When(w) => {
                 assert!(w.subject.is_some());
                 assert!(!w.arms.is_empty());

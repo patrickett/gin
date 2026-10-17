@@ -1,18 +1,20 @@
+use diagnostic::code::{ExpectedSyntaxCode, ParseCode, SyntaxCode};
 use std::cell::Cell;
 
 use ast::span::{HasSpanId, Span, SpanId, SpanTable};
+use diagnostic::{Category, Diagnostic, DiagnosticCode};
 use internment::Intern;
 use lexer::Token;
 
 #[derive(Debug, Clone)]
 pub struct ParseError {
-    code: &'static str,
+    code: DiagnosticCode,
     message: String,
     span: SpanId,
 }
 
 impl ParseError {
-    fn new(code: &'static str, message: impl Into<String>, span: SpanId) -> Self {
+    fn new(code: DiagnosticCode, message: impl Into<String>, span: SpanId) -> Self {
         Self {
             code,
             message: message.into(),
@@ -20,7 +22,7 @@ impl ParseError {
         }
     }
 
-    pub fn code(&self) -> &'static str {
+    pub fn code(&self) -> DiagnosticCode {
         self.code
     }
 
@@ -33,25 +35,73 @@ impl ParseError {
     }
 
     pub fn hint(message: impl Into<String>, span: SpanId) -> Self {
-        Self::new("parse-hint", message, span)
+        // parse-hint
+        Self::new(
+            DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::Hint)),
+            message,
+            span,
+        )
     }
 
     pub fn expected_token(message: impl Into<String>, span: SpanId) -> Self {
-        Self::new("parse-expected-token", message, span)
+        // parse-expected-token
+        Self::new(
+            DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::Token)),
+            message,
+            span,
+        )
     }
 
     pub fn unexpected_token(message: impl Into<String>, span: SpanId) -> Self {
-        Self::new("parse-unexpected-token", message, span)
+        // parse-unexpected-token
+        Self::new(
+            DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::UnexpectedToken)),
+            message,
+            span,
+        )
     }
 
     pub fn invalid_import_target(message: impl Into<String>, span: SpanId) -> Self {
-        Self::new("parse-invalid-import-target", message, span)
+        // parse-invalid-import-target
+        Self::new(
+            DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::InvalidImportTarget)),
+            message,
+            span,
+        )
     }
 
     pub fn expected_import_source(message: impl Into<String>, span: SpanId) -> Self {
-        Self::new("parse-expected-import-source", message, span)
+        // parse-expected-import-source
+        Self::new(
+            DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::ImportSource)),
+            message,
+            span,
+        )
     }
 
+    /// `__gin_hint__:`-prefixed messages become warnings carrying the trimmed hint.
+    pub fn to_warning_diagnostic(&self, spans: &SpanTable) -> Diagnostic {
+        if let Some(hint) = self.message().strip_prefix("__gin_hint__:") {
+            match hint.trim() {
+                "unnecessary-comma" => {
+                    // parse-unnecessary-comma
+                    Diagnostic::new(SyntaxCode::UnnecessaryComma, "unnecessary comma")
+                        .with_category(Category::Warn)
+                        .with_help(
+                            "this comma is not needed since Gin uses newlines \
+                         to separate items; you can remove it",
+                        )
+                        .at_span_id(self.span(), spans)
+                }
+                // parse-hint
+                hint => Diagnostic::new(SyntaxCode::Hint, hint)
+                    .with_category(Category::Warn)
+                    .at_span_id(self.span(), spans),
+            }
+        } else {
+            Diagnostic::new(self.code(), self.message().to_string()).at_span_id(self.span(), spans)
+        }
+    }
 }
 
 impl HasSpanId for ParseError {
@@ -71,6 +121,7 @@ pub struct TokenCursor<'src, 't> {
     advance_stack: Vec<usize>,
     cancel_check: Option<&'t (dyn Fn() + 't)>,
     pub errors: Vec<ParseError>,
+    pub(crate) todo_holes: Vec<Span>,
 }
 
 impl<'src, 't> TokenCursor<'src, 't> {
@@ -84,6 +135,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             advance_stack: Vec::new(),
             cancel_check: None,
             errors: Vec::new(),
+            todo_holes: Vec::new(),
         }
     }
 
@@ -155,6 +207,29 @@ impl<'src, 't> TokenCursor<'src, 't> {
         Some((item.0, item.1))
     }
 
+    /// Consume the query name following `#` and resolve it to a layout query kind,
+    /// reporting an error when it is not one.
+    pub(crate) fn parse_target_query_kind(&mut self) -> ast::TargetQueryKind {
+        let kind = match self.advance() {
+            Some((Token::Id(name), _)) => name
+                .parse::<ast::QueryKind>()
+                .ok()
+                .and_then(|kind| ast::TargetQueryKind::try_from(kind).ok()),
+            _ => None,
+        };
+        match kind {
+            Some(kind) => kind,
+            None => {
+                // parse-expected-query-name
+                self.error_here(
+                    DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::QueryName)),
+                    "expected compile-time query name after '#'",
+                );
+                ast::TargetQueryKind::Size
+            }
+        }
+    }
+
     /// If the raw token at the current position is a newline, consume it so
     /// that last_consumed_span includes the newline span.
     #[inline(always)]
@@ -208,6 +283,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
     }
 
     #[inline(always)]
+    pub(crate) fn tokens_remaining(&self) -> usize {
+        self.tokens.len() - self.pos
+    }
+
     pub fn is_eof(&self) -> bool {
         self.pos >= self.tokens.len()
     }
@@ -259,62 +338,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
         self.pos += 1;
         self.invalidate_cache();
         Some((item.0, item.1))
-    }
-
-    pub fn blank_line_between_last_consumed_and_raw_peek(&self) -> bool {
-        let Some(last_pos) = self.last_consumed_pos else {
-            return false;
-        };
-        if matches!(
-            self.tokens.get(last_pos).map(|(token, _)| token),
-            Some(Token::Newline)
-        ) {
-            return false;
-        }
-        let Some((_, next_span_id)) = self.tokens.get(self.pos) else {
-            return false;
-        };
-        let last_span = self.span_table.get(self.tokens[last_pos].1);
-        let next_span = self.span_table.get(*next_span_id);
-        next_span.start() > last_span.end()
-    }
-
-    pub fn blank_line_between_last_consumed_and_raw_peek_with_gap(&self) -> bool {
-        if self.blank_line_between_last_consumed_and_raw_peek() {
-            return true;
-        }
-
-        let Some(last_pos) = self.last_consumed_pos else {
-            return false;
-        };
-        if !matches!(
-            self.tokens.get(last_pos).map(|(token, _)| token),
-            Some(Token::Newline)
-        ) {
-            return false;
-        }
-
-        let Some((_, next_span_id)) = self.tokens.get(self.pos) else {
-            return false;
-        };
-        let last_span = self.span_table.get(self.tokens[last_pos].1);
-        let next_span = self.span_table.get(*next_span_id);
-        next_span.start() > last_span.end() + 1
-    }
-
-    pub fn last_consumed_newline_is_blank_lines(&self) -> bool {
-        let Some(last_pos) = self.last_consumed_pos else {
-            return false;
-        };
-        if !matches!(
-            self.tokens.get(last_pos).map(|(token, _)| token),
-            Some(Token::Newline)
-        ) {
-            return false;
-        }
-
-        let span = self.span_table.get(self.tokens[last_pos].1);
-        span.len() > 1
     }
 
     pub fn attribute_is_detached_from_next_token(&self) -> bool {
@@ -407,9 +430,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
     /// Returns true when expression parsing already consumed the newline that
     /// should separate the last item from the next significant token.
     pub fn previous_token_was_newline_separator(&mut self) -> bool {
-        let Some(last_pos) = self.last_consumed_pos else {
+        let Some(mut last_pos) = self.last_consumed_pos else {
             return false;
         };
+        while last_pos > 0 && matches!(self.tokens[last_pos].0, Token::Indent | Token::Dedent) {
+            last_pos -= 1;
+        }
 
         let next_pos = self.significant_pos();
         if last_pos >= next_pos {
@@ -492,44 +518,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
     }
 
-    /// Try to consume a statement-level separator: a comma (the inline separator)
-    /// or one or more newlines (the layout separator). Returns `true` if a
-    /// separator was consumed.
-    ///
-    /// Used by `parse_top_level_element` and `parse_body_exprs` to enforce
-    /// separators between declarations and statements.
-    pub fn try_consume_statement_separator(&mut self) -> bool {
-        // Try comma first — this is the explicit inline separator.
-        if self.eat(&Token::Comma) {
-            self.skip_newlines();
-            return true;
-        }
-
-        // Try newline(s) — this is the free layout separator.
-        let start = self.pos;
-        let tokens = self.tokens;
-        let mut consumed_newline = false;
-        while self.pos < tokens.len() {
-            match &tokens[self.pos].0 {
-                Token::Newline => {
-                    consumed_newline = true;
-                    self.pos += 1;
-                }
-                Token::Indent | Token::Dedent => {
-                    self.pos += 1;
-                }
-                _ => break,
-            }
-        }
-        if consumed_newline {
-            self.invalidate_cache();
-            true
-        } else {
-            self.pos = start;
-            false
-        }
-    }
-
     /// Peek at the next token past any intervening newlines AND indents,
     /// without consuming them. Used for Indent-as-continuation in expressions.
     #[inline]
@@ -564,16 +552,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
         self.invalidate_cache();
     }
 
-    pub fn error(&mut self, code: &'static str, message: impl Into<String>, span: SpanId) {
+    pub fn error(&mut self, code: DiagnosticCode, message: impl Into<String>, span: SpanId) {
         self.errors.push(ParseError::new(code, message, span));
     }
 
-    pub fn hint(&mut self, message: impl Into<String>, span: SpanId) {
-        self.errors.push(ParseError::hint(message, span));
-    }
-
-    pub fn expected_token(&mut self, message: impl Into<String>, span: SpanId) {
-        self.errors.push(ParseError::expected_token(message, span));
+    pub fn error_here(&mut self, code: DiagnosticCode, message: impl Into<String>) {
+        self.error(code, message, self.current_span());
     }
 
     pub fn unexpected_token(
@@ -588,6 +572,26 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
     pub fn checkpoint(&self) -> usize {
         self.pos
+    }
+
+    pub(crate) fn source_line_breaks(&self) -> Vec<usize> {
+        self.tokens
+            .iter()
+            .filter(|(token, _)| matches!(token, Token::Newline))
+            .map(|(_, span)| self.span_table.get(*span).start())
+            .collect()
+    }
+
+    pub(crate) fn consumed_source_range(&self, start: usize) -> Option<std::ops::Range<usize>> {
+        let mut tokens = self.tokens[start..self.pos].iter().filter(|(token, _)| {
+            !matches!(
+                token,
+                Token::Newline | Token::Indent | Token::Dedent | Token::Comment(_)
+            )
+        });
+        let (_, first) = tokens.next()?;
+        let last = tokens.next_back().map_or(*first, |(_, span)| *span);
+        Some(self.span_table.get(*first).start()..self.span_table.get(last).end())
     }
 
     pub fn rewind(&mut self, pos: usize) {

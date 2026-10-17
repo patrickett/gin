@@ -3,11 +3,37 @@
 #![allow(dead_code)]
 
 use ast::Variant;
+use diagnostic::Category;
 use internment::Intern;
-use parser::query::ParseOutput;
+use parser::query::{ParseOutput, SourceParseExt};
 
 pub fn intern(s: &str) -> Intern<String> {
     Intern::new(s.to_owned())
+}
+
+pub fn parse_ok(src: &str) -> ParseOutput {
+    let out = src.parse_source_full();
+    assert!(
+        out.symptoms.is_empty(),
+        "parse errors: {:?}",
+        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+    out
+}
+
+pub fn parse_ok_no_flaws(src: &str) -> ParseOutput {
+    let out = src.parse_source_full();
+    let flaws: Vec<_> = out
+        .symptoms
+        .iter()
+        .filter(|d| matches!(d.category, Category::Flaw))
+        .collect();
+    assert!(
+        flaws.is_empty(),
+        "parse flaws: {:?}",
+        flaws.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+    out
 }
 
 pub fn has_def(out: &ParseOutput, name: &str) -> bool {

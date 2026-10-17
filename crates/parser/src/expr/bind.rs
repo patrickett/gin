@@ -1,3 +1,5 @@
+use diagnostic::DiagnosticCode;
+use diagnostic::code::{ExpectedSyntaxCode, ParseCode, RemovedSyntaxCode, SyntaxCode};
 use indexmap::IndexMap;
 use internment::Intern;
 use lexer::Token;
@@ -6,10 +8,11 @@ use ast::{
     AttributeItem, Bind, BindAttributes, BindOperator, BindValue, COMPILER_QUERY_NAMES, DocComment,
     Expr, GroupParam, GroupPath, ModPath, NamedResult, ParamConvention, Parameter, ParameterKind,
     Parameters, Pattern, PredicateExpr, ProofProposition, ProofRelation, ProofTerm,
-    ResultAlternative, Return, SpanId, Spanned, Typed,
+    ResultAlternative, Spanned, Typed,
 };
 
 use super::ExprFn;
+use super::path_call;
 use crate::cursor::TokenCursor;
 
 type ReturnTypePart = (
@@ -39,43 +42,99 @@ impl<'src, 't> TokenCursor<'src, 't> {
     pub(crate) fn parse_result_alternatives(
         &mut self,
         return_tag: &mut Option<Box<Spanned<Expr>>>,
+        expr_parser: ExprFn,
+        first_name: Option<Intern<String>>,
+        payload_postconditions: &mut Vec<ast::PayloadPostcondition>,
     ) -> Vec<Spanned<ResultAlternative>> {
-        let mut anonymous_result_alternatives = Vec::new();
-        if (self.is_at(&Token::Or) || self.is_at(&Token::Thus))
-            && let Some(first) = return_tag.as_deref()
-            && let Expr::AnonymousTag(label) = first.value
+        if !matches!(self.peek_past_indent(), Some(Token::Or | Token::Thus)) {
+            return Vec::new();
+        }
+        let Some(first) = return_tag.take() else {
+            return Vec::new();
+        };
+        let mut members = vec![*first];
+        let mut propositions = Vec::new();
+        let mut names = vec![first_name];
+        loop {
+            propositions.push(
+                self.eat(&Token::Thus)
+                    .then(|| self.parse_proof_proposition()),
+            );
+            if self.peek_past_indent() != Some(&Token::Or) {
+                break;
+            }
+            self.skip_indents();
+            self.advance();
+            self.skip_indents();
+            let name = if matches!(self.peek(), Some(Token::Id(_))) {
+                self.parse_name()
+            } else {
+                None
+            };
+            names.push(name);
+            let Some(member) = self.parse_type_expr(expr_parser) else {
+                // parse-expected-result-alternative
+                self.error_here(
+                    DiagnosticCode::Parse(ParseCode::Expected(
+                        ExpectedSyntaxCode::ResultAlternative,
+                    )),
+                    "expected a result alternative after `or`",
+                );
+                break;
+            };
+            members.push(member);
+        }
+        if names.iter().all(Option::is_none)
+            && members
+                .iter()
+                .all(|member| matches!(member.value, Expr::AnonymousTag(_)))
         {
-            let first_span = first.span_id;
-            let proposition = self
-                .eat(&Token::Thus)
-                .then(|| self.parse_proof_proposition());
-            anonymous_result_alternatives.push(Spanned {
-                value: ResultAlternative { label, proposition },
-                span_id: first_span,
-            });
-            *return_tag = None;
-            while self.eat(&Token::Or) {
-                let Some(Token::Tag(label)) = self.peek() else {
+            return members
+                .into_iter()
+                .zip(propositions)
+                .map(|(member, proposition)| {
+                    let Expr::AnonymousTag(label) = member.value else {
+                        unreachable!()
+                    };
+                    Spanned::new(ResultAlternative { label, proposition }, member.span_id)
+                })
+                .collect();
+        }
+        for ((member, proposition), name) in members.iter().zip(propositions).zip(names) {
+            if let Some(proposition) = proposition {
+                if let Some(name) = name {
+                    payload_postconditions.push(ast::PayloadPostcondition {
+                        name,
+                        ty: Box::new(member.clone()),
+                        proposition,
+                    });
+                } else {
+                    // parse-result-proof-requires-name
                     self.error(
-                        "parse-expected-result-alternative",
-                        "expected an anonymous result alternative after `or`",
-                        self.current_span(),
+                        DiagnosticCode::Parse(ParseCode::Syntax(
+                            SyntaxCode::ResultProofRequiresName,
+                        )),
+                        "a payload proof contract requires a named result",
+                        member.span_id,
                     );
-                    break;
-                };
-                let span_id = self.peek_span().unwrap_or(SpanId::INVALID);
-                let label = self.intern(label);
-                self.advance();
-                let proposition = self
-                    .eat(&Token::Thus)
-                    .then(|| self.parse_proof_proposition());
-                anonymous_result_alternatives.push(Spanned {
-                    value: ResultAlternative { label, proposition },
-                    span_id,
-                });
+                }
             }
         }
-        anonymous_result_alternatives
+        *return_tag = members
+            .into_iter()
+            .reduce(|lhs, rhs| {
+                let span_id = self.merge_span(lhs.span_id, rhs.span_id);
+                Spanned::new(
+                    Expr::Binary(ast::Binary::new(
+                        Typed::infer(lhs.value, lhs.span_id),
+                        ast::BinOp::LogicalOr,
+                        Typed::infer(rhs.value, rhs.span_id),
+                    )),
+                    span_id,
+                )
+            })
+            .map(Box::new);
+        Vec::new()
     }
 
     pub fn parse_bind(&mut self, expr_parser: ExprFn) -> Option<Bind> {
@@ -104,23 +163,42 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         let (params, conventions, param_groups, param_refinements) = self.parse_params(expr_parser);
 
+        let mut domain_type = None;
         let mut return_refinement = if self.eat(&Token::Is) {
             let mut predicates = if self.eat(&Token::In) {
-                match self.parse_symbolic_range() {
-                    Some((min, max)) => vec![PredicateExpr::Ge(min), PredicateExpr::Le(max)],
-                    None => {
-                        self.error(
-                            "parse-expected-integer-range",
-                            "expected integer range after 'in'",
-                            self.current_span(),
-                        );
-                        Vec::new()
+                if matches!(self.peek(), Some(Token::Tag(_) | Token::SelfTag)) {
+                    let ty = self.parse_type_expr(expr_parser)?;
+                    domain_type = Some(Box::new(Spanned::new(
+                        Expr::IntegerDomain(Box::new(Typed::infer(ty.value, ty.span_id))),
+                        ty.span_id,
+                    )));
+                    Vec::new()
+                } else {
+                    match self.parse_symbolic_range() {
+                        Some((min, max)) => vec![PredicateExpr::Ge(min), PredicateExpr::Le(max)],
+                        None => {
+                            // parse-expected-integer-range
+                            self.error_here(
+                                DiagnosticCode::Parse(ParseCode::Expected(
+                                    ExpectedSyntaxCode::IntegerRange,
+                                )),
+                                "expected integer range after 'in'",
+                            );
+                            Vec::new()
+                        }
                     }
                 }
             } else {
                 vec![self.parse_one_predicate()]
             };
             while self.eat(&Token::And) {
+                if domain_type.is_some() {
+                    // parse-domain-extra-refinement
+                    self.error_here(
+                        DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::DomainExtraRefinement)),
+                        "additional refinements on `is in T` are not supported",
+                    );
+                }
                 predicates.push(self.parse_one_predicate());
             }
             Some(if predicates.len() == 1 {
@@ -132,8 +210,21 @@ impl<'src, 't> TokenCursor<'src, 't> {
             None
         };
 
-        let (return_type_name, mut return_tag, type_annotation, type_annotation_qual) =
+        let (mut return_type_name, mut return_tag, type_annotation, type_annotation_qual) =
             self.parse_return_type_part(expr_parser);
+        if domain_type.is_some() {
+            return_tag = domain_type;
+            return_refinement = None;
+        }
+        if self.is_at(&Token::Or)
+            && return_tag.is_none()
+            && let Some(name) = return_type_name.take()
+        {
+            return_tag = Some(Box::new(Spanned::new(
+                Expr::AnonymousTag(name),
+                self.last_consumed_span(),
+            )));
+        }
         let mut named_results = Vec::new();
         if let Some(name) = return_type_name {
             let name_span = self.last_consumed_span();
@@ -169,16 +260,19 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 None
             };
             let Some(ty) = self.parse_type_expr(expr_parser) else {
-                self.error(
-                    "parse-expected-result-type",
+                // parse-expected-result-type
+                self.error_here(
+                    DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::ResultType)),
                     "expected a result type after ','",
-                    self.current_span(),
                 );
                 break;
             };
-            if name.is_some() && named_results.iter().any(|result| result.name == name) {
+            if let Some(_name1) = name
+                && named_results.iter().any(|result| result.name == name)
+            {
+                // parse-duplicate-result-name
                 self.error(
-                    "parse-duplicate-result-name",
+                    DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::DuplicateResultName)),
                     format!("duplicate named result `{}`", name.unwrap()),
                     name_span,
                 );
@@ -205,7 +299,22 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 PredicateExpr::And(predicates)
             });
         }
-        let anonymous_result_alternatives = self.parse_result_alternatives(&mut return_tag);
+        let mut payload_postconditions = Vec::new();
+        let first_name =
+            if named_results.len() == 1 && matches!(self.peek(), Some(Token::Thus | Token::Or)) {
+                let result = named_results.pop().unwrap();
+                return_type_name = None;
+                return_tag = Some(result.ty);
+                result.name
+            } else {
+                None
+            };
+        let anonymous_result_alternatives = self.parse_result_alternatives(
+            &mut return_tag,
+            expr_parser,
+            first_name,
+            &mut payload_postconditions,
+        );
         if return_type_name.is_none()
             && return_tag.is_none()
             && type_annotation.is_none()
@@ -277,100 +386,16 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 groups
             });
 
-        let assembly_items = attrs.as_ref().and_then(|attrs| {
-            attrs.raw_attributes.as_ref().map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| match item {
-                        AttributeItem::Call { name, args, .. } if name.as_str() == "asm" => {
-                            Some(args.clone())
-                        }
-                        AttributeItem::Flag { name, .. } if name.as_str() == "asm" => {
-                            Some(Vec::new())
-                        }
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-            })
-        });
-        if let Some(items) = assembly_items
-            && !items.is_empty()
-        {
-            self.error(
-                "parse-asm-declaration-migration",
-                "declaration-level `#asm` is removed; put `#asm(specification, name: value, ...)` in the function expression body",
-                name_span,
-            );
-            if self.is_at(&Token::Colon) || self.is_at(&Token::ColonEq) {
-                self.error(
-                    "parse-asm-with-body",
-                    "`#asm` callables cannot also have a Gin body",
-                    name_span,
-                );
-            }
-            if self.is_at(&Token::Extern) {
-                self.error(
-                    "parse-asm-with-extern",
-                    "`#asm` callables must not also use `extern`",
-                    name_span,
-                );
-                self.advance();
-            }
-            if items.len() > 1 {
-                self.error(
-                    "parse-duplicate-asm-attribute",
-                    "a callable may have only one `#asm` attribute",
-                    name_span,
-                );
-            }
-            let Some(_expr) = items[0].first().cloned() else {
-                self.error(
-                    "parse-asm-missing-argument",
-                    "`#asm` requires exactly one expression argument",
-                    name_span,
-                );
-                return None;
-            };
-            if items[0].len() != 1 {
-                self.error(
-                    "parse-asm-argument-count",
-                    "`#asm` requires exactly one expression argument",
-                    name_span,
-                );
-                return None;
-            }
-            let operator = BindOperator::FreshMutable;
-            let mut bind = Bind::new(name, name_span, BindValue::Unassigned)
-                .with_params(params)
-                .with_return_type_name(return_type_name)
-                .with_named_results(named_results.clone())
-                .with_doc(doc_before);
-            bind.operator = operator;
-            if let Some(attrs) = attrs {
-                bind = bind.with_attributes(attrs);
-            }
-            bind.param_conventions = conventions;
-            bind.group_params = group_params;
-            bind.param_groups = param_groups;
-            bind.param_refinements = param_refinements;
-            bind.return_tag = return_tag;
-            bind.return_refinement = return_refinement;
-            bind.anonymous_result_alternatives = anonymous_result_alternatives;
-            bind.type_annotation = type_annotation;
-            bind.type_annotation_qual = type_annotation_qual;
-            return Some(bind);
-        }
-
         let (value, postfix_doc) = if self.eat(&Token::Extern) {
+            // parse-removed-extern
             self.error(
-                "parse-removed-extern",
-                "`extern` has been removed; provide a Gin or assembly body",
+                DiagnosticCode::Parse(ParseCode::Removed(RemovedSyntaxCode::Extern)),
+                "`extern` has been removed; provide a Gin body using #emit for native instructions",
                 name_span,
             );
             (BindValue::Unassigned, None)
         } else if return_tag.is_some() && !self.is_at(&Token::Colon) && !self.is_at(&Token::ColonEq)
         {
-            // `name Type` on its own line — declared, assigned later via `name: value`.
             (BindValue::Unassigned, None)
         } else {
             let operator = if self.eat(&Token::ColonEq) {
@@ -382,10 +407,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
             } else if self.eat(&Token::Colon) {
                 BindOperator::FreshMutable
             } else {
-                self.error(
-                    "parse-expected-bind-operator",
+                // parse-expected-bind-operator
+                self.error_here(
+                    DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::BindOperator)),
                     "expected ':' or ':='",
-                    self.current_span(),
                 );
                 return None;
             };
@@ -407,6 +432,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             bind.return_tag = return_tag;
             bind.return_refinement = return_refinement;
             bind.anonymous_result_alternatives = anonymous_result_alternatives;
+            bind.payload_postconditions = payload_postconditions;
             bind.type_annotation = type_annotation;
             bind.type_annotation_qual = type_annotation_qual;
             return Some(bind);
@@ -430,6 +456,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         bind.return_tag = return_tag;
         bind.return_refinement = return_refinement;
         bind.anonymous_result_alternatives = anonymous_result_alternatives;
+        bind.payload_postconditions = payload_postconditions;
         bind.type_annotation = type_annotation;
         bind.type_annotation_qual = type_annotation_qual;
 
@@ -437,17 +464,22 @@ impl<'src, 't> TokenCursor<'src, 't> {
     }
 
     pub(crate) fn parse_proof_proposition(&mut self) -> ProofProposition {
-        self.parse_proof_or()
-    }
-
-    fn parse_proof_or(&mut self) -> ProofProposition {
         let mut proposition = self.parse_proof_and();
         while self.is_at(&Token::Or)
             && !(matches!(self.peek_at(1), Some(Token::Tag(_)))
                 && matches!(
                     self.peek_at(2),
-                    Some(Token::Thus) | Some(Token::Or) | Some(Token::Colon)
+                    None | Some(
+                        Token::Thus
+                            | Token::Or
+                            | Token::Colon
+                            | Token::Newline
+                            | Token::Indent
+                            | Token::ParenOpen
+                    )
                 ))
+            && !(matches!(self.peek_at(1), Some(Token::Id(_)))
+                && matches!(self.peek_at(2), Some(Token::Tag(_))))
         {
             self.advance();
             proposition =
@@ -472,8 +504,9 @@ impl<'src, 't> TokenCursor<'src, 't> {
         if self.eat(&Token::ParenOpen) {
             let proposition = self.parse_proof_proposition();
             if !self.eat(&Token::ParenClose) {
+                // parse-expected-proof-close
                 self.error(
-                    "parse-expected-proof-close",
+                    DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::ProofClose)),
                     "expected `)` after proof proposition",
                     self.current_span(),
                 );
@@ -488,10 +521,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
         if self.eat(&Token::In) {
             let start = self.parse_proof_term();
             if !self.eat(&Token::To) {
-                self.error(
-                    "parse-expected-proof-range",
+                // parse-expected-proof-range
+                self.error_here(
+                    DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::ProofRange)),
                     "expected `to` in proof range",
-                    self.current_span(),
                 );
             }
             let end = self.parse_proof_term();
@@ -509,10 +542,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
             Some(Token::Greater) => ProofRelation::Greater,
             Some(Token::GreaterEq) => ProofRelation::GreaterOrEqual,
             _ => {
-                self.error(
-                    "parse-expected-proof-relation",
+                // parse-expected-proof-relation
+                self.error_here(
+                    DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::ProofRelation)),
                     "expected a mathematical relation in proof proposition",
-                    self.current_span(),
                 );
                 return ProofProposition::Compare {
                     left,
@@ -563,10 +596,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
             );
         }
         let Some((token, _)) = self.advance() else {
-            self.error(
-                "parse-expected-proof-term",
+            // parse-expected-proof-term
+            self.error_here(
+                DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::ProofTerm)),
                 "expected an integer term in proof proposition",
-                self.current_span(),
             );
             return ProofTerm::Value(i256::I256::from(0));
         };
@@ -577,32 +610,25 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 if name.as_str() == "PowerOfTwo" && self.eat(&Token::ParenOpen) {
                     let argument = self.parse_proof_term();
                     if !self.eat(&Token::ParenClose) {
+                        // parse-expected-proof-close
                         self.error(
-                            "parse-expected-proof-close",
+                            DiagnosticCode::Parse(ParseCode::Expected(
+                                ExpectedSyntaxCode::ProofClose,
+                            )),
                             "expected `)` after `PowerOfTwo` term",
                             self.current_span(),
                         );
                     }
                     ProofTerm::PowerOfTwo(Box::new(argument))
                 } else {
-                    ProofTerm::Name(name)
+                    ProofTerm::Name(self.parse_proof_member_path(name))
                 }
             }
-            Token::SelfInstance => ProofTerm::Name(Intern::from_ref("self")),
+            Token::SelfInstance => {
+                ProofTerm::Name(self.parse_proof_member_path(Intern::from_ref("self")))
+            }
             Token::Pound => {
-                let kind = match self.advance() {
-                    Some((Token::Id("size"), _)) => ast::TargetQueryKind::Size,
-                    Some((Token::Id("alignment"), _)) => ast::TargetQueryKind::Alignment,
-                    Some((Token::Id("index_bits"), _)) => ast::TargetQueryKind::IndexBits,
-                    _ => {
-                        self.error(
-                            "parse-expected-query-name",
-                            "expected compile-time query name after '#'",
-                            self.current_span(),
-                        );
-                        ast::TargetQueryKind::Size
-                    }
-                };
+                let kind = self.parse_target_query_kind();
                 self.expect(&Token::ParenOpen);
                 let operand = self.parse_type_reference().unwrap_or_else(|| {
                     ast::TypeReference::Nominal(Intern::from_ref("__parse_error"))
@@ -613,8 +639,9 @@ impl<'src, 't> TokenCursor<'src, 't> {
             Token::ParenOpen => {
                 let term = self.parse_proof_term();
                 if !self.eat(&Token::ParenClose) {
+                    // parse-expected-proof-close
                     self.error(
-                        "parse-expected-proof-close",
+                        DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::ProofClose)),
                         "expected `)` after proof term",
                         self.current_span(),
                     );
@@ -622,10 +649,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 term
             }
             _ => {
-                self.error(
-                    "parse-expected-proof-term",
+                // parse-expected-proof-term
+                self.error_here(
+                    DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::ProofTerm)),
                     "expected an integer term in proof proposition",
-                    self.current_span(),
                 );
                 ProofTerm::Value(i256::I256::from(0))
             }
@@ -647,8 +674,9 @@ impl<'src, 't> TokenCursor<'src, 't> {
             return None;
         }
         if matches!(self.peek_at(1), Some(Token::BracketOpen)) {
+            // parse-removed-grouped-attributes
             self.error(
-                "parse-removed-grouped-attributes",
+                DiagnosticCode::Parse(ParseCode::Removed(RemovedSyntaxCode::GroupedAttributes)),
                 "grouped attributes are no longer valid; write each attribute as `#name`",
                 self.span_at(self.pos() + 1),
             );
@@ -675,10 +703,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
             if let Some(item) = self.parse_one_attribute_item() {
                 items.push(item);
             } else {
-                self.error(
-                    "parse-expected-attribute",
+                // parse-expected-attribute
+                self.error_here(
+                    DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::Attribute)),
                     "expected attribute name after `#`",
-                    self.current_span(),
                 );
             }
 
@@ -699,20 +727,20 @@ impl<'src, 't> TokenCursor<'src, 't> {
                             Some(Token::Comment(_) | Token::DocComment(_))
                         )
                     {
-                        self.error(
-                            "parse-detached-attribute",
+                        // parse-detached-attribute
+                        self.error_here(
+                            DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::DetachedAttribute)),
                             "attribute must be on the line directly above the item it attaches to",
-                            self.current_span(),
                         );
                     }
                     break;
                 }
                 Some(Token::Pound) => continue,
                 _ => {
-                    self.error(
-                        "parse-attribute-line",
+                    // parse-attribute-line
+                    self.error_here(
+                        DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::AttributeLine)),
                         "attribute must appear on the line directly above the item it attaches to",
-                        self.current_span(),
                     );
                     break;
                 }
@@ -724,20 +752,33 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
     pub(crate) fn parse_one_attribute_item(&mut self) -> Option<AttributeItem> {
         match self.peek()? {
-            Token::Id(name) | Token::Tag(name) => {
-                let name_interned = self.intern(name);
+            Token::Id(_) | Token::Tag(_) | Token::Private => {
+                let name_interned = match self.peek()? {
+                    Token::Id(name) | Token::Tag(name) => self.intern(name),
+                    Token::Private => self.intern("private"),
+                    _ => unreachable!(),
+                };
                 let name_span = self.peek_span()?;
                 self.advance();
 
-                if name_interned.as_str() == "intrinsic" {
+                if name_interned.as_str() == "auto_destroy" {
+                    // parse-deferred-auto-destroy
                     self.error(
-                        "parse-removed-intrinsic",
+                        DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::DeferredAutoDestroy)),
+                        "`#auto_destroy` is deferred; call terminal methods explicitly",
+                        name_span,
+                    );
+                } else if name_interned.as_str() == "intrinsic" {
+                    // parse-removed-intrinsic
+                    self.error(
+                        DiagnosticCode::Parse(ParseCode::Removed(RemovedSyntaxCode::Intrinsic)),
                         "`#intrinsic` has been removed; use Gin operations or assembly",
                         name_span,
                     );
                 } else if !COMPILER_QUERY_NAMES.contains(&name_interned.as_str()) {
+                    // parse-unknown-compiler-query
                     self.error(
-                        "parse-unknown-compiler-query",
+                        DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::UnknownCompilerQuery)),
                         format!("unknown compiler query `{}`", name_interned.as_str()),
                         name_span,
                     );
@@ -747,8 +788,9 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 if self.is_at(&Token::ParenOpen) {
                     let args = self.parse_paren_args().unwrap_or_default();
                     if name_interned.as_str() == "default" {
+                        // parse-removed-default-attribute
                         self.error(
-                            "parse-removed-default-attribute",
+                            DiagnosticCode::Parse(ParseCode::Removed(RemovedSyntaxCode::DefaultAttribute)),
                             "`#default` has been removed; use an explicit type or contextual construction",
                             name_span,
                         );
@@ -760,8 +802,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     })
                 } else {
                     if name_interned.as_str() == "auto" {
+                        // parse-removed-auto-attribute
                         self.error(
-                            "parse-removed-auto-attribute",
+                            DiagnosticCode::Parse(ParseCode::Removed(
+                                RemovedSyntaxCode::AutoAttribute,
+                            )),
                             "`#auto` has been removed; ownership is linear by default",
                             name_span,
                         );
@@ -777,6 +822,9 @@ impl<'src, 't> TokenCursor<'src, 't> {
     }
 
     fn parse_return_type_part(&mut self, expr_parser: ExprFn) -> ReturnTypePart {
+        if matches!(self.raw_peek(), Some(Token::Newline | Token::Dedent)) {
+            return (None, None, None, None);
+        }
         // lowercase id → named union return type (e.g., `print(a) result:`)
         if let Some(name) = self.parse_id() {
             return (Some(name), None, None, None);
@@ -812,7 +860,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         // checkpoint + allocation when this pattern is absent (e.g., simple `Str`, `Int`).
         if matches!(self.peek_at(1), Some(Token::Dot)) {
             let checkpoint = self.checkpoint();
-            if let Some(path) = self.parse_tag_variant_path() {
+            if let Some(path) = self.parse_tag_rooted_path(true) {
                 if self.is_at(&Token::ParenOpen) {
                     let args = self.parse_type_annotation_args(expr_parser);
                     if !args.is_empty() {
@@ -824,7 +872,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 return (
                     None,
                     Some(Box::new(Spanned {
-                        value: Expr::FnCall(ast::FnCall { path, args: None }),
+                        value: path_call(path),
                         span_id: span,
                     })),
                     None,
@@ -935,7 +983,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     break;
                 }
 
-                args.push(expr_parser(self));
+                args.push(self.parse_type_argument(expr_parser));
 
                 if self.is_at(&Token::ParenClose) {
                     break;
@@ -945,10 +993,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     continue;
                 }
 
-                self.error(
-                    "parse-expected-annotation-separator",
+                // parse-expected-annotation-separator
+                self.error_here(
+                    DiagnosticCode::Parse(ParseCode::Expected(
+                        ExpectedSyntaxCode::AnnotationSeparator,
+                    )),
                     "expected ',' or newline between type annotation arguments",
-                    self.current_span(),
                 );
                 break;
             }
@@ -967,22 +1017,24 @@ impl<'src, 't> TokenCursor<'src, 't> {
         if self.is_at(&Token::Extern) {
             let span = self.current_span();
             self.advance();
+            // parse-removed-extern
             self.error(
-                "parse-removed-extern",
-                "`extern` has been removed; provide a Gin or assembly body",
+                DiagnosticCode::Parse(ParseCode::Removed(RemovedSyntaxCode::Extern)),
+                "`extern` has been removed; provide a Gin body using #emit for native instructions",
                 span,
             );
             return (BindValue::Unassigned, None);
         }
 
-        if self.is_at(&Token::Newline) && matches!(self.peek_at(1), Some(Token::Return)) {
-            self.advance();
-        }
-
         if self.is_at(&Token::Return) {
-            let ret = self
-                .parse_return(expr_parser)
-                .expect("return token checked");
+            if matches!(self.raw_peek(), Some(Token::Newline)) {
+                // parse-expected-indent
+                self.error_here(
+                    DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::Indentation)),
+                    "indent the return inside the bind body",
+                );
+            }
+            let ret = self.parse_return().expect("return token checked");
             return (
                 BindValue::Body {
                     exprs: Vec::new(),
@@ -992,47 +1044,34 @@ impl<'src, 't> TokenCursor<'src, 't> {
             );
         }
 
-        // Indent → multi-line body
         if self.is_at(&Token::Indent) {
-            let _has_indent = self.eat(&Token::Indent);
-
+            self.advance();
             let exprs = self.parse_body_exprs(expr_parser);
-
-            let dedented = self.eat(&Token::Dedent);
-            if !dedented && self.is_at(&Token::Return) {
-                self.error(
-                    "parse-indented-return",
-                    "return must align with the bind name; dedent it to close the bind",
-                    self.peek_span().unwrap_or_else(|| self.current_span()),
-                );
+            self.expect(&Token::Dedent);
+            let mut exprs = exprs;
+            if let Some(Typed {
+                value: Expr::Return(_),
+                ..
+            }) = exprs.last()
+            {
+                let Expr::Return(ret) = exprs.pop().unwrap().value else {
+                    unreachable!()
+                };
+                return (BindValue::Body { exprs, ret }, None);
             }
-
-            let ret = self.parse_return(expr_parser).unwrap_or_else(|| {
-                self.error(
-                    "parse-expected-return",
-                    "expected 'return' after bind body",
-                    self.current_span(),
-                );
-                Return {
-                    values: Vec::new(),
-                    span_id: self.current_span(),
-                }
-            });
-            if !dedented {
-                self.eat(&Token::Dedent);
-            }
-            return (BindValue::Body { exprs, ret }, None);
+            let span = match (exprs.first(), exprs.last()) {
+                (Some(first), Some(last)) => self.merge_span(first.span_id, last.span_id),
+                _ => self.current_span(),
+            };
+            return (
+                BindValue::Expr(Box::new(Typed::infer(Expr::Block(exprs), span))),
+                None,
+            );
         }
 
         // Otherwise → single expression with optional postfix doc comment
         let expr = self.parse_sequence_value();
-        // Only consume a doc comment if it's on the same line (no intervening newline),
-        // otherwise it belongs to the next top-level declaration.
-        let doc = if matches!(self.peek_at(0), Some(Token::DocComment(_))) {
-            self.parse_doc_comment()
-        } else {
-            None
-        };
+        let doc = self.parse_same_line_doc();
 
         (BindValue::Expr(Box::new(expr)), doc)
     }
@@ -1063,7 +1102,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                           explicit: bool,
                           group: Option<GroupPath>,
                           refinement: Option<PredicateExpr>| {
-            params.insert(key, kind);
+            let previous = params.insert(key, kind);
             if explicit {
                 conventions.insert(key, conv);
             }
@@ -1073,6 +1112,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             if let Some(refinement) = refinement {
                 param_refinements.insert(key, refinement);
             }
+            previous
         };
 
         loop {
@@ -1080,8 +1120,9 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 self.parse_one_param(expr_parser)
             {
                 if seen_default && !matches!(kind.kind, ParameterKind::Default(_)) {
+                    // parse-parameter-after-default
                     self.error(
-                        "parse-parameter-after-default",
+                        DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::ParameterAfterDefault)),
                         format!(
                             "positional parameter `{}` appears after a default parameter",
                             key.as_str()
@@ -1092,7 +1133,17 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 if matches!(kind.kind, ParameterKind::Default(_)) {
                     seen_default = true;
                 }
-                ingest(key, kind, conv, explicit, group, refinement);
+                let name_span = kind.name_span;
+                if ingest(key, kind, conv, explicit, group, refinement).is_some()
+                    && key.as_str() != "_"
+                {
+                    // parse-duplicate-parameter
+                    self.error(
+                        DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::DuplicateParameter)),
+                        format!("parameter `{key}` is already declared in this parameter list"),
+                        name_span,
+                    );
+                }
             }
 
             if self.is_at(&Token::ParenClose) {
@@ -1103,10 +1154,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 continue;
             }
 
-            self.error(
-                "parse-expected-param-separator",
+            // parse-expected-param-separator
+            self.error_here(
+                DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::ParameterSeparator)),
                 "expected ',' or newline between parameters",
-                self.current_span(),
             );
             break;
         }
@@ -1121,12 +1172,17 @@ impl<'src, 't> TokenCursor<'src, 't> {
         if matches!(self.peek(), Some(Token::Ref | Token::Mut))
             && matches!(self.peek_at(1), Some(Token::Id(_)))
         {
-            self.error(
-                "parse-removed-parameter-convention-syntax",
-                "removed syntax in parameter position: use `x` for terminal or `x ref`/`x mut`/`x own`",
-                self.current_span(),
-            );
+            // parse-removed-parameter-convention-syntax
+            self.error_here(DiagnosticCode::Parse(ParseCode::Removed(RemovedSyntaxCode::ParameterConventionSyntax)), "removed syntax in parameter position: use `x` for terminal or `x ref`/`x mut`/`x own`");
             self.advance();
+        }
+
+        if self.is_at(&Token::SelfTag) && matches!(self.peek_at(1), Some(Token::Tag(_))) {
+            // parse-reserved-name
+            self.error_here(
+                DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::ReservedName)),
+                "`Self` cannot name a parameter",
+            );
         }
 
         // Positional: bare Tag → (tag_name, ParameterKind::Tagged(tag))
@@ -1155,11 +1211,8 @@ impl<'src, 't> TokenCursor<'src, 't> {
             Some(Token::Id(n)) => {
                 let name_span = self.peek_span()?;
                 if *n == "eat" {
-                    self.error(
-                        "parse-removed-parameter-convention-syntax",
-                        "removed syntax in parameter position: use `x` for terminal or `x ref`/`x mut`/`x own`",
-                        self.current_span(),
-                    );
+                    // parse-removed-parameter-convention-syntax
+                    self.error_here(DiagnosticCode::Parse(ParseCode::Removed(RemovedSyntaxCode::ParameterConventionSyntax)), "removed syntax in parameter position: use `x` for terminal or `x ref`/`x mut`/`x own`");
                     return None;
                 }
                 let id = self.intern(n);
@@ -1201,11 +1254,33 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         if self.eat(&Token::Is) {
             if !self.eat(&Token::In) {
-                self.error(
-                    "parse-expected-integer-range",
-                    "expected 'in' after parameter 'is'",
-                    self.current_span(),
-                );
+                let proposition = self.parse_proof_proposition();
+                return Some((
+                    name.0,
+                    Parameter::new(name.1, ParameterKind::Proposition(Box::new(proposition))),
+                    convention,
+                    explicit,
+                    group_name,
+                    None,
+                ));
+            }
+            if matches!(self.peek(), Some(Token::Tag(_) | Token::SelfTag)) {
+                let ty = self.parse_type_expr(expr_parser)?;
+                let refinement = self.parse_parameter_refinement();
+                return Some((
+                    name.0,
+                    Parameter::new(
+                        name.1,
+                        ParameterKind::Tagged(Box::new(Spanned::new(
+                            Expr::IntegerDomain(Box::new(Typed::infer(ty.value, ty.span_id))),
+                            ty.span_id,
+                        ))),
+                    ),
+                    convention,
+                    explicit,
+                    group_name,
+                    refinement,
+                ));
             }
             let refinement = self.parse_symbolic_range().map(|(min, max)| {
                 let mut predicates = vec![PredicateExpr::Ge(min), PredicateExpr::Le(max)];
@@ -1235,8 +1310,9 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
         {
             let (legacy_convention, spelling) = legacy_convention;
+            // parse-trailing-parameter-convention
             self.error(
-                "parse-trailing-parameter-convention",
+                DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::TrailingParameterConvention)),
                 format!(
                     "parameter convention `{spelling}` must follow the parameter name; use `{name} {spelling} <type>`"
                 ),
@@ -1260,7 +1336,14 @@ impl<'src, 't> TokenCursor<'src, 't> {
             (_, kind) => kind,
         };
         parameter.kind = kind;
-        let refinement = if self.eat(&Token::And) {
+        let refinement = self.parse_parameter_refinement();
+        Some((
+            name, parameter, convention, explicit, group_name, refinement,
+        ))
+    }
+
+    fn parse_parameter_refinement(&mut self) -> Option<PredicateExpr> {
+        if self.eat(&Token::And) {
             let mut predicates = vec![self.parse_one_predicate()];
             while self.eat(&Token::And) {
                 predicates.push(self.parse_one_predicate());
@@ -1272,13 +1355,19 @@ impl<'src, 't> TokenCursor<'src, 't> {
             })
         } else {
             None
-        };
-        Some((
-            name, parameter, convention, explicit, group_name, refinement,
-        ))
+        }
+    }
+
+    pub(crate) fn parse_same_line_doc(&mut self) -> Option<DocComment> {
+        if matches!(self.raw_peek(), Some(Token::DocComment(_))) {
+            self.parse_doc_comment()
+        } else {
+            None
+        }
     }
 
     pub(crate) fn parse_doc_comment(&mut self) -> Option<DocComment> {
+        let start = self.peek_span()?;
         let first = match self.peek()? {
             Token::DocComment(text) => {
                 let stripped = text
@@ -1294,7 +1383,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         // Fast path: single-line doc comment (most common)
         if !matches!(self.peek(), Some(Token::DocComment(_))) {
-            let doc = DocComment { value: first };
+            let doc = DocComment::new(first).with_span(start);
             return if doc.is_empty() { None } else { Some(doc) };
         }
 
@@ -1310,9 +1399,8 @@ impl<'src, 't> TokenCursor<'src, 't> {
             lines.push(stripped);
         }
 
-        let doc = DocComment {
-            value: lines.join("\n"),
-        };
+        let span = self.merge_span(start, self.last_consumed_span());
+        let doc = DocComment::new(lines.join("\n")).with_span(span);
         if doc.is_empty() { None } else { Some(doc) }
     }
 }

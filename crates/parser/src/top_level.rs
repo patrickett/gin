@@ -1,15 +1,18 @@
+use ast::folder::{Folder, ParameterSubstitution};
 use ast::span::{SpanId, SpanTable};
+use diagnostic::DiagnosticCode;
+use diagnostic::code::{ExpectedSyntaxCode, ParseCode, SyntaxCode};
 use lexer::Token;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use ast::warnings::BindWarningsExt;
 use ast::{
-    Bind, BindValue, Declare, DeclareValue, Expr, FileAst, HasSpanId, ParameterKind, Spanned,
-    Typed, Variant,
+    Bind, BindValue, Declare, DeclareValue, Expr, FileAst, HasSpanId, Spanned, Typed, Variant,
 };
 use indexmap::IndexMap;
 use internment::Intern;
 
+use crate::SourceDeclaration;
 use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
 
@@ -17,6 +20,25 @@ enum TopLevelValue {
     Tag(Box<Declare>),
     Bind(Box<Bind>),
     Expr(Box<Typed<Expr>>),
+}
+
+fn binding_name(bind: &Bind) -> Intern<String> {
+    let Some(receiver) = bind.receiver_type_surface() else {
+        return bind.name;
+    };
+    let name = match &receiver.value {
+        Expr::AnonymousTag(name) => *name,
+        Expr::TagCall(call) => call.name,
+        Expr::FnCall(call) => call
+            .path
+            .value
+            .segments
+            .last()
+            .copied()
+            .unwrap_or(call.path.value.root),
+        _ => Intern::from_ref("<receiver>"),
+    };
+    Intern::new(format!("{name}.{}", bind.name))
 }
 
 impl TokenCursor<'_, '_> {
@@ -35,16 +57,28 @@ impl TokenCursor<'_, '_> {
     /// Parse a raw, pre-lowering AST for parser-internal and test usage only.
     /// Callers should use [`parse_file`](Self::parse_file) for canonicalized
     /// outputs.
-    fn parse_file_without_lowering(&mut self, expr_parser: ExprFn) -> FileAst {
+    pub(crate) fn parse_file_without_lowering(&mut self, expr_parser: ExprFn) -> FileAst {
+        self.parse_file_recording(expr_parser, None)
+    }
+
+    pub(crate) fn parse_file_recording(
+        &mut self,
+        expr_parser: ExprFn,
+        mut declarations: Option<&mut Vec<SourceDeclaration>>,
+    ) -> FileAst {
         let module_doc = self.parse_module_doc();
-        let imports = self.parse_imports();
+        let imports = self.parse_imports(declarations.as_deref_mut());
 
         let mut public_elements = Vec::new();
         loop {
             self.advance_push();
+            let start = self.pos();
             match self.parse_element_line(expr_parser) {
                 Some(el) => {
                     self.advance_pop();
+                    if let Some(declarations) = &mut declarations {
+                        self.record_source_declaration(start, &el, declarations);
+                    }
                     public_elements.push(el);
                 }
                 None => {
@@ -60,9 +94,13 @@ impl TokenCursor<'_, '_> {
             self.skip_newlines();
             loop {
                 self.advance_push();
+                let start = self.pos();
                 match self.parse_element_line(expr_parser) {
                     Some(el) => {
                         self.advance_pop();
+                        if let Some(declarations) = &mut declarations {
+                            self.record_source_declaration(start, &el, declarations);
+                        }
                         private_elements.push(el);
                     }
                     None => {
@@ -105,10 +143,11 @@ impl TokenCursor<'_, '_> {
         for (name, declares) in tags_scratch {
             let mut declarations = declares.into_iter();
             if let Some(mut declaration) = declarations.next() {
-                for mut extension in declarations {
+                for extension in declarations {
                     declaration
                         .provided_traits
-                        .append(&mut extension.provided_traits);
+                        .extend(extension.provided_traits.iter().cloned());
+                    declaration.extensions.push(extension);
                 }
                 tags.insert(name, declaration);
             }
@@ -124,7 +163,16 @@ impl TokenCursor<'_, '_> {
                     .filter_map(|bind| bind.name_case_warning(self.span_table())),
             );
             parse_warnings.extend(binds.const_bind_after_declare_warnings(self.span_table()));
-            if let Some(bind) = binds.into_iter().last() {
+            if binds.len() > 1
+                && binds.iter().all(|bind| {
+                    bind.params.is_some() && !matches!(bind.value, BindValue::Unassigned)
+                })
+            {
+                for (index, bind) in binds.into_iter().enumerate() {
+                    let symbol = ast::DefinitionId::member(name, index as u32);
+                    defs.insert(symbol, bind);
+                }
+            } else if let Some(bind) = binds.into_iter().last() {
                 defs.insert(name, bind);
             }
         }
@@ -136,7 +184,9 @@ impl TokenCursor<'_, '_> {
         }
         Self::generate_return_type_unions(&defs, &mut tags, &private_defs);
 
-        FileAst {
+        self.todo_holes.sort_by_key(|span| span.start());
+        self.todo_holes.dedup();
+        let mut ast = FileAst {
             semantic_origin: None,
             module_doc,
             uses: imports,
@@ -150,18 +200,20 @@ impl TokenCursor<'_, '_> {
             symbol_aliases: Vec::new(),
             symbol_alias_spans: Vec::new(),
             span_table: SpanTable::new(),
+            line_breaks: self.source_line_breaks(),
+            blank_lines: Vec::new(),
             parse_warnings,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn parse_file_for_test(&mut self, expr_parser: ExprFn) -> FileAst {
-        self.parse_file_without_lowering(expr_parser)
+            todo_holes: std::mem::take(&mut self.todo_holes),
+        };
+        ast.parse_warnings
+            .extend(ast.hole_diagnostics(diagnostic::Category::Warn));
+        ast
     }
 
     fn parse_module_doc(&mut self) -> Option<ast::DocComment> {
         self.skip_newlines();
 
+        let start = self.peek_span()?;
         let first = match self.peek()? {
             Token::ModuleDocComment(text) => {
                 let stripped = text
@@ -177,7 +229,7 @@ impl TokenCursor<'_, '_> {
 
         // Fast path: single-line module doc
         if !matches!(self.peek(), Some(Token::ModuleDocComment(_))) {
-            let doc = ast::DocComment { value: first };
+            let doc = ast::DocComment::new(first).with_span(start);
             return if doc.is_empty() { None } else { Some(doc) };
         }
 
@@ -192,19 +244,25 @@ impl TokenCursor<'_, '_> {
             lines.push(stripped);
         }
 
-        let doc = ast::DocComment {
-            value: lines.join("\n"),
-        };
+        let span = self.merge_span(start, self.last_consumed_span());
+        let doc = ast::DocComment::new(lines.join("\n")).with_span(span);
         if doc.is_empty() { None } else { Some(doc) }
     }
 
-    fn parse_imports(&mut self) -> Vec<ast::Import> {
+    fn parse_imports(
+        &mut self,
+        mut declarations: Option<&mut Vec<SourceDeclaration>>,
+    ) -> Vec<ast::Import> {
         let mut imports = Vec::new();
         while self.is_at(&Token::Use) && !self.starts_reserved_binding() {
             self.advance_push();
+            let start = self.pos();
             match self.parse_import() {
                 Some(import) => {
                     self.advance_pop();
+                    if let Some(declarations) = &mut declarations {
+                        self.record_source_import(start, &import, declarations);
+                    }
                     imports.push(import);
                 }
                 None => {
@@ -214,6 +272,76 @@ impl TokenCursor<'_, '_> {
             }
         }
         imports
+    }
+
+    fn record_source_declaration(
+        &self,
+        start: usize,
+        element: &TopLevelValue,
+        declarations: &mut Vec<SourceDeclaration>,
+    ) {
+        let (owner, mut names) = match element {
+            TopLevelValue::Tag(declaration) => {
+                let owner = declaration.name.to_string();
+                let mut names = vec![owner.clone()];
+                names.extend(
+                    Self::materialize_has_method_binds(std::iter::once(declaration.as_ref()))
+                        .iter()
+                        .map(|bind| binding_name(bind).to_string()),
+                );
+                (owner, names)
+            }
+            TopLevelValue::Bind(bind) => {
+                let owner = binding_name(bind).to_string();
+                (owner.clone(), vec![owner])
+            }
+            TopLevelValue::Expr(_) => return,
+        };
+        names.sort();
+        names.dedup();
+        declarations.push(SourceDeclaration {
+            owner: Some(owner),
+            names,
+            range: self
+                .consumed_source_range(start)
+                .expect("named declaration consumed tokens"),
+        });
+    }
+
+    fn record_source_import(
+        &self,
+        start: usize,
+        import: &ast::Import,
+        declarations: &mut Vec<SourceDeclaration>,
+    ) {
+        let mut names = Vec::new();
+        for module in &import.0 {
+            match module.source {
+                ast::ImportSource::LocalBundle(_) | ast::ImportSource::CurrentModule { .. } => {
+                    names.extend(
+                        module
+                            .bound_name_spans()
+                            .into_iter()
+                            .map(|(name, _)| name.to_string()),
+                    );
+                }
+                _ => names.push(
+                    module
+                        .alias
+                        .map(|name| name.to_string())
+                        .unwrap_or_else(|| module.effective_name()),
+                ),
+            }
+        }
+        names.sort();
+        names.dedup();
+        declarations.push(SourceDeclaration {
+            owner: None,
+            names,
+            range: self
+                .consumed_source_range(start)
+                .expect("import consumed tokens"),
+        });
     }
 
     fn can_start_top_level_after_dedent(&self) -> bool {
@@ -240,8 +368,9 @@ impl TokenCursor<'_, '_> {
         }
 
         if matches!(self.peek(), Some(Token::ModuleDocComment(_))) {
+            // parse-module-doc-comment-position
             self.error(
-                "parse-module-doc-comment-position",
+                DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::ModuleDocumentationPosition)),
                 "module doc comments (--|) are only allowed at the start of the file",
                 self.peek_span().unwrap_or(SpanId::INVALID),
             );
@@ -333,13 +462,17 @@ impl TokenCursor<'_, '_> {
                 if let Some(next_tok) = self.peek_at(0)
                     && Self::can_start_expr(next_tok)
                 {
+                    // parse-expected-operator
                     self.error(
-                        "parse-expected-operator",
+                        DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::Operator)),
                         format!("expected operator between expressions, found {next_tok:?}"),
                         self.peek_span().unwrap_or(expr.span_id),
                     );
                 }
                 Some(TopLevelValue::Expr(Box::new(expr)))
+            }
+            Token::Pound if self.peek_at(start_offset + 1) == Some(&Token::Id("todo")) => {
+                Some(TopLevelValue::Expr(Box::new(expr_parser(self))))
             }
             Token::Pound => {
                 let checkpoint = self.checkpoint();
@@ -497,6 +630,13 @@ impl TokenCursor<'_, '_> {
     }
 
     fn parse_element_line(&mut self, expr_parser: ExprFn) -> Option<TopLevelValue> {
+        if self.is_at(&Token::Return) {
+            // parse-return-outside-function
+            self.error_here(
+                DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::ReturnOutsideFunction)),
+                "return must appear inside a function body",
+            );
+        }
         let el = self.parse_top_level_element(expr_parser)?;
         Some(el)
     }
@@ -558,68 +698,15 @@ impl TokenCursor<'_, '_> {
             let DeclareValue::Has(members) = &declare.value else {
                 continue;
             };
-            let receiver = if let Some(params) = &declare.params {
-                Expr::TagCall(ast::TagCall {
-                    name: declare.name,
-                    qual_path: None,
-                    args: params
-                        .iter()
-                        .map(|(name, parameter)| match &parameter.kind {
-                            ParameterKind::Generic => {
-                                Typed::infer(Expr::AnonymousTag(*name), parameter.name_span)
-                            }
-                            ParameterKind::Tagged(sp)
-                            | ParameterKind::ValueParam { ty: sp }
-                            | ParameterKind::Inferred { ty: sp } => {
-                                Typed::infer(sp.value.clone(), sp.span_id)
-                            }
-                            ParameterKind::Default(expr) => *expr.clone(),
-                        })
-                        .collect(),
-                })
-            } else {
-                Expr::AnonymousTag(declare.name)
-            };
-            let receiver = Spanned::new(receiver, declare.span);
+            let receiver = declare.receiver_surface();
 
             for member in members {
                 let ast::HasMember::Function(function) = member else {
                     continue;
                 };
-                let Some(body) = &function.body else {
-                    continue;
-                };
-                let value = match body {
-                    ast::HasMemberBody::Overrideable(value) | ast::HasMemberBody::Final(value) => {
-                        value.clone()
-                    }
-                };
-                let bind_name = function
-                    .qualifier
-                    .as_ref()
-                    .map_or(function.name, |qualifier| {
-                        Intern::new(format!(
-                            "{}.{}",
-                            qualifier.name.as_str(),
-                            function.name.as_str()
-                        ))
-                    });
-                let mut bind = Bind::new(bind_name, function.name_span, value)
-                    .with_params(Some(function.params.as_ref().clone()))
-                    .with_receiver_type(Some(Box::new(receiver.clone())))
-                    .with_doc(function.doc_comment.clone())
-                    .with_attributes(function.attributes.clone());
-                bind.param_conventions = function.conventions.as_ref().clone();
-                bind.param_groups = function.param_groups.as_ref().clone();
-                bind.param_refinements = function.param_refinements.as_ref().clone();
-                bind.return_tag = function.return_ty.clone();
-                bind.anonymous_result_alternatives = function.anonymous_result_alternatives.clone();
-                bind.operator = if matches!(body, ast::HasMemberBody::Final(_)) {
-                    ast::BindOperator::FreshImmutable
-                } else {
-                    ast::BindOperator::FreshMutable
-                };
-                binds.push(bind);
+                if let Some(bind) = function.implementation(receiver.clone()) {
+                    binds.push(bind);
+                }
             }
         }
         binds
@@ -638,23 +725,7 @@ impl TokenCursor<'_, '_> {
                 tags.entry(name).or_default().push(decl);
             }
             TopLevelValue::Bind(bind) => {
-                let name = if let Some(sp) = bind.receiver_type_surface() {
-                    let receiver_name = match &sp.value {
-                        ast::Expr::AnonymousTag(name) => *name,
-                        ast::Expr::TagCall(call) => call.name,
-                        ast::Expr::FnCall(call) => call
-                            .path
-                            .value
-                            .segments
-                            .last()
-                            .copied()
-                            .unwrap_or(call.path.value.root),
-                        _ => Intern::from_ref("<receiver>"),
-                    };
-                    Intern::<String>::new(format!("{}.{}", receiver_name, bind.name))
-                } else {
-                    bind.name
-                };
+                let name = binding_name(&bind);
                 defs.entry(name).or_default().push(*bind);
             }
             TopLevelValue::Expr(expr) => {
@@ -688,9 +759,21 @@ impl TokenCursor<'_, '_> {
             while i < decl.provided_traits.len() {
                 let trait_name = decl.provided_traits[i].trait_name;
                 if let Some(composed) = snapshot.get(&trait_name) {
+                    let subst: HashMap<_, _> = composed
+                        .params
+                        .iter()
+                        .flat_map(|p| p.keys())
+                        .zip(&decl.provided_traits[i].args)
+                        .map(|(name, arg)| (*name, arg.value.clone()))
+                        .collect();
                     for component in &composed.provided_traits {
                         if seen.insert(component.trait_name) {
-                            decl.provided_traits.push(component.clone());
+                            let mut component = component.clone();
+                            for arg in &mut component.args {
+                                let _ =
+                                    ParameterSubstitution::new(&subst).visit_expr(&mut arg.value);
+                            }
+                            decl.provided_traits.push(component);
                         }
                     }
                 }
@@ -721,6 +804,7 @@ impl TokenCursor<'_, '_> {
                         value: ast::Pattern::Nominal(name, span),
                         span_id: span,
                     }),
+                    discriminant: None,
                     result_ty: None,
                 })
                 .collect();

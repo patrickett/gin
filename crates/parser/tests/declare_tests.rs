@@ -45,7 +45,7 @@ fn rejects_generic_pointer_former() {
 
 #[test]
 fn parses_fixed_array_contract_structurally() {
-    let ast = "#fixed_array(element, count)\nBuffer(element Type, count BigInt) has\n"
+    let ast = "#fixed_array(element, count)\nBuffer(element, count BigInt) has\n"
         .parse_source_full()
         .ast;
     let buffer = ast.tags.get(&Intern::from_ref("Buffer")).expect("Buffer");
@@ -95,64 +95,22 @@ fn parses_same_line_declare_attributes() {
 }
 
 #[test]
-fn rejects_asm_attribute_as_callable_body_with_migration() {
-    let output = "#asm('gin-asm 1')\nwrite(fd Int) Int\n".parse_source_full();
-    let ast = &output.ast;
-    let write = ast
-        .defs
-        .get(&Intern::from_ref("write"))
-        .expect("write definition");
-    assert!(matches!(write.value, ast::BindValue::Unassigned));
-    assert!(
-        output
-            .symptoms
-            .iter()
-            .any(|diagnostic| diagnostic.code.slug() == "parse-asm-declaration-migration")
-    );
-}
-
-#[test]
-fn rejects_invalid_asm_attribute_arity_and_duplicates() {
+fn rejects_removed_assembly_attributes() {
     for source in [
         "#asm\nwrite(fd Int) Int\n",
-        "#asm('a', 'b')\nwrite(fd Int) Int\n",
-        "#asm('a')\n#asm('b')\nwrite(fd Int) Int\n",
+        "#asm('spec')\nwrite(fd Int) Int\n",
+        "#asm('a', 'b')\nwrite(fd Int) Int: return 0\n",
     ] {
         let output = source.parse_source_full();
         assert!(
             output.symptoms.iter().any(|diagnostic| {
-                diagnostic.code.slug() == "parse-asm-missing-argument"
-                    || diagnostic.code.slug() == "parse-asm-argument-count"
-                    || diagnostic.code.slug() == "parse-duplicate-asm-attribute"
+                diagnostic.code.slug() == "parse-unknown-compiler-query"
+                    && diagnostic.message.contains("asm")
             }),
-            "expected asm diagnostic for {source:?}: {:?}",
+            "{:?}",
             output.symptoms
         );
     }
-}
-
-#[test]
-fn rejects_asm_combined_with_extern() {
-    let output = r#"#asm('gin-asm 1')
-write(fd Int) Int extern"#
-        .parse_source_full();
-    assert!(
-        output
-            .symptoms
-            .iter()
-            .any(|diagnostic| diagnostic.code.slug() == "parse-asm-with-extern")
-    );
-}
-
-#[test]
-fn rejects_asm_combined_with_gin_body() {
-    let output = "#asm('gin-asm 1')\nwrite() Int: 0\n".parse_source_full();
-    assert!(
-        output
-            .symptoms
-            .iter()
-            .any(|diagnostic| diagnostic.code.slug() == "parse-asm-with-body")
-    );
 }
 
 #[test]
@@ -214,32 +172,14 @@ Allocator has
         Some(&ParamConvention::Observe),
     );
 
-    // Check return type: Slice(Byte)
+    let Expr::Binary(result) = &allocate.return_ty.as_ref().unwrap().value else {
+        panic!("expected a direct union return type");
+    };
+    assert_eq!(result.op, ast::BinOp::LogicalOr);
     assert!(
-        allocate.return_ty.is_some(),
-        "allocate should have return type"
+        matches!(&result.lhs.value, Expr::TagCall(call) if call.name.as_str() == "Slice" && call.args.len() == 1)
     );
-    let rt = &allocate.return_ty.as_ref().unwrap().value;
-    match rt {
-        Expr::TagCall(call) => {
-            assert_eq!(call.name.as_str(), "Slice");
-            assert_eq!(call.args.len(), 1);
-        }
-        other => panic!("allocate return type should be Generic, got {:?}", other),
-    }
-
-    // Check error type: AllocError
-    assert!(
-        allocate.error_ty.is_some(),
-        "allocate should have error type"
-    );
-    let et = &allocate.error_ty.as_ref().unwrap().value;
-    match et {
-        Expr::AnonymousTag(name) => {
-            assert_eq!(name.as_str(), "AllocError");
-        }
-        other => panic!("allocate error type should be AllocError, got {:?}", other),
-    }
+    assert!(matches!(&result.rhs.value, Expr::AnonymousTag(name) if name.as_str() == "AllocError"));
 
     let HasMember::Function(deallocate) = &members[1] else {
         panic!("deallocate should be a function member");
@@ -253,10 +193,6 @@ Allocator has
     assert!(
         deallocate.return_ty.is_none(),
         "deallocate should have no return type"
-    );
-    assert!(
-        deallocate.error_ty.is_none(),
-        "deallocate should have no error type"
     );
 }
 
@@ -272,4 +208,70 @@ fn marker_copy_syntax_rejected() {
         "symptoms: {:?}",
         output.symptoms
     );
+}
+
+#[test]
+fn provided_traits_preserve_generic_arguments_separately_from_fields() {
+    let parsed = "Div(result) has\n    divide(self, rhs Self) result\nWord has Div(Outcome)\n"
+        .parse_source_full();
+    assert!(parsed.symptoms.is_empty(), "{:?}", parsed.symptoms);
+    let provided = &parsed.ast.tags[&Intern::from_ref("Word")].provided_traits[0];
+    assert_eq!(provided.trait_name.as_str(), "Div");
+    assert!(provided.fields.is_empty());
+    assert!(
+        matches!(&provided.args[0].value, ast::Expr::AnonymousTag(name) if name.as_str() == "Outcome")
+    );
+}
+
+#[test]
+fn private_queries_attach_to_fields_and_methods() {
+    let source = "Thing(x) has\n    #private\n    address own x\n    visible x\n    #private\n    inspect(self ref) x: return deref self.address\n";
+    let parsed = source.parse_source_full();
+    assert!(parsed.symptoms.is_empty(), "{:?}", parsed.symptoms);
+    let declaration = &parsed.ast.tags[&Intern::from_ref("Thing")];
+    let DeclareValue::Has(members) = &declaration.value else {
+        panic!("expected members")
+    };
+    let HasMember::Property(field) = &members[0] else {
+        panic!("expected field")
+    };
+    assert!(field.owned_storage);
+    assert!(field.attributes.is_private());
+    let HasMember::Property(field) = &members[1] else {
+        panic!("expected field")
+    };
+    assert!(!field.attributes.is_private());
+    let HasMember::Function(method) = &members[2] else {
+        panic!("expected method")
+    };
+    assert!(method.attributes.is_private());
+}
+
+#[test]
+fn sealed_is_no_longer_a_compiler_query() {
+    let parsed = "#sealed\nThing has value x\n".parse_source_full();
+    assert!(
+        parsed
+            .symptoms
+            .iter()
+            .any(|flaw| flaw.code.slug() == "parse-unknown-compiler-query")
+    );
+}
+
+#[test]
+fn sequence_view_is_no_longer_a_compiler_query() {
+    for source in [
+        "#sequence_view(element)\nView(element) has value element\n",
+        "#sequence_view(element, data, length)\nView(element) has value element\n",
+    ] {
+        let parsed = source.parse_source_full();
+        assert!(
+            parsed
+                .symptoms
+                .iter()
+                .any(|diagnostic| diagnostic.code.slug() == "parse-unknown-compiler-query"),
+            "{:?}",
+            parsed.symptoms
+        );
+    }
 }

@@ -14,129 +14,194 @@ use parser::query::SourceParseExt;
 mod support;
 use support::*;
 
-// ── Function parameters ────────────────────────────────────────────────
-
-#[test]
-fn func_params_comma_separated_inline_still_works() {
-    let src = "add(a Int, b Int) Int := a + b\n";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "comma-separated inline params must work"
-    );
-    assert!(has_def(&out, "add"), "add should parse as a bind");
-}
-
-#[test]
-fn func_params_newline_separated_multiline() {
-    let src = "\
+// `x y` in type-param position is valid Gin: `x` with type variable `y`
+// (a pre-existing `parse_param_after_name` behavior). A true
+// missing-separator rejection requires tokens that cannot form
+// a valid `name type` annotation, e.g. two Tags back-to-back.
+/// Uniform clean-parse cases; the first tuple field is the former test name,
+/// kept so failures identify the case.
+#[rustfmt::skip]
+const NEWLINE_SEPARATOR_CASES: &[(&str, &str, &str, bool)] = &[
+    ("func_params_comma_separated_inline_still_works", "add(a Int, b Int) Int := return a + b\n", "add", false),
+    ("func_params_newline_separated_multiline", "\
 add(
     a Int
     b Int
 ) Int := a + b
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "newline-separated multiline params must parse cleanly: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
-    assert!(has_def(&out, "add"), "add should parse as a bind");
-}
-
-#[test]
-fn func_params_newline_with_trailing_comma() {
-    let src = "\
+", "add", false),
+    ("func_params_newline_with_trailing_comma", "\
 add(
     a Int,
     b Int,
 ) Int := a + b
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "trailing comma after newline-separated params"
-    );
-    assert!(has_def(&out, "add"));
-}
-
-#[test]
-fn func_params_comma_and_newline_mixed() {
-    let src = "\
+", "add", false),
+    ("func_params_comma_and_newline_mixed", "\
 add(
     a Int,
     b Int,
     c Int
 ) Int := a + b + c
-";
-    let out = src.parse_source_full();
-    assert_eq!(count_errors(&out), 0, "mixed comma and newline separators");
-    assert!(has_def(&out, "add"));
-}
-
-#[test]
-fn func_params_default_value_with_newline() {
-    let src = "\
+", "add", false),
+    ("func_params_default_value_with_newline", "\
 foo(
     x Int
     y: 42
 ) Int := x + y
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "default value params with newline separators: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
-    assert!(has_def(&out, "foo"));
-}
-
-#[test]
-fn func_params_convention_suffix_with_newline() {
+", "foo", false),
     // Suffix mode params (for example `self ref`) are parsed like other multiline
     // params because the mode appears after the parameter name.
-    let src = "\
+    ("func_params_convention_suffix_with_newline", "\
 set_item(
     self ref,
     val Int
 ) Int := 0
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "convention prefix params with newline separators: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
-    assert!(has_def(&out, "set_item"));
-}
-
-#[test]
-fn func_params_empty_parens_works() {
-    let src = "main() Int := 0\n";
-    let out = src.parse_source_full();
-    assert_eq!(count_errors(&out), 0, "empty parens must still work");
-    assert!(has_def(&out, "main"));
-}
-
-#[test]
-fn func_params_single_param_with_newline_after_open() {
-    let src = "\
+", "set_item", false),
+    ("func_params_empty_parens_works", "main() Int := return 0\n", "main", false),
+    ("func_params_single_param_with_newline_after_open", "\
 foo(
     x Int
 ) Int := x
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "single param after newline must work"
-    );
-    assert!(has_def(&out, "foo"));
+", "foo", false),
+    ("func_params_three_params_multiline", "\
+distance(
+    x1 Float
+    y1 Float
+    x2 Float
+) Float := 0.0
+", "distance", false),
+    ("declare_params_comma_separated_inline_works", "Pair(x, y) has first x, second y\n", "Pair", true),
+    ("declare_params_newline_separated", "\
+Pair(
+    x
+    y
+) has
+    first x
+    second y
+)
+", "Pair", true),
+    ("declare_params_and_has_members_use_newline_separators", "\
+Pair(
+    x
+    y
+) has
+    first x
+    second y
+", "Pair", true),
+    // `name: Default` (no type annotation) is valid Gin for default params.
+    // `name Type: Default` is not currently supported by parse_param_after_name.
+    ("declare_params_with_type_default_newline", "\
+Map(
+    key
+    value
+    allocator: DefaultAllocator
+) has
+", "Map", true),
+    // A function with a return type that takes multiple type arguments.
+    // `Maybe(Int, Str)` exercises `parse_tag_type_params_delimited`.
+    ("type_expr_type_params_newline_separated", "\
+foo(x Int) Maybe(Int, Str) := 0
+", "foo", false),
+    // Type expression with multiline type arguments — exercises
+    // `parse_tag_type_params_delimited` with newline separators.
+    // This requires the type expression to be in a position where
+    // it doesn't look like a function call. Return type works.
+    ("type_expr_type_params_newline_multiline", "\
+bar(x Int) Maybe(
+    Int
+    Str
+) := 0
+", "bar", false),
+    ("has_members_comma_separated_inline", "Allocator has allocate(size Int) Ptr, free(ptr Ptr)\n", "Allocator", true),
+    ("has_members_newline_separated", "\
+Allocator has
+    allocate(size Int) Ptr
+    free(ptr Ptr)
+", "Allocator", true),
+    ("has_members_empty_works", "Marker has \n", "Marker", true),
+    ("has_members_three_methods_multiline", "\
+Allocator has
+    allocate(size Int) Ptr
+    free(ptr Ptr)
+    resize(ptr Ptr, old_size Int, new_size Int) Ptr
+", "Allocator", true),
+    ("has_members_with_return_type_newline", "\
+Hasher has
+    hash(data Slice(Byte)) Int
+    reset()
+", "Hasher", true),
+    ("call_args_newline_separated", "\
+main:
+    write(
+        fd
+        buf
+        len
+    )
+    return
+", "main", false),
+    ("list_lit_newline_separated", "\
+xs : [
+    1
+    2
+    3
+]
+", "xs", false),
+    ("list_lit_comma_and_newline_mixed", "\
+xs : [
+    1,
+    2,
+    3
+]
+", "xs", false),
+    ("list_lit_trailing_comma_multiline", "\
+xs : [
+    1,
+    2,
+]
+", "xs", false),
+    ("list_lit_empty_with_layout", "xs : [\n\n\n]\n", "xs", false),
+    ("value_row_lit_newline_separated", "\
+pair : [
+    1
+    2
+]
+", "pair", false),
+    // Record literals use the `[name: value]` syntax inside function bodies.
+    // The field separator is comma, but newlines also work because the loop
+    // naturally advances past layout tokens between fields.
+    ("record_fields_newline_separated", "\
+main:
+    point : [
+        x: 1
+        y: 2
+    ]
+    return
+", "main", false),
+    ("record_fields_comma_and_newline_mixed", "\
+main:
+    point : [
+        x: 1,
+        y: 2,
+    ]
+    return
+", "main", false),
+];
+
+#[test]
+fn newline_separated_sources_parse_without_errors() {
+    for (test_name, src, name, expect_tag) in NEWLINE_SEPARATOR_CASES {
+        let out = src.parse_source_full();
+        assert_eq!(
+            count_errors(&out),
+            0,
+            "{test_name}: {:?}",
+            out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        if *expect_tag {
+            assert!(has_tag(&out, name), "{test_name}: expected tag `{name}`");
+        } else {
+            assert!(has_def(&out, name), "{test_name}: expected def `{name}`");
+        }
+    }
 }
 
 #[test]
@@ -151,178 +216,6 @@ fn func_params_same_line_missing_comma_rejected() {
 }
 
 #[test]
-fn func_params_three_params_multiline() {
-    let src = "\
-distance(
-    x1 Float
-    y1 Float
-    x2 Float
-) Float := 0.0
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "three newline-separated params must work"
-    );
-    assert!(has_def(&out, "distance"));
-}
-
-// ── Type parameters (tag declarations) ──────────────────────────────
-
-#[test]
-fn declare_params_comma_separated_inline_works() {
-    let src = "Pair(x, y) has first x, second y\n";
-    let out = src.parse_source_full();
-    assert_eq!(count_errors(&out), 0, "comma-separated type params inline");
-    assert!(has_tag(&out, "Pair"));
-}
-
-#[test]
-fn declare_params_newline_separated() {
-    let src = "\
-Pair(
-    x
-    y
-) has
-    first x
-    second y
-)
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "newline-separated type params: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
-    assert!(has_tag(&out, "Pair"));
-}
-
-#[test]
-fn declare_params_and_has_members_use_newline_separators() {
-    let src = "\
-Pair(
-    x
-    y
-) has
-    first x
-    second y
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "type params and has members with newline separators"
-    );
-    assert!(has_tag(&out, "Pair"));
-}
-
-// `x y` in type-param position is valid Gin: `x` with type variable `y`
-// (a pre-existing `parse_param_after_name` behavior). A true
-// missing-separator rejection requires tokens that cannot form
-// a valid `name type` annotation, e.g. two Tags back-to-back.
-
-#[test]
-fn declare_params_with_type_default_newline() {
-    // `name: Default` (no type annotation) is valid Gin for default params.
-    // `name Type: Default` is not currently supported by parse_param_after_name.
-    let src = "\
-Map(
-    key
-    value
-    allocator: DefaultAllocator
-) has
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "type params with default and newline separators: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
-    assert!(has_tag(&out, "Map"));
-}
-
-// ── Type expressions with type params ──────────────────────────────────
-
-#[test]
-fn type_expr_type_params_newline_separated() {
-    // A function with a return type that takes multiple type arguments.
-    // `Maybe(Int, Str)` exercises `parse_tag_type_params_delimited`.
-    let src = "\
-foo(x Int) Maybe(Int, Str) := 0
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "comma-separated type params in type expr: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
-    assert!(has_def(&out, "foo"));
-}
-
-#[test]
-fn type_expr_type_params_newline_multiline() {
-    // Type expression with multiline type arguments — exercises
-    // `parse_tag_type_params_delimited` with newline separators.
-    // This requires the type expression to be in a position where
-    // it doesn't look like a function call. Return type works.
-    let src = "\
-bar(x Int) Maybe(
-    Int
-    Str
-) := 0
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "newline-separated type params in type expr: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
-    assert!(has_def(&out, "bar"));
-}
-
-#[test]
-fn has_members_comma_separated_inline() {
-    let src = "Allocator has allocate(size Int) Ptr, free(ptr Ptr)\n";
-    let out = src.parse_source_full();
-    assert_eq!(count_errors(&out), 0, "comma-separated has members inline");
-    assert!(has_tag(&out, "Allocator"));
-}
-
-#[test]
-fn has_members_newline_separated() {
-    let src = "\
-Allocator has
-    allocate(size Int) Ptr
-    free(ptr Ptr)
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "newline-separated has members: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
-    assert!(has_tag(&out, "Allocator"));
-}
-
-#[test]
-fn has_members_multiline_without_commas() {
-    let src = "\
-Allocator has
-    allocate(size Int) Ptr
-    free(ptr Ptr)
-";
-    let out = src.parse_source_full();
-    assert_eq!(count_errors(&out), 0, "has members with newline separators");
-    assert!(has_tag(&out, "Allocator"));
-}
-
-#[test]
 fn has_members_same_line_missing_comma_rejected() {
     let src = "Allocator has allocate(size Int) Ptr free(ptr Ptr)\n";
     let out = src.parse_source_full();
@@ -334,76 +227,11 @@ fn has_members_same_line_missing_comma_rejected() {
 }
 
 #[test]
-fn has_members_empty_works() {
-    let src = "Marker has \n";
-    let out = src.parse_source_full();
-    assert_eq!(count_errors(&out), 0, "empty has declaration must work");
-    assert!(has_tag(&out, "Marker"));
-}
-
-#[test]
-fn has_members_three_methods_multiline() {
-    let src = "\
-Allocator has
-    allocate(size Int) Ptr
-    free(ptr Ptr)
-    resize(ptr Ptr, old_size Int, new_size Int) Ptr
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "three newline-separated has members: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
-    assert!(has_tag(&out, "Allocator"));
-}
-
-#[test]
-fn has_members_with_return_type_newline() {
-    let src = "\
-Hasher has
-    hash(data Slice(Byte)) Int
-    reset()
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "has members with return types and newline separators"
-    );
-    assert!(has_tag(&out, "Hasher"));
-}
-
-// ── Function call arguments ──────────────────────────────────────────────
-
-#[test]
-fn call_args_newline_separated() {
-    let src = "\
-main:
-    write(
-        fd
-        buf
-        len
-    )
-return
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "newline-separated call args: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
-    assert!(has_def(&out, "main"));
-}
-
-#[test]
 fn call_args_same_line_missing_comma_rejected() {
     let src = "\
 main:
     write(fd buf len)
-return
+    return
 ";
     let out = src.parse_source_full();
     let errors = count_errors(&out);
@@ -411,46 +239,6 @@ return
         errors > 0,
         "same-line call args without comma should produce an error"
     );
-}
-
-// ── List literals ───────────────────────────────────────────────────
-
-#[test]
-fn list_lit_newline_separated() {
-    let src = "\
-xs : [
-    1
-    2
-    3
-]
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "newline-separated list elements: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
-    assert!(has_def(&out, "xs"));
-}
-
-#[test]
-fn list_lit_comma_and_newline_mixed() {
-    let src = "\
-xs : [
-    1,
-    2,
-    3
-]
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "mixed comma and newline in list: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
-    assert!(has_def(&out, "xs"));
 }
 
 #[test]
@@ -465,57 +253,6 @@ fn list_lit_same_line_missing_comma_rejected() {
 }
 
 #[test]
-fn list_lit_trailing_comma_multiline() {
-    let src = "\
-xs : [
-    1,
-    2,
-]
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "trailing comma in multiline list: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
-    assert!(has_def(&out, "xs"));
-}
-
-#[test]
-fn list_lit_empty_with_layout() {
-    let src = "xs : [\n\n\n]\n";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "empty list with blank lines inside: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
-    assert!(has_def(&out, "xs"));
-}
-
-// ── Value-row literals ───────────────────────────────────────────────────
-
-#[test]
-fn value_row_lit_newline_separated() {
-    let src = "\
-pair : [
-    1
-    2
-]
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "newline-separated value-row elements: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
-    assert!(has_def(&out, "pair"));
-}
-
-#[test]
 fn value_row_lit_same_line_missing_comma_rejected() {
     let src = "pair : (1 2 3)\n";
     let out = src.parse_source_full();
@@ -525,8 +262,6 @@ fn value_row_lit_same_line_missing_comma_rejected() {
         "same-line value-row elements without comma should produce an error"
     );
 }
-
-// ── Bundle export lists (use 'module' Foo, Bar) ────────────────────
 
 #[test]
 fn bundle_exports_newline_separated() {
@@ -561,48 +296,4 @@ fn bundle_exports_same_line_missing_comma_rejected() {
         "same-line bundle exports without comma should produce an error: {:?}",
         out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
-}
-
-// ── Record literal fields ────────────────────────────────────────────
-
-#[test]
-fn record_fields_newline_separated() {
-    // Record literals use the `[name: value]` syntax inside function bodies.
-    // The field separator is comma, but newlines also work because the loop
-    // naturally advances past layout tokens between fields.
-    let src = "\
-main:
-    point : [
-        x: 1
-        y: 2
-    ]
-return
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "newline-separated record fields: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
-    assert!(has_def(&out, "main"));
-}
-
-#[test]
-fn record_fields_comma_and_newline_mixed() {
-    let src = "\
-main:
-    point : [
-        x: 1,
-        y: 2,
-    ]
-return
-";
-    let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "mixed comma and newline in record fields"
-    );
-    assert!(has_def(&out, "main"));
 }

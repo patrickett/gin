@@ -8,6 +8,7 @@ use lexer::Token;
 
 use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
+use crate::int_range::in_range_expr;
 
 impl<'src, 't> TokenCursor<'src, 't> {
     /// Parse a type annotation where the parameter/bind name was already consumed.
@@ -15,7 +16,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
     /// Recognises `in N to M`, `in Tag`, `Tag`, `Tag(...)`, and lowercase `id` type variables (`start x`).
     pub fn parse_type_annotation(&mut self, expr_parser: ExprFn) -> Option<Spanned<Expr>> {
         if self.eat(&Token::In) {
-            return self.parse_in_range_expr();
+            let (bounds, span) = self.parse_in_range_bounds()?;
+            return Some(Spanned {
+                value: in_range_expr(bounds, span),
+                span_id: span,
+            });
         }
 
         if matches!(

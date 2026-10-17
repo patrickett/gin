@@ -11,14 +11,13 @@ use support::*;
 
 #[test]
 fn parses_generic_method_bind_with_typevar_params_and_return() {
-    let src =
-        "Range(x) has start x, end x\n\nRange(x).new(start x, end x) Range(x): (start, end)\n";
+    let src = "Range(x) has start x, end x\n\nRange(x).new(start x, end x) Range(x): return (start, end)\n";
     let ast = TokenCursor::parse_source(src);
 
     // Tag declaration is recorded as `Range`
     assert!(
         ast.tags.contains_key(&intern("Range")),
-        "expected Range tag in tags(): {:?}",
+        "expected Range tag in tags(): return {:?}",
         ast.tags.keys().collect::<Vec<_>>()
     );
 
@@ -84,7 +83,7 @@ fn parses_generic_method_bind_with_typevar_params_and_return() {
 fn parses_method_bind_with_nontypevar_params() {
     // Sanity: ensure the existing `Type.method` form still parses for a non-generic
     // receiver — i.e., we did not regress the bare-Tag receiver path.
-    let src = "Bool is True or False\n\nBool.to_string Str := 'true'\n";
+    let src = "Bool is True or False\n\nBool.to_string Str := return 'true'\n";
     let ast = TokenCursor::parse_source(src);
 
     let bind = ast
@@ -105,8 +104,7 @@ fn parses_custom_range_no_type_param_for_contrast() {
     // name) leaves both fields independently generic. The corresponding method
     // `CustomRange.new(start, end) CustomRange: (start, end)` should likewise
     // parse cleanly without forcing the two params to share a type variable.
-    let src =
-        "CustomRange has start, end\n\nCustomRange.new(start, end) CustomRange: (start, end)\n";
+    let src = "CustomRange has start, end\n\nCustomRange.new(start, end) CustomRange: return (start, end)\n";
     let ast = TokenCursor::parse_source(src);
 
     assert!(ast.tags.contains_key(&intern("CustomRange")));
@@ -132,12 +130,7 @@ fn parses_custom_range_no_type_param_for_contrast() {
 
 #[test]
 fn doc_comment_attaches_to_method_bind() {
-    let src = "\
-Range(x) has start x, end x
-
---- create a new range
-Range(x).new(start x, end x) Range(x): (start, end)
-";
+    let src = "Range(x) has start x, end x\n\n--- create a new range\nRange(x).new(start x, end x) Range(x): return (start, end)\n";
     let ast = TokenCursor::parse_source(src);
     let bind = ast
         .defs
@@ -151,13 +144,7 @@ Range(x).new(start x, end x) Range(x): (start, end)
 
 #[test]
 fn parses_module_rooted_generic_method_call() {
-    let src = "\
-Range(x) has start x, end x
-
-Range(x).new(start x, end x) Range(x): (start, end)
-
-core.Range.new(12, 1200)
-";
+    let src = "Range(x) has start x, end x\n\nRange(x).new(start x, end x) Range(x): return (start, end)\n\ncore.Range.new(12, 1200)\n";
     let ast = TokenCursor::parse_source(src);
 
     let call = ast
@@ -181,7 +168,7 @@ Point has x Int, y Int\n\
 \n\
 Point.distance(self Point, other Point) Int:\
     return 0\n\
-return\n";
+        return\n";
     let out = src.parse_source_full();
     if !out.symptoms.is_empty() {
         eprintln!(
@@ -190,7 +177,7 @@ return\n";
         );
     }
     let ast = out.ast;
-    let def_names: Vec<_> = ast.defs.keys().map(|k| k.as_str().to_string()).collect();
+    let def_names: Vec<_> = ast.defs.keys().map(|k| k.0.as_str().to_string()).collect();
     let bind = ast
         .defs
         .values()
@@ -249,7 +236,7 @@ fn explicit_empty_params_classify_associated_function() {
 
 #[test]
 fn has_method_preserves_parameter_refinements_in_the_callable_bind() {
-    let out = "Box has\n    new(value is in 1 to 8) Self: Self\n".parse_source_full();
+    let out = "Box has\n    new(value is in 1 to 8) Self: return Self\n".parse_source_full();
     assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
     let boxed = out.ast.tags.get(&intern("Box")).expect("Box");
     let DeclareValue::Has(members) = &boxed.value else {
@@ -268,7 +255,7 @@ fn has_method_preserves_parameter_refinements_in_the_callable_bind() {
 
 #[test]
 fn has_extension_after_refinement_registers_its_methods() {
-    let out = "Alignment is in 1 to 8\nAlignment has\n    new(value is in 1 to 8) Self: value as Alignment\n"
+    let out = "Alignment is in 1 to 8\nAlignment has\n    new(value is in 1 to 8) Self: return value as Alignment\n"
         .parse_source_full();
     assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
     assert!(out.ast.defs.contains_key(&intern("Alignment.new")));
@@ -281,12 +268,20 @@ fn has_extension_after_refinement_registers_its_methods() {
 
 #[test]
 fn has_method_overloads_with_distinct_arities_remain_independent_definitions() {
-    let out = "Layout(element) has\n    new(count element) Self: Self(count)\n    new(count element, alignment element) Self: Self(count, alignment)\n"
+    let out = "Layout(element) has\n    new(count element) Self: return Self(count)\n    new(count element, alignment element) Self: return Self(count, alignment)\n"
         .parse_source_full();
 
     assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
-    assert!(out.ast.defs.contains_key(&intern("Layout.new$arity1")));
-    assert!(out.ast.defs.contains_key(&intern("Layout.new$arity2")));
+    assert!(
+        out.ast
+            .defs
+            .contains_key(&ast::DefinitionId::member(intern("Layout.new"), 0))
+    );
+    assert!(
+        out.ast
+            .defs
+            .contains_key(&ast::DefinitionId::member(intern("Layout.new"), 1))
+    );
     assert_eq!(out.ast.method_binds.len(), 2);
 }
 
@@ -324,8 +319,8 @@ fn has_member_classifies_property_and_instance_method() {
 
 #[test]
 fn has_block_body_retains_receiver_and_self_expression() {
-    let out =
-        "Region has\n    reset(self ref) Region:\n        self\n    return\n".parse_source_full();
+    let out = "Region has\n    reset(self ref) Region:\n        self\n        return\n"
+        .parse_source_full();
     assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
     let region = out.ast.tags.get(&intern("Region")).expect("Region");
     let DeclareValue::Has(members) = &region.value else {
@@ -347,7 +342,7 @@ fn has_block_body_retains_receiver_and_self_expression() {
 
 #[test]
 fn has_multiline_methods_preserve_member_separators_and_scope() {
-    let out = "Packet has\n    value Int\n\n    new(value Int) Packet:\n        result: Packet(value: value)\n    return result\n\n    from_value(value Int) Packet:\n        result: Packet.new(value)\n    return result\n\n    inspect(self ref):\n        self.value\n    return\n\n    release(self own):\n        Packet(value: value) := self\n    return\n\nfinish:\nreturn\n".parse_source_full();
+    let out = "Packet has\n    value Int\n\n    new(value Int) Packet:\n        result: Packet(value: value)\n        return result\n\n    from_value(value Int) Packet:\n        result: Packet.new(value)\n        return result\n\n    inspect(self ref):\n        self.value\n        return\n\n    release(self own):\n        Packet(value: value) := self\n        return\n\nfinish:\n    return\n".parse_source_full();
     assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
     for name in ["new", "from_value", "inspect", "release"] {
         let key = intern(&format!("Packet.{name}"));
@@ -365,7 +360,7 @@ fn has_multiline_methods_preserve_member_separators_and_scope() {
 #[test]
 fn nested_has_method_registers_only_qualified_name() {
     let out =
-        "Range(x) has\n    start x\n    end x\n\n    new(start x, end x) Self: Self(start, end)\n"
+        "Range(x) has\n    start x\n    end x\n\n    new(start x, end x) Self: return Self(start, end)\n"
             .parse_source_full();
     assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
     assert!(out.ast.defs.contains_key(&intern("Range.new")));
@@ -384,7 +379,7 @@ fn nested_has_method_registers_only_qualified_name() {
 
 #[test]
 fn method_with_body_after_colon_parses() {
-    let out = "Range(x).new(start x, end x): Range(start, end)\n".parse_source_full();
+    let out = "Range(x).new(start x, end x): return Range(start, end)\n".parse_source_full();
     assert!(
         out.symptoms.is_empty(),
         "expected method bind to parse, got symptoms: {:?}",
@@ -394,19 +389,7 @@ fn method_with_body_after_colon_parses() {
 
 #[test]
 fn range_gin_method_form_parses() {
-    let src = "\
-use '../' Bounded
-
---- Range utilities.
-Range(x) has Bounded
-    start x
-    end x
-    Bounded.min: self.start
-    Bounded.max: self.end
-
---- create a new range
-Range(x).new(start x, end x): Range(start, end)
-";
+    let src = "use '../' Bounded\n\n--- Range utilities.\nRange(x) has Bounded\n    start x\n    end x\n    Bounded.min: self.start\n    Bounded.max: self.end\n\n--- create a new range\nRange(x).new(start x, end x): return Range(start, end)\n";
     let out = src.parse_source_full();
     assert!(
         out.symptoms.is_empty(),
@@ -448,8 +431,8 @@ fn standalone_dot_trait_provision_is_not_attached_to_the_type() {
 
 #[test]
 fn parameter_constraints_parse_after_the_parameter_name() {
-    let out =
-        "ToString has to_string String\nformat(value has ToString): value\n".parse_source_full();
+    let out = "ToString has to_string String\nformat(value has ToString): return value\n"
+        .parse_source_full();
     assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
 
     let format = out.ast.defs.get(&intern("format")).expect("format");
@@ -465,7 +448,7 @@ fn parameter_constraints_parse_after_the_parameter_name() {
 
 #[test]
 fn infix_attributes_parse_on_has_methods() {
-    let out = "Int has\n    #infix('<')\n    less_than(self Int, rhs Int) Int: self\n"
+    let out = "Int has\n    #infix('<')\n    less_than(self Int, rhs Int) Int: return self\n"
         .parse_source_full();
     assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
 
@@ -493,4 +476,114 @@ fn infix_attributes_parse_on_has_methods() {
         }),
         Some("<".to_owned())
     );
+}
+
+#[test]
+fn qualified_method_after_loop_keeps_its_type_receiver() {
+    let source = "run:\n    for index in 0 to 1\n        consume(index)\n    Buffer.release(value)\n    return\n";
+    let parsed = source.parse_source_full();
+    assert!(parsed.symptoms.is_empty(), "{:?}", parsed.symptoms);
+    let ast::BindValue::Body { exprs, .. } = &parsed.ast.defs[&intern("run")].value else {
+        panic!("expected body");
+    };
+    let Expr::FnCall(call) = &exprs[1].value else {
+        panic!("expected call")
+    };
+    assert_eq!(call.path.root.as_str(), "Buffer");
+    assert_eq!(call.path.segments[0].as_str(), "release");
+    assert_eq!(call.args.as_ref().unwrap().len(), 1);
+}
+
+#[test]
+fn bare_member_chains_keep_distinct_source_spans() {
+    let source = "result: value.unwrap.unwrap\n";
+    let parsed = TokenCursor::parse_source(source);
+    let bind = parsed.defs.get(&intern("result")).unwrap();
+    let ast::BindValue::Expr(expr) = &bind.value else {
+        panic!("expected expression");
+    };
+    let Expr::RecordGet { base, field } = &expr.value else {
+        panic!("expected member access");
+    };
+    assert_eq!(field.as_str(), "unwrap");
+    let outer = parsed.span_table.get(expr.span_id);
+    let inner = parsed.span_table.get(base.span_id);
+    assert_eq!(outer.start(), inner.start());
+    assert_eq!(outer.end() - inner.end(), ".unwrap".len());
+}
+
+#[test]
+fn postfix_calls_preserve_receiver_syntax() {
+    let ast = TokenCursor::parse_source("run(value Thing) Word: return value.inner.read(7)\n");
+    let bind = ast.defs.get(&intern("run")).unwrap();
+    let ast::BindValue::Body { ret, .. } = &bind.value else {
+        panic!("expression body")
+    };
+    let expr = &ret.values[0];
+    let Expr::FnCall(call) = &expr.value else {
+        panic!("function call")
+    };
+    assert_eq!(call.syntax, ast::CallSyntax::Path);
+    let ast =
+        TokenCursor::parse_source("Thing has\n    run(self ref) Word: return self.inner.read(7)\n");
+    let bind = ast.defs.get(&intern("Thing.run")).unwrap();
+    let ast::BindValue::Body { ret, .. } = &bind.value else {
+        panic!("expression body")
+    };
+    let expr = &ret.values[0];
+    let Expr::FnCall(call) = &expr.value else {
+        panic!("function call")
+    };
+    assert_eq!(call.syntax, ast::CallSyntax::Receiver);
+    assert!(matches!(
+        call.args.as_ref().unwrap()[0].value,
+        Expr::RecordGet { .. }
+    ));
+}
+
+#[test]
+fn method_docs_with_examples_can_precede_attributes() {
+    let source = r#"Text has
+    --- Combines both inputs into an owned result.
+    --- ```gin
+    --- combined: left + right
+    --- ```
+    #infix('+')
+    combine(self own, other own Text) Text: return self
+
+    --- Copies the input.
+    --- ```gin
+    --- duplicate: original.copy
+    --- ```
+    copy(self ref) Text: return self
+"#;
+    let parsed = source.parse_source_full();
+    assert!(parsed.symptoms.is_empty(), "{:?}", parsed.symptoms);
+    let combined = parsed.ast.defs.get(&intern("Text.combine")).unwrap();
+    assert_eq!(
+        combined.doc_comment.as_ref().unwrap().value,
+        "Combines both inputs into an owned result.\n```gin\ncombined: left + right\n```"
+    );
+    assert_eq!(
+        combined
+            .attributes
+            .infix_symbol
+            .as_ref()
+            .map(|name| name.as_str()),
+        Some("+")
+    );
+    let copied = parsed.ast.defs.get(&intern("Text.copy")).unwrap();
+    assert_eq!(
+        copied.doc_comment.as_ref().unwrap().value,
+        "Copies the input.\n```gin\nduplicate: original.copy\n```"
+    );
+}
+
+#[test]
+fn methods_after_indented_sum_matches_stay_in_the_record() {
+    let parsed = "Word is in 0 to 255\nOutcome is Ready(Word) or Failed\nHolder has\n    unwrap(value Outcome) Word:\n        return when value is\n            Ready(word) then word\n            Failed then 0\n    next(value Word) Word: return value\n\nfinish(value Word) Word: return value\n".parse_source_full();
+    assert!(parsed.symptoms.is_empty(), "{:?}", parsed.symptoms);
+    assert!(parsed.ast.defs.contains_key(&intern("Holder.unwrap")));
+    assert!(parsed.ast.defs.contains_key(&intern("Holder.next")));
+    assert!(parsed.ast.defs.contains_key(&intern("finish")));
 }

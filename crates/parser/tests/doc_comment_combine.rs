@@ -1,26 +1,14 @@
 //! Tests for combined pre+postfix doc comments on declares and union variants.
 
 use ast::{DeclareValue, HasMember};
-use diagnostic::Category;
-use parser::query::SourceParseExt;
 
 mod support;
 use support::*;
 
 #[test]
 fn doc_combine_prefix_and_suffix_on_variant() {
-    let src = "\
-Maybe(x) is
-    --- Before the variant
-    Some(x) or --- After the variant: has some value
-    None
-";
-    let out = src.parse_source_full();
-    assert!(
-        out.symptoms.is_empty(),
-        "parse errors: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
+    let src = "Maybe(x) is\n    --- Before the variant\n    Some(x) or --- After the variant: has some value\n    None\n";
+    let out = parse_ok(src);
 
     let declare = out.ast.tags.get(&intern("Maybe")).expect("Maybe");
     let DeclareValue::Union { variants } = &declare.value else {
@@ -47,12 +35,7 @@ Maybe(x) is    --- Doc after is
     Some(x) or --- Has some value `x`
     None       --- Has no value
 ";
-    let out = src.parse_source_full();
-    assert!(
-        out.symptoms.is_empty(),
-        "parse errors: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
+    let out = parse_ok(src);
 
     let declare = out.ast.tags.get(&intern("Maybe")).expect("Maybe");
 
@@ -61,6 +44,11 @@ Maybe(x) is    --- Doc after is
         declare.doc_comment.as_ref().map(|d| d.value.as_str()),
         Some("Doc before the tag\n\nDoc after is")
     );
+    let doc_span = out
+        .ast
+        .span_table
+        .get(declare.doc_comment.as_ref().unwrap().span.unwrap());
+    assert_eq!(doc_span.extract(src), "--- Doc before the tag");
 }
 
 #[test]
@@ -71,12 +59,7 @@ Maybe(x) is    --- Top-level suffix
     Some(x) or --- Some variant doc
     None       --- None variant doc
 ";
-    let out = src.parse_source_full();
-    assert!(
-        out.symptoms.is_empty(),
-        "parse errors: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
+    let out = parse_ok(src);
 
     let declare = out.ast.tags.get(&intern("Maybe")).expect("Maybe");
 
@@ -102,12 +85,7 @@ Maybe(x) is
     --- Doc prefix
     Some(x) or None
 ";
-    let out = src.parse_source_full();
-    assert!(
-        out.symptoms.is_empty(),
-        "parse errors: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
+    let out = parse_ok(src);
 
     let declare = out.ast.tags.get(&intern("Maybe")).expect("Maybe");
     let DeclareValue::Union { variants } = &declare.value else {
@@ -126,12 +104,7 @@ Maybe(x) is
     Some(x) or --- Doc suffix
     None
 ";
-    let out = src.parse_source_full();
-    assert!(
-        out.symptoms.is_empty(),
-        "parse errors: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
+    let out = parse_ok(src);
 
     let declare = out.ast.tags.get(&intern("Maybe")).expect("Maybe");
     let DeclareValue::Union { variants } = &declare.value else {
@@ -155,12 +128,7 @@ Comparison is Less
            or Equal
            or Incomparable
 ";
-    let out = src.parse_source_full();
-    assert!(
-        out.symptoms.is_empty(),
-        "parse errors: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
+    let out = parse_ok(src);
 
     let declare = out.ast.tags.get(&intern("Comparison")).expect("Comparison");
     let doc = declare
@@ -171,6 +139,11 @@ Comparison is Less
         doc.value,
         "Result of comparing two values that may not be totally ordered.\n\n`Ordered(ordering)` means comparison succeeded.",
         "Comparison doc"
+    );
+    let doc_span = out.ast.span_table.get(doc.span.unwrap());
+    assert_eq!(
+        doc_span.extract(src),
+        "--- Result of comparing two values that may not be totally ordered.\n---\n--- `Ordered(ordering)` means comparison succeeded."
     );
 
     let DeclareValue::Union { variants } = &declare.value else {
@@ -191,12 +164,7 @@ Foo is 1
 --- Second tag doc.
 Bar is 2
 ";
-    let out = src.parse_source_full();
-    assert!(
-        out.symptoms.is_empty(),
-        "parse errors: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
+    let out = parse_ok(src);
 
     let foo = out.ast.tags.get(&intern("Foo")).expect("Foo");
     assert_eq!(
@@ -227,12 +195,7 @@ Comparison is Less
 --- Another tag.
 Other is 42
 ";
-    let out = src.parse_source_full();
-    assert!(
-        out.symptoms.is_empty(),
-        "parse errors: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
+    let out = parse_ok(src);
 
     let comparison = out.ast.tags.get(&intern("Comparison")).expect("Comparison");
     let doc = comparison
@@ -261,14 +224,9 @@ fn doc_before_declare_not_stolen_by_bind() {
 MyTag is 42
 
 --- Doc for the function.
-my_fn() Int := 99
+my_fn Int := 99
 ";
-    let out = src.parse_source_full();
-    assert!(
-        out.symptoms.is_empty(),
-        "parse errors: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
+    let out = parse_ok(src);
 
     let my_tag = out.ast.tags.get(&intern("MyTag")).expect("MyTag");
     assert_eq!(
@@ -292,17 +250,7 @@ MyType has
     --- allocate doc
     allocate(self ref)
 ";
-    let out = src.parse_source_full();
-    let flaws: Vec<_> = out
-        .symptoms
-        .iter()
-        .filter(|d| matches!(d.category, Category::Flaw))
-        .collect();
-    assert!(
-        flaws.is_empty(),
-        "parse flaws: {:?}",
-        flaws.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
+    let out = parse_ok_no_flaws(src);
 
     let DeclareValue::Has(members) = &out.ast.tags.get(&intern("MyType")).expect("MyType").value
     else {
@@ -333,17 +281,7 @@ MyType has
     --- Single-line doc for deallocate.
     deallocate(self ref)
 ";
-    let out = src.parse_source_full();
-    let flaws: Vec<_> = out
-        .symptoms
-        .iter()
-        .filter(|d| matches!(d.category, Category::Flaw))
-        .collect();
-    assert!(
-        flaws.is_empty(),
-        "parse flaws: {:?}",
-        flaws.iter().map(|d| &d.message).collect::<Vec<_>>()
-    );
+    let out = parse_ok_no_flaws(src);
 
     let my_type = out.ast.tags.get(&intern("MyType")).expect("MyType");
     assert_eq!(

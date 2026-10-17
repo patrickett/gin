@@ -8,9 +8,9 @@ fn reserved_names_report_flaws_at_the_keyword() {
         for source in [
             format!("{keyword}: 0\n"),
             format!("{keyword} Int: 0\n"),
-            format!("{keyword}(): 0\n"),
-            format!("f() value Int, {keyword} Int: 0\n"),
-            format!("f():\n  {keyword}: 0\nreturn 0\n"),
+            format!("{keyword}(): return 0\n"),
+            format!("f() value Int, {keyword} Int: return 0\n"),
+            format!("f():\n  {keyword}: 0\n  return 0\n"),
         ] {
             let output = source.parse_source_full();
             let errors: Vec<_> = output
@@ -37,18 +37,18 @@ fn reserved_names_report_flaws_at_the_keyword() {
 #[test]
 fn reference_results_and_ownership_conventions_remain_valid() {
     for source in [
-        "f(self): self",
+        "f(self): return self",
         "private\nhidden: 0\n",
         "use 'helpers' Thing\n",
-        "f(value Int) Int: value\n",
+        "f(value Int) Int: return value\n",
         "ref(1)",
         "mut(1)",
-        "f(value ref Int) ref Int: value",
-        "f(value mut Int) mut Int: value",
-        "f(value own Int) result Int: value",
-        "f(value ref Int) result ref Int: value",
-        "f(value mut Int) result mut Int: value",
-        "f(value Int):\n  value\nreturn value\n",
+        "f(value ref Int) ref Int: return value",
+        "f(value mut Int) mut Int: return value",
+        "f(value own Int) result Int: return value",
+        "f(value ref Int) result ref Int: return value",
+        "f(value mut Int) result mut Int: return value",
+        "f(value Int):\n  value\n  return value\n",
     ] {
         let output = source.parse_source_full();
         assert!(
@@ -62,7 +62,7 @@ fn reference_results_and_ownership_conventions_remain_valid() {
 #[test]
 fn non_type_keywords_cannot_name_the_first_result() {
     for keyword in ["own", "return"] {
-        for source in [format!("f() {keyword} Int: 0"), format!("f() {keyword}: 0")] {
+        for source in [format!("f() {keyword} Int: return 0"), format!("f() {keyword}: return 0")] {
             let output = source.parse_source_full();
             assert!(
                 output
@@ -83,7 +83,7 @@ fn keywords_cannot_name_parameters_except_the_receiver() {
             continue;
         }
         let keyword = token.keyword().unwrap();
-        let source = format!("f({keyword} Int): 0");
+        let source = format!("f({keyword} Int): return 0");
         let output = source.parse_source_full();
         assert!(
             output

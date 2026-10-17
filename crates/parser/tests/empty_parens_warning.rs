@@ -3,7 +3,7 @@ use parser::query::SourceParseExt;
 
 #[test]
 fn empty_bind_parameters_suggest_bare_name() {
-    let output = "good() Int: 7\n".parse_source_full();
+    let output = "good() Int: return 7\n".parse_source_full();
     let warnings: Vec<_> = output
         .symptoms
         .iter()
@@ -20,7 +20,7 @@ fn empty_bind_parameters_suggest_bare_name() {
 
 #[test]
 fn bare_bind_and_nonempty_parameters_do_not_warn() {
-    for source in ["good Int: 7\n", "good(value Int) Int: value\n"] {
+    for source in ["good Int: 7\n", "good(value Int) Int: return value\n"] {
         let output = source.parse_source_full();
         assert!(
             !output
@@ -33,7 +33,7 @@ fn bare_bind_and_nonempty_parameters_do_not_warn() {
 
 #[test]
 fn nested_bind_and_call_both_warn() {
-    let output = "outer Int:\n    inner() Int: 7\nreturn inner()\n".parse_source_full();
+    let output = "outer Int:\n    inner() Int: return 7\n    return inner()\n".parse_source_full();
     assert_eq!(
         output
             .symptoms
@@ -42,4 +42,20 @@ fn nested_bind_and_call_both_warn() {
             .count(),
         2
     );
+}
+
+#[test]
+fn associated_callable_parameters_are_required() {
+    {
+        let source = "Encoder has\n    encode() Byte: return 0\n";
+        let output = source.parse_source_full();
+        assert!(
+            !output
+                .symptoms
+                .iter()
+                .any(|diagnostic| diagnostic.code.slug() == "parse-empty-parens"),
+            "{:?}",
+            output.symptoms
+        );
+    }
 }

@@ -5,7 +5,7 @@ use parser::query::SourceParseExt;
 #[test]
 fn is_copy_multiline_when_parses_as_single_expr() {
     let src = "\
-is_copy(x Type) Bool := when x is
+is_copy(x Type) Bool := return when x is
     Primitive(_, _)     then True
     Opaque(_)           then False
 ";
@@ -16,13 +16,13 @@ is_copy(x Type) Bool := when x is
         .expect("is_copy def");
     assert!(bind.is_constant(), "fn def with `:=` should be constant");
     match &bind.value {
-        ast::BindValue::Expr(e) => match &e.value {
+        ast::BindValue::Body { ret, .. } => match &ret.values[0].value {
             ast::Expr::When(w) => {
                 assert!(
                     w.arms.len() >= 2,
                     "expected when arms, got {} arms, expr {:?}",
                     w.arms.len(),
-                    e.value
+                    ret.values[0].value
                 );
             }
             other => panic!("expected When body, got {other:?}"),
@@ -34,7 +34,7 @@ is_copy(x Type) Bool := when x is
 #[test]
 fn is_copy_all_arms() {
     let src = "\
-is_copy(x Type) Bool := when x is
+is_copy(x Type) Bool := return when x is
     Primitive(w, _)     then True
     Ptr(_)              then False
     Ref(_, False)       then True
@@ -51,7 +51,7 @@ is_copy(x Type) Bool := when x is
         .get(&internment::Intern::new("is_copy".to_string()))
         .unwrap();
     match &bind.value {
-        ast::BindValue::Expr(e) => match &e.value {
+        ast::BindValue::Body { ret, .. } => match &ret.values[0].value {
             ast::Expr::When(w) => assert!(w.arms.len() >= 7, "arms={}", w.arms.len()),
             other => panic!("{other:?}"),
         },
@@ -64,7 +64,7 @@ fn copy_gin_with_trait_decl() {
     let src = "\
 Copy has can_copy Bool
 
-is_copy(x Type) Bool := when x is
+is_copy(x Type) Bool := return when x is
     Primitive(w, _)     then True
     Opaque(_)           then False
 ";
@@ -74,7 +74,7 @@ is_copy(x Type) Bool := when x is
         .get(&internment::Intern::new("is_copy".to_string()))
         .unwrap();
     match &bind.value {
-        ast::BindValue::Expr(e) => match &e.value {
+        ast::BindValue::Body { ret, .. } => match &ret.values[0].value {
             ast::Expr::When(w) => assert!(w.arms.len() >= 2),
             other => panic!("{other:?}"),
         },
@@ -88,18 +88,18 @@ fn full_sized_gin_parses_compile_time_helpers() {
 Size is Const(BigInt) or Dynamic
 Sized has size Size: compute_size(Self)
 
-compute_size(x) Size := when x is
+compute_size(x) Size := return when x is
     Primitive(w, _)     then Const(w / 8)
 
-sum_named(fields) Size := when fields is
+sum_named(fields) Size := return when fields is
     []                  then Const(0)
     [f, ...rest]        then add(compute_size(f.ty), sum_named(rest))
 
-sum_types(elems) Size := when elems is
+sum_types(elems) Size := return when elems is
     []                  then Const(0)
     [t, ...rest]        then add(compute_size(t), sum_types(rest))
 
-add(a Size, b Size) Size := when (a, b) is
+add(a Size, b Size) Size := return when (a, b) is
     (Const(x), Const(y)) then Const(x + y)
                          else Dynamic
 ";
@@ -109,7 +109,7 @@ add(a Size, b Size) Size := when (a, b) is
             file.defs
                 .contains_key(&internment::Intern::new(name.to_string())),
             "missing def {name}, defs={:?}",
-            file.defs.keys().map(|k| k.as_str()).collect::<Vec<_>>()
+            file.defs.keys().map(|k| k.0.as_str()).collect::<Vec<_>>()
         );
     }
 }
@@ -120,7 +120,7 @@ fn full_copy_gin_is_copy_body() {
     let src = "\
 Copy has can_copy Bool: is_copy(Self)
 
-is_copy(x) Bool := when x is
+is_copy(x) Bool := return when x is
     Primitive(_, _)     then True
     Ptr(_)              then False
     Ref(_, False)       then True
@@ -128,7 +128,7 @@ is_copy(x) Bool := when x is
     Opaque(_)           then False
     Record(_, fields)   then all_named_copy(fields)
 
-all_named_copy(fields) Bool := when fields is
+all_named_copy(fields) Bool := return when fields is
     []                  then True
     [f, ...rest]        then is_copy(f.ty) and all_named_copy(rest)
 ";
@@ -138,7 +138,7 @@ all_named_copy(fields) Bool := when fields is
         .get(&internment::Intern::new("is_copy".to_string()))
         .expect("is_copy");
     match &bind.value {
-        ast::BindValue::Expr(e) => match &e.value {
+        ast::BindValue::Body { ret, .. } => match &ret.values[0].value {
             ast::Expr::When(w) => assert!(w.arms.len() >= 5, "arms={}", w.arms.len()),
             other => panic!("got {other:?}"),
         },

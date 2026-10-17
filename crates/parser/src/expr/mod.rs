@@ -1,9 +1,13 @@
+use diagnostic::DiagnosticCode;
+use diagnostic::code::{ExpectedSyntaxCode, ParseCode, RemovedSyntaxCode, SyntaxCode};
 pub(crate) mod bind;
 pub(crate) mod body;
 pub(crate) mod body_trivia;
 pub(crate) mod control;
 pub(crate) mod r#import;
 pub(crate) mod literal;
+mod when;
+mod when_pattern;
 
 // TODO: Split `control.rs` into per-construct files for better co-location of
 // parsing logic with its corresponding AST type. Target structure:
@@ -12,20 +16,15 @@ pub(crate) mod literal;
 //   for_in.rs      ← pub fn parse() -> Option<ForInLoop>
 //   while_loop.rs  ← pub fn parse() -> Option<WhileLoop>
 //   loop_expr.rs   ← pub fn parse() -> Option<Loop>  (dispatches to for_in / while_loop)
-//   if_expr.rs     ← pub fn parse() -> Option<IfExpr>
 //   when_expr.rs   ← pub fn parse() -> Option<WhenExpr>
 //   return_expr.rs ← pub fn parse() -> Option<Return>
 //
 
-use diagnostic::{Category, Diagnostic};
 use internment::Intern;
 use lexer::{Lexer, Token};
 
 use ast::span::{SpanId, SpanTable};
-use ast::{
-    AsmOperandBinding, Expr, FileAst, SequenceLiteral, Spanned, TargetQueryKind, TypeReference,
-    Typed,
-};
+use ast::{Expr, FileAst, SequenceLiteral, Spanned, TypeReference, Typed};
 
 use crate::cursor::{ParseError, TokenCursor};
 
@@ -34,6 +33,24 @@ use ast::ModPath;
 use ast::{BinOp, Binary, Bind, BindValue, FnCall, FormatPart, FormatString, Range, TagCall};
 
 pub type ExprFn = fn(&mut TokenCursor) -> Typed<Expr>;
+
+pub(crate) fn path_call(path: Spanned<ModPath>) -> Expr {
+    Expr::FnCall(FnCall {
+        syntax: ast::CallSyntax::Path,
+        definition: None,
+        path,
+        args: None,
+    })
+}
+
+fn comparison_token_desc(token: Token) -> &'static str {
+    match token {
+        Token::Eq => "`=`",
+        Token::EqEq => "`==`",
+        Token::NotEq => "`/=`",
+        _ => unreachable!(),
+    }
+}
 
 impl<'src, 't> TokenCursor<'src, 't> {
     pub fn parse_tokens_with_errors_cancellable(
@@ -64,46 +81,21 @@ impl<'src, 't> TokenCursor<'src, 't> {
     pub fn parse_source(source: &'src str) -> FileAst {
         let mut lexer = Lexer::new(source);
         let mut tokens: Vec<_> = Vec::with_capacity(source.len() / 8);
-        tokens.extend(lexer.by_ref());
+        tokens.extend(
+            std::iter::from_fn(|| lexer.next_raw())
+                .filter(|(token, _)| !matches!(token, Token::Comment(_))),
+        );
         let lex_errors = std::mem::take(&mut lexer.errors);
         let mut span_table = lexer.take_span_table();
         let (mut ast, hw_parse_errors) = Self::parse_tokens_with_errors(&tokens, &mut span_table);
+        ast.blank_lines = lexer.take_blank_lines();
         ast.span_table = span_table;
 
         // Convert cursor/lex errors to diagnostics and store on the AST.
         ast.parse_warnings.extend(lex_errors);
         for err in &hw_parse_errors {
-            if let Some(hint) = err.message().strip_prefix("__gin_hint__:") {
-                match hint.trim() {
-                    "unnecessary-comma" => {
-                        ast.parse_warnings.push(
-                            Diagnostic::new("parse-unnecessary-comma", "unnecessary comma")
-                                .with_category(Category::Warn)
-                                .with_help(
-                                    "this comma is not needed since Gin uses newlines \
-                                 to separate items; you can remove it",
-                                )
-                                .at_span_id(err.span(), &ast.span_table),
-                        );
-                    }
-                    _hint => {
-                        ast.parse_warnings.push(
-                            Diagnostic::new(
-                                "parse-indented-return",
-                                "return is indented inside the if body",
-                            )
-                            .with_category(Category::Warn)
-                            .with_help("dedent this return so it closes the if expression")
-                            .at_span_id(err.span(), &ast.span_table),
-                        );
-                    }
-                }
-            } else {
-                ast.parse_warnings.push(
-                    Diagnostic::new(err.code(), err.message().to_string())
-                        .at_span_id(err.span(), &ast.span_table),
-                );
-            }
+            ast.parse_warnings
+                .push(err.to_warning_diagnostic(&ast.span_table));
         }
 
         ast
@@ -123,21 +115,25 @@ impl<'src, 't> TokenCursor<'src, 't> {
         self.skip_layout();
 
         let mut args = Vec::new();
-        while !self.is_at(&Token::ParenClose) {
+        while !self.is_at(&Token::ParenClose) && !self.is_eof() {
+            let before = self.pos();
             args.push(self.parse_arg_expr());
 
             if self.is_at(&Token::ParenClose) {
                 break;
             }
 
+            if self.pos() == before {
+                break;
+            }
             if self.eat_list_separator() || self.previous_token_was_newline_separator() {
                 continue;
             }
 
-            self.error(
-                "parse-expected-arg-separator",
+            // parse-expected-arg-separator
+            self.error_here(
+                DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::ArgumentSeparator)),
                 "expected ',' or newline between function call arguments",
-                self.current_span(),
             );
             break;
         }
@@ -148,14 +144,23 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
     /// Parse a call argument expression.
     fn parse_arg_expr(&mut self) -> Typed<Expr> {
+        let name_span = self.peek_span().unwrap_or(self.current_span());
         let elem = self.parse_sequence_element();
+        if matches!(elem.expr.value, Expr::Ref { .. }) {
+            // parse-call-argument-convention
+            self.error(
+                DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::CallArgumentConvention)),
+                "pass the argument without `ref` or `mut`; its parameter declares ownership",
+                elem.expr.span_id,
+            );
+        }
         match elem.name {
             Some(name) => {
-                let span = elem.span_id;
+                let span = self.merge_span(name_span, elem.span_id);
                 Typed::infer(
                     Expr::Bind(Box::new(Bind::new(
                         name,
-                        span,
+                        name_span,
                         BindValue::Expr(Box::new(elem.expr)),
                     ))),
                     span,
@@ -170,11 +175,20 @@ impl<'src, 't> TokenCursor<'src, 't> {
     }
 
     fn parse_expr_min_prec(&mut self, min_prec: u8) -> Typed<Expr> {
+        self.parse_expr_min_prec_layout(min_prec, true)
+    }
+
+    fn parse_expr_min_prec_layout(&mut self, min_prec: u8, continuation: bool) -> Typed<Expr> {
         let mut lhs = match self.parse_prefix() {
             Some(expr) => expr,
             None => {
                 let span = self.current_span();
-                self.error("parse-expected-expression", "expected expression", span);
+                // parse-expected-expression
+                self.error(
+                    DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::Expression)),
+                    "expected expression",
+                    span,
+                );
                 return Typed::infer(Expr::AnonymousTag(self.intern("__parse_error")), span);
             }
         };
@@ -203,6 +217,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 }
             };
 
+            if !continuation && matches!(self.raw_peek(), Some(Token::Newline)) {
+                self.advance_drop();
+                break;
+            }
+
             // Feature 1: Indent-as-continuation.
             // If we see Indent and the token after it continues the current
             // expression, skip the Indent and re-evaluate.
@@ -210,7 +229,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 if let Some(next_tok) = self.peek_past_indent() {
                     let continues = self.try_infix_op(next_tok).is_some()
                         || matches!(next_tok, Token::To | Token::Dot);
-                    if continues {
+                    if continuation && continues {
                         self.skip_indents();
                         consumed_indents += 1;
                         self.advance_drop(); // pop the outer loop's push (progress is implicit)
@@ -226,7 +245,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 if 2 >= min_prec {
                     self.advance();
                     let lhs_span = lhs.span_id;
-                    let rhs = self.parse_expr_min_prec(3);
+                    let rhs = self.parse_expr_min_prec_layout(3, continuation);
                     let rhs_span = rhs.span_id;
                     lhs = Typed::infer(
                         Expr::Range(Range::new(lhs, rhs)),
@@ -241,11 +260,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
             if matches!(token, Token::EqEq | Token::NotEq) {
                 self.advance();
-                let desc = match token {
-                    Token::EqEq => "`==`",
-                    Token::NotEq => "`/=`",
-                    _ => unreachable!(),
-                };
+                let desc = comparison_token_desc(token);
                 self.unexpected_token(
                     format!("unexpected token {desc}"),
                     None,
@@ -262,7 +277,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             {
                 self.advance();
                 let lhs_span = lhs.span_id;
-                let rhs = self.parse_expr_min_prec(prec + 1);
+                let rhs = self.parse_expr_min_prec_layout(prec + 1, continuation);
                 let rhs_span = rhs.span_id;
                 lhs = Typed::infer(
                     Expr::Binary(Binary::new(lhs, binop, rhs)),
@@ -304,7 +319,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             _ => {
                 if matches!(
                     self.peek(),
-                    Some(Token::If) | Some(Token::When) | Some(Token::For) | Some(Token::While)
+                    Some(Token::If | Token::When | Token::For | Token::While | Token::Return)
                 ) && let Some(expr) = self.parse_loop_or_control()
                 {
                     return Some(expr);
@@ -316,14 +331,35 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
     fn parse_atom(&mut self) -> Typed<Expr> {
         match self.peek() {
-            Some(Token::At) => self.parse_take_ptr(),
+            Some(Token::Domain) => {
+                let (_, start) = self.advance().unwrap();
+                self.expect(&Token::Of);
+                let operand = self.parse_expr_min_prec(6);
+                let span = self.merge_span(start, operand.span_id);
+                Typed::infer(Expr::DomainOf(Box::new(operand)), span)
+            }
+            Some(Token::At) => {
+                self.parse_prefixed_expression("@", |inner| Expr::TakePtr(Box::new(inner)))
+            }
             Some(Token::Pound) => self.parse_compile_time_query(),
-            Some(Token::Star) => self.parse_deref(),
+            Some(Token::Star) => {
+                self.parse_prefixed_expression("*", |inner| Expr::Deref(Box::new(inner)))
+            }
             Some(Token::SelfInstance) => self.parse_self_ref(),
             Some(Token::Id(name)) if *name == "eat" => self.parse_removed_consume_arg_expression(),
-            Some(Token::Ref) => self.parse_ref_take(),
-            Some(Token::Mut) => self.parse_mut_take(),
-            Some(Token::Deref) => self.parse_deref_expr(),
+            Some(Token::Ref) => self.parse_prefixed_expression("ref", |inner| Expr::Ref {
+                inner: Box::new(inner),
+                mutable: false,
+                group: None,
+            }),
+            Some(Token::Mut) => self.parse_prefixed_expression("mut", |inner| Expr::Ref {
+                inner: Box::new(inner),
+                mutable: true,
+                group: None,
+            }),
+            Some(Token::Deref) => {
+                self.parse_prefixed_expression("deref", |inner| Expr::Deref(Box::new(inner)))
+            }
             Some(Token::BracketOpen) => self.parse_bracket_lit(),
             Some(Token::ParenOpen) => self.parse_group(),
             Some(Token::FormatStringDelim) => self.parse_format_string_expr(),
@@ -368,16 +404,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 }
                 self.parse_id_atom()
             }
-            Some(Token::Eq) | Some(Token::EqEq) | Some(Token::NotEq) => {
-                let token = self.peek().copied();
+            Some(token @ (Token::Eq | Token::EqEq | Token::NotEq)) => {
+                let token = *token;
                 let span = self.peek_span().unwrap_or_else(|| self.current_span());
                 self.advance();
-                let desc = match token {
-                    Some(Token::Eq) => "`=`",
-                    Some(Token::EqEq) => "`==`",
-                    Some(Token::NotEq) => "`/=`",
-                    _ => unreachable!(),
-                };
+                let desc = comparison_token_desc(token);
                 self.unexpected_token(format!("unexpected token {desc}"), None, span);
                 Typed::infer(Expr::AnonymousTag(self.intern("__parse_error")), span)
             }
@@ -388,7 +419,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     return Typed::infer(Expr::Lit(lit.value), span);
                 }
                 let span = self.current_span();
-                self.error("parse-expected-expression", "expected expression", span);
+                // parse-expected-expression
+                self.error(
+                    DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::Expression)),
+                    "expected expression",
+                    span,
+                );
                 // Advance past the unrecognised token so the caller makes progress
                 self.advance();
                 Typed::infer(Expr::AnonymousTag(self.intern("__parse_error")), span)
@@ -400,10 +436,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
         let (_, start_span) = self
             .advance()
             .expect("peek confirmed 'eat' token before parse_removed_consume_arg_expression");
-        self.error(
-            "parse-removed-consume-arg-syntax",
+        // parse-removed-consume-arg-syntax
+        self.error_here(
+            DiagnosticCode::Parse(ParseCode::Removed(RemovedSyntaxCode::ConsumeArgumentSyntax)),
             "call-site consume syntax is removed: pass arguments directly",
-            self.current_span(),
         );
         // Consume the following expression and lower to the ordinary argument expression.
         let expression = self.parse_expression();
@@ -630,64 +666,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
     }
 
     fn parse_id_atom(&mut self) -> Typed<Expr> {
-        // BufSet: name.(index):: value or BufGet: name.(index)
-        if matches!(self.peek(), Some(Token::Id(_)))
-            && self.peek_at(1) == Some(&Token::Dot)
-            && self.peek_at(2) == Some(&Token::ParenOpen)
-        {
-            // Deterministic: Id.( is already confirmed by lookahead
-            let Some((Token::Id(n), id_span)) = self.advance() else {
-                unreachable!()
-            };
-            let name = self.intern(n);
-            self.eat(&Token::Dot);
-            self.eat(&Token::ParenOpen);
-            let index = self.parse_expression();
-            self.expect(&Token::ParenClose);
-
-            let operator = if self.eat(&Token::ColonColon) {
-                Some(None)
-            } else {
-                self.eat_compound_rebind().map(Some)
-            };
-            if let Some(operator) = operator {
-                let value = self.parse_expression();
-                let end_span = self.last_consumed_span();
-                let base = Typed::infer(
-                    Expr::FnCall(FnCall {
-                        path: Spanned::new(ModPath::new(name, vec![]), id_span),
-                        args: None,
-                    }),
-                    id_span,
-                );
-                return Typed::infer(
-                    Expr::BufSet {
-                        buf: Box::new(base),
-                        index: Box::new(index),
-                        value: Box::new(value),
-                        operator,
-                    },
-                    self.merge_span(id_span, end_span),
-                );
-            }
-            // BufGet — return as expression
-            let base = Typed::infer(
-                Expr::FnCall(FnCall {
-                    path: Spanned::new(ModPath::new(name, vec![]), id_span),
-                    args: None,
-                }),
-                id_span,
-            );
-            let end_span = self.last_consumed_span();
-            return Typed::infer(
-                Expr::BufGet {
-                    buf: Box::new(base),
-                    index: Box::new(index),
-                },
-                self.merge_span(id_span, end_span),
-            );
-        }
-
         // Indexed aggregate update: name.N:: value; indexed projection: name.N
         if matches!(self.peek(), Some(Token::Id(_)))
             && self.peek_at(1) == Some(&Token::Dot)
@@ -712,10 +690,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 let value = self.parse_expression();
                 let end_span = self.last_consumed_span();
                 let base = Typed::infer(
-                    Expr::FnCall(FnCall {
-                        path: Spanned::new(ModPath::new(name, vec![]), id_span),
-                        args: None,
-                    }),
+                    path_call(Spanned::new(ModPath::new(name, vec![]), id_span)),
                     id_span,
                 );
                 return Typed::infer(
@@ -730,10 +705,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
             // Indexed projection — return as expression
             let base = Typed::infer(
-                Expr::FnCall(FnCall {
-                    path: Spanned::new(ModPath::new(name, vec![]), id_span),
-                    args: None,
-                }),
+                path_call(Spanned::new(ModPath::new(name, vec![]), id_span)),
                 id_span,
             );
             let end_span = self.last_consumed_span();
@@ -769,10 +741,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
             let value = self.parse_expression();
             let end_span = self.last_consumed_span();
             let base = Typed::infer(
-                Expr::FnCall(FnCall {
-                    path: Spanned::new(ModPath::new(self.intern(base_name), vec![]), base_span),
-                    args: None,
-                }),
+                path_call(Spanned::new(
+                    ModPath::new(self.intern(base_name), vec![]),
+                    base_span,
+                )),
                 base_span,
             );
             return Typed::infer(
@@ -787,7 +759,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
 
         // ── FnCall: name, name(args), name.path(args) ──
-        // Dotted paths without `(` are field access (`a.x`), not qualified symbols (`a.x`).
         if let Some(path) = self.parse_path() {
             let path_span = path.span_id;
             let args = self.parse_paren_args();
@@ -795,38 +766,55 @@ impl<'src, 't> TokenCursor<'src, 't> {
             self.consume_trailing_newline();
             if args.is_some() || path.value.segments.is_empty() {
                 return Typed::infer(
-                    Expr::FnCall(FnCall { path, args }),
+                    Expr::FnCall(FnCall {
+                        syntax: ast::CallSyntax::Path,
+                        definition: None,
+                        path,
+                        args,
+                    }),
                     self.merge_span(path_span, end_span),
                 );
             }
             let mut expr = Typed::infer(
-                Expr::FnCall(FnCall {
-                    path: Spanned::new(ModPath::new(path.value.root, vec![]), path_span),
-                    args: None,
-                }),
-                path_span,
+                path_call(Spanned::new(
+                    ModPath::new(path.value.root, vec![]),
+                    path.value.root_span,
+                )),
+                path.value.root_span,
             );
-            for field in path.value.segments {
+            for (field, member_span) in path
+                .value
+                .segments
+                .iter()
+                .copied()
+                .zip(path.value.segment_spans.iter().copied())
+            {
                 let field_span = expr.span_id;
                 expr = Typed::infer(
                     Expr::RecordGet {
                         base: Box::new(expr),
                         field,
                     },
-                    self.merge_span(field_span, end_span),
+                    self.merge_span(field_span, member_span),
                 );
             }
             return expr;
         }
 
         let span = self.current_span();
-        self.error("parse-expected-identifier", "expected identifier", span);
+        // parse-expected-identifier
+        self.error(
+            DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::Identifier)),
+            "expected identifier",
+            span,
+        );
         Typed::infer(Expr::AnonymousTag(self.intern("__parse_error")), span)
     }
 
     // ─── Tag-based Atoms: TagCall, AnonymousTag, Tag-rooted FnCall ────────────────
 
     fn parse_tag_atom(&mut self) -> Typed<Expr> {
+        self.skip_newlines();
         // Single-pass lookahead avoids speculative parsing with rewind.
         // The common case (bare Tag or Tag(args)) skips all path parsing.
         if matches!(self.peek(), Some(Token::Tag(_) | Token::SelfTag))
@@ -834,7 +822,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         {
             // Qualified variant: Tag.Tag[(args)]
             if matches!(self.peek_at(2), Some(Token::Tag(_)))
-                && let Some(path) = self.parse_tag_variant_path()
+                && let Some(path) = self.parse_tag_rooted_path(true)
             {
                 let variant_name = *path.segments.last().unwrap_or(&path.root);
                 let start_span = path.span_id;
@@ -857,14 +845,19 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
             // Tag-rooted method call: Tag.id[.id...][(args)]
             if matches!(self.peek_at(2), Some(Token::Id(_)))
-                && let Some(path) = self.parse_tag_path()
+                && let Some(path) = self.parse_tag_rooted_path(false)
             {
                 let path_span = path.span_id;
                 let args = self.parse_paren_args();
                 self.consume_trailing_newline();
                 let end_span = self.last_consumed_span();
                 return Typed::infer(
-                    Expr::FnCall(FnCall { path, args }),
+                    Expr::FnCall(FnCall {
+                        syntax: ast::CallSyntax::Path,
+                        definition: None,
+                        path,
+                        args,
+                    }),
                     self.merge_span(path_span, end_span),
                 );
             }
@@ -896,11 +889,20 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
 
         let span = self.current_span();
-        self.error("parse-expected-tag", "expected tag", span);
+        // parse-expected-tag
+        self.error(
+            DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::Tag)),
+            "expected tag",
+            span,
+        );
         Typed::infer(Expr::AnonymousTag(self.intern("__parse_error")), span)
     }
 
     fn parse_sequence_element(&mut self) -> ast::SequenceElement {
+        self.parse_sequence_element_with(|cursor| cursor.parse_expression())
+    }
+
+    fn parse_sequence_element_with(&mut self, expr_parser: ExprFn) -> ast::SequenceElement {
         let name = if matches!(self.peek(), Some(Token::Id(_)))
             && self.peek_at(1) == Some(&Token::Colon)
         {
@@ -912,7 +914,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         };
         ast::SequenceElement {
             name,
-            expr: self.parse_expression(),
+            expr: expr_parser(self),
         }
     }
 
@@ -941,8 +943,9 @@ impl<'src, 't> TokenCursor<'src, 't> {
             if let Some(name) = elem.name
                 && !names.insert(name)
             {
+                // parse-duplicate-sequence-name
                 self.error(
-                    "parse-duplicate-sequence-name",
+                    DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::DuplicateSequenceName)),
                     format!("duplicate sequence name `{name}`"),
                     elem.span_id,
                 );
@@ -963,8 +966,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
             let first = self.parse_sequence_element();
             if self.eat(&Token::ColonSemi) {
                 if !elems.is_empty() || first.name.is_some() {
+                    // parse-sequence-repeat-elements
                     self.error(
-                        "parse-sequence-repeat-elements",
+                        DiagnosticCode::Parse(ParseCode::Syntax(
+                            SyntaxCode::SequenceRepeatElements,
+                        )),
                         "a repeated sequence requires one unnamed initializer",
                         first.span_id,
                     );
@@ -988,10 +994,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 self.skip_layout();
                 continue;
             }
-            self.error(
-                "parse-expected-list-separator",
+            // parse-expected-list-separator
+            self.error_here(
+                DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::ListSeparator)),
                 "expected ',' or newline between sequence elements",
-                self.current_span(),
             );
             break;
         }
@@ -1005,8 +1011,9 @@ impl<'src, 't> TokenCursor<'src, 't> {
         self.advance();
         self.skip_layout();
         if self.eat(&Token::ParenClose) {
+            // parse-empty-parens-removed
             self.error(
-                "parse-empty-parens-removed",
+                DiagnosticCode::Parse(ParseCode::Removed(RemovedSyntaxCode::EmptyParens)),
                 "empty parentheses are not a value; use an empty nominal value or a bare return",
                 start,
             );
@@ -1014,14 +1021,15 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
         let named =
             matches!(self.peek(), Some(Token::Id(_))) && self.peek_at(1) == Some(&Token::Colon);
-        let first = if named {
+        let mut first = if named {
             self.parse_sequence_value()
         } else {
             self.parse_expression()
         };
         if named || self.is_at(&Token::ColonSemi) || self.is_at(&Token::Comma) {
+            // parse-parenthesized-sequence
             self.error(
-                "parse-parenthesized-sequence",
+                DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::ParenthesizedSequence)),
                 "use brackets to construct a sequence",
                 start,
             );
@@ -1033,19 +1041,8 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
         self.skip_layout();
         self.expect(&Token::ParenClose);
+        first.span_id = self.merge_span(start, self.last_consumed_span());
         first
-    }
-
-    fn parse_take_ptr(&mut self) -> Typed<Expr> {
-        let (_, start_span) = self
-            .advance()
-            .expect("peek confirmed '@' token before parse_take_ptr"); // @
-        let inner = self.parse_expression();
-        let end_span = inner.span_id;
-        Typed::infer(
-            Expr::TakePtr(Box::new(inner)),
-            self.merge_span(start_span, end_span),
-        )
     }
 
     fn parse_compile_time_query(&mut self) -> Typed<Expr> {
@@ -1053,35 +1050,35 @@ impl<'src, 't> TokenCursor<'src, 't> {
             .advance()
             .expect("peek confirmed '#' token before compile-time query");
         let kind = match self.peek() {
-            Some(Token::Id("asm")) => return self.parse_asm_expression(start_span),
-            Some(Token::Id("register")) => {
+            Some(Token::Id("todo")) => {
+                self.advance();
+                let span = self.merge_span(start_span, self.last_consumed_span());
+                self.todo_holes.push(self.span_table().get(span));
+                return Typed::infer(Expr::Todo, span);
+            }
+            Some(Token::Id("emit")) => {
                 self.advance();
                 self.expect(&Token::ParenOpen);
-                let inner = self.parse_expression();
+                self.skip_layout();
+                let code = self.parse_expression();
+                self.expect(&Token::Comma);
+                self.skip_layout();
+                let arguments = self.parse_expression();
+                self.skip_layout();
                 self.expect(&Token::ParenClose);
-                let end_span = self.last_consumed_span();
                 return Typed::infer(
-                    Expr::Register(Box::new(inner)),
-                    self.merge_span(start_span, end_span),
+                    Expr::Emit {
+                        code: Box::new(code),
+                        arguments: Box::new(arguments),
+                    },
+                    self.merge_span(start_span, self.last_consumed_span()),
                 );
             }
             Some(Token::Id("target")) => {
                 self.advance();
                 return Typed::infer(Expr::Target, start_span);
             }
-            _ => match self.advance() {
-                Some((Token::Id("size"), _)) => TargetQueryKind::Size,
-                Some((Token::Id("alignment"), _)) => TargetQueryKind::Alignment,
-                Some((Token::Id("index_bits"), _)) => TargetQueryKind::IndexBits,
-                _ => {
-                    self.error(
-                        "parse-expected-query-name",
-                        "expected compile-time query name after '#'",
-                        self.current_span(),
-                    );
-                    TargetQueryKind::Size
-                }
-            },
+            _ => self.parse_target_query_kind(),
         };
         self.expect(&Token::ParenOpen);
         let operand = self
@@ -1091,44 +1088,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
         let end_span = self.last_consumed_span();
         Typed::infer(
             Expr::TargetQuery { kind, operand },
-            self.merge_span(start_span, end_span),
-        )
-    }
-
-    fn parse_asm_expression(&mut self, start_span: SpanId) -> Typed<Expr> {
-        self.advance();
-        self.expect(&Token::ParenOpen);
-        self.skip_layout();
-        let specification = self.parse_expression();
-        let mut operands = Vec::new();
-        while self.eat_list_separator() || self.previous_token_was_newline_separator() {
-            self.skip_layout();
-            if matches!(self.peek(), Some(Token::ParenClose)) {
-                break;
-            }
-            let Some(Token::Id(name)) = self.peek() else {
-                self.error(
-                    "parse-asm-named-operand",
-                    "expected named assembly operand",
-                    self.current_span(),
-                );
-                break;
-            };
-            let name = self.intern(name);
-            self.advance();
-            self.expect(&Token::Colon);
-            operands.push(AsmOperandBinding {
-                name,
-                value: self.parse_expression(),
-            });
-        }
-        self.expect(&Token::ParenClose);
-        let end_span = self.last_consumed_span();
-        Typed::infer(
-            Expr::Asm {
-                specification: Box::new(specification),
-                operands,
-            },
             self.merge_span(start_span, end_span),
         )
     }
@@ -1162,60 +1121,17 @@ impl<'src, 't> TokenCursor<'src, 't> {
         Some(TypeReference::Application { name, arguments })
     }
 
-    fn parse_deref(&mut self) -> Typed<Expr> {
+    fn parse_prefixed_expression(
+        &mut self,
+        prefix: &str,
+        build: impl FnOnce(Typed<Expr>) -> Expr,
+    ) -> Typed<Expr> {
         let (_, start_span) = self
             .advance()
-            .expect("peek confirmed '*' token before parse_deref"); // *
+            .unwrap_or_else(|| panic!("peek confirmed '{prefix}' token before parsing"));
         let inner = self.parse_expression();
         let end_span = inner.span_id;
-        Typed::infer(
-            Expr::Deref(Box::new(inner)),
-            self.merge_span(start_span, end_span),
-        )
-    }
-
-    fn parse_ref_take(&mut self) -> Typed<Expr> {
-        let (_, start_span) = self
-            .advance()
-            .expect("peek confirmed 'ref' token before parse_ref_take");
-        let inner = self.parse_expression();
-        let end_span = inner.span_id;
-        Typed::infer(
-            Expr::Ref {
-                inner: Box::new(inner),
-                mutable: false,
-                group: None,
-            },
-            self.merge_span(start_span, end_span),
-        )
-    }
-
-    fn parse_mut_take(&mut self) -> Typed<Expr> {
-        let (_, start_span) = self
-            .advance()
-            .expect("peek confirmed 'mut' token before parse_mut_take");
-        let inner = self.parse_expression();
-        let end_span = inner.span_id;
-        Typed::infer(
-            Expr::Ref {
-                inner: Box::new(inner),
-                mutable: true,
-                group: None,
-            },
-            self.merge_span(start_span, end_span),
-        )
-    }
-
-    fn parse_deref_expr(&mut self) -> Typed<Expr> {
-        let (_, start_span) = self
-            .advance()
-            .expect("peek confirmed 'deref' token before parse_deref_expr");
-        let inner = self.parse_expression();
-        let end_span = inner.span_id;
-        Typed::infer(
-            Expr::Deref(Box::new(inner)),
-            self.merge_span(start_span, end_span),
-        )
+        Typed::infer(build(inner), self.merge_span(start_span, end_span))
     }
 
     fn parse_self_ref(&mut self) -> Typed<Expr> {
@@ -1254,6 +1170,16 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
     #[allow(clippy::result_large_err)]
     fn apply_postfix(&mut self, lhs: Typed<Expr>) -> Result<Typed<Expr>, Typed<Expr>> {
+        if self.raw_peek() == Some(&Token::BracketOpen)
+            && !self.previous_token_was_newline_separator()
+        {
+            // parse-index-requires-dot
+            self.error_here(
+                DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::IndexRequiresDot)),
+                "element access requires a dot: write `value.[index]`",
+            );
+            return Err(lhs);
+        }
         if matches!(self.raw_peek(), Some(Token::Newline)) && self.is_at(&Token::Dot) {
             self.skip_newlines();
         }
@@ -1275,12 +1201,46 @@ impl<'src, 't> TokenCursor<'src, 't> {
             ));
         }
 
-        // .(expr) → BufGet
-        if self.is_at(&Token::Dot) && self.peek_at(1) == Some(&Token::ParenOpen) {
-            self.advance(); // Dot
-            self.advance(); // ParenOpen
+        if self.is_at(&Token::Dot) && self.peek_at(1) == Some(&Token::BracketOpen) {
+            self.advance();
+            self.advance();
+            self.skip_layout();
             let index = self.parse_expression();
-            self.expect(&Token::ParenClose);
+            self.skip_layout();
+            if self.eat(&Token::ColonSemi) {
+                self.skip_layout();
+                let length = self.parse_expression();
+                self.skip_layout();
+                self.expect(&Token::BracketClose);
+                let span = self.merge_span(lhs.span_id, self.last_consumed_span());
+                return Ok(Typed::infer(
+                    Expr::SliceGet {
+                        buf: Box::new(lhs),
+                        start: Box::new(index),
+                        length: Box::new(length),
+                    },
+                    span,
+                ));
+            }
+            self.expect(&Token::BracketClose);
+            let operator = if self.eat(&Token::ColonColon) {
+                Some(None)
+            } else {
+                self.eat_compound_rebind().map(Some)
+            };
+            if let Some(operator) = operator {
+                let value = self.parse_expression();
+                let span = self.merge_span(lhs.span_id, self.last_consumed_span());
+                return Ok(Typed::infer(
+                    Expr::BufSet {
+                        buf: Box::new(lhs),
+                        index: Box::new(index),
+                        value: Box::new(value),
+                        operator,
+                    },
+                    span,
+                ));
+            }
             let end_span = self.last_consumed_span();
             let lhs_span = lhs.span_id;
             return Ok(Typed::infer(
@@ -1348,6 +1308,8 @@ impl<'src, 't> TokenCursor<'src, 't> {
             let end_span = self.last_consumed_span();
             return Ok(Typed::infer(
                 Expr::FnCall(FnCall {
+                    syntax: ast::CallSyntax::Receiver,
+                    definition: None,
                     path: Spanned::new(ModPath::new(method_name, vec![]), method_span),
                     args: Some(all_args),
                 }),
@@ -1371,10 +1333,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     ));
                 }
                 None => {
-                    self.error(
-                        "parse-expected-type-name",
+                    // parse-expected-type-name
+                    self.error_here(
+                        DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::TypeName)),
                         "expected type name after 'as'",
-                        self.current_span(),
                     );
                 }
             }
@@ -1386,12 +1348,19 @@ impl<'src, 't> TokenCursor<'src, 't> {
     fn parse_loop_or_control(&mut self) -> Option<Typed<Expr>> {
         let start_span = self.current_span();
 
-        if let Some(if_expr) = self.parse_if_expr(|c: &mut TokenCursor| c.parse_expression()) {
-            let end_span = self.last_consumed_span();
-            return Some(Typed::infer(
-                Expr::If(if_expr),
-                self.merge_span(start_span, end_span),
-            ));
+        if self.is_at(&Token::If) {
+            // parse-removed-if
+            self.error(
+                DiagnosticCode::Parse(ParseCode::Removed(RemovedSyntaxCode::If)),
+                "`if` has been removed; use 'when condition then'",
+                start_span,
+            );
+            self.advance();
+            return Some(Typed::infer(Expr::Invalid(start_span), start_span));
+        }
+        if let Some(ret) = self.parse_return() {
+            let span = self.merge_span(start_span, self.last_consumed_span());
+            return Some(Typed::infer(Expr::Return(ret), span));
         }
 
         if let Some(when_expr) = self.parse_when_expr(|c: &mut TokenCursor| c.parse_expression()) {
@@ -1448,8 +1417,9 @@ impl<'src, 't> TokenCursor<'src, 't> {
                         .any(|part| matches!(part, FormatPart::Expr(..)))
                     {
                         // TODO: restore interpolation through library-defined formatting without compiler knowledge of user types.
+                        // parse-template-strings-not-supported
                         self.error(
-                            "parse-template-strings-not-supported",
+                            DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::TemplateStringsNotSupported)),
                             "template strings are not supported yet; use byte literals and explicit library calls",
                             fmt_span,
                         );
@@ -1467,8 +1437,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 Some(Token::UnterminatedFormatString) | None => {
                     self.advance_drop();
                     let span = self.current_span();
+                    // parse-unterminated-format-string
                     self.error(
-                        "parse-unterminated-format-string",
+                        DiagnosticCode::Parse(ParseCode::Syntax(
+                            SyntaxCode::UnterminatedFormatString,
+                        )),
                         "unterminated format string",
                         span,
                     );
@@ -1479,8 +1452,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 }
                 _ => {
                     let span = self.current_span();
+                    // parse-unexpected-token-in-format-string
                     self.error(
-                        "parse-unexpected-token-in-format-string",
+                        DiagnosticCode::Parse(ParseCode::Syntax(
+                            SyntaxCode::UnexpectedTokenInFormatString,
+                        )),
                         "unexpected token in format string",
                         span,
                     );

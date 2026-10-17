@@ -88,7 +88,7 @@ fn indexed_projection_rebind_parses_as_aggregate_set() {
 
 #[test]
 fn indexed_projection_rebind_parses_as_buffer_set() {
-    let expressions = body_expressions("main:\n    items.(index):: 1\n    return 0");
+    let expressions = body_expressions("main:\n    items.[index]:: 1\n    return 0");
     assert!(matches!(expressions[0], Expr::BufSet { .. }));
 }
 
@@ -115,7 +115,7 @@ fn every_compound_rebind_maps_to_its_ordinary_operator() {
 #[test]
 fn projected_compound_rebind_retains_the_operator() {
     let output =
-        "main:\n    record.field+: 1\n    tuple.0-: 2\n    items.(index)*: 3\n    return 0"
+        "main:\n    record.field+: 1\n    tuple.0-: 2\n    items.[index]*: 3\n    return 0"
             .parse_source_full();
     assert!(output.symptoms.is_empty(), "{:?}", output.symptoms);
     let main = output

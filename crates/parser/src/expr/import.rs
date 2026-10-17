@@ -1,3 +1,5 @@
+use diagnostic::DiagnosticCode;
+use diagnostic::code::{ExpectedSyntaxCode, ParseCode, SyntaxCode};
 use std::path::PathBuf;
 
 use internment::Intern;
@@ -12,7 +14,7 @@ use span::SpanId;
 use crate::cursor::TokenCursor;
 
 impl<'src, 't> TokenCursor<'src, 't> {
-    /// Dependency or folder segment name in `use` paths (`self` is valid as a flask.jsonc key).
+    /// Dependency or folder segment name in `use` paths (`self` is valid as a mod.flask key).
     fn parse_import_root(&mut self) -> Option<(Intern<String>, SpanId)> {
         match self.peek()? {
             Token::SelfInstance => {
@@ -77,10 +79,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 let path = PathBuf::from(path_str);
                 self.advance();
                 if self.is_at(&Token::Dot) {
-                    self.error(
-                        "parse-legacy-import-selection",
+                    // parse-legacy-import-selection
+                    self.error_here(
+                        DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::LegacyImportSelection)),
                         "select exports after a space: use 'module' name, other",
-                        self.current_span(),
                     );
                     return None;
                 }
@@ -94,10 +96,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 let mut segment_spans = Vec::new();
                 while self.eat(&Token::Dot) {
                     if self.is_at(&Token::ParenOpen) {
-                        self.error(
-                            "parse-legacy-import-selection",
+                        // parse-legacy-import-selection
+                        self.error_here(
+                            DiagnosticCode::Parse(ParseCode::Syntax(
+                                SyntaxCode::LegacyImportSelection,
+                            )),
                             "select exports after a space: use module name, other",
-                            self.current_span(),
                         );
                         return None;
                     }
@@ -154,6 +158,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 ImportSource::Local(path, _) => ImportSource::LocalBundle(LocalBundleImport {
                     root: Intern::from_ref(""),
                     path_segments: Vec::new(),
+                    module_path: None,
                     members,
                     span,
                     local_path: Some(path),
@@ -161,6 +166,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 ImportSource::Package(path) => ImportSource::LocalBundle(LocalBundleImport {
                     root: path.root,
                     path_segments: path.segments.clone(),
+                    module_path: Some(Box::new(path.clone())),
                     members,
                     span,
                     local_path: None,
@@ -187,10 +193,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 break;
             }
             let Some(member) = self.parse_single_bundle_member() else {
-                self.error(
-                    "parse-expected-import-export",
+                // parse-expected-import-export
+                self.error_here(
+                    DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::ImportExport)),
                     "expected an export name after the module",
-                    self.current_span(),
                 );
                 break;
             };
@@ -203,10 +209,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 continue;
             }
             if matches!(self.peek_at(0), Some(Token::Id(_) | Token::Tag(_))) {
-                self.error(
-                    "parse-expected-export-separator",
+                // parse-expected-export-separator
+                self.error_here(
+                    DiagnosticCode::Parse(ParseCode::Expected(ExpectedSyntaxCode::ExportSeparator)),
                     "expected ',' or newline between exports",
-                    self.current_span(),
                 );
             }
             break;

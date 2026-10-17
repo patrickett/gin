@@ -1,5 +1,7 @@
 use crate::cursor::TokenCursor;
 use ast::{ModPath, Spanned};
+use diagnostic::DiagnosticCode;
+use diagnostic::code::{ParseCode, SyntaxCode};
 use internment::Intern;
 use lexer::Token;
 
@@ -17,8 +19,9 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
     pub(crate) fn parse_name(&mut self) -> Option<Intern<String>> {
         if let Some(name) = self.peek().and_then(|token| token.keyword()) {
+            // parse-reserved-name
             self.error(
-                "parse-reserved-name",
+                DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::ReservedName)),
                 format!("`{name}` is a reserved keyword and cannot be used as a name"),
                 self.peek_span()?,
             );
@@ -100,40 +103,22 @@ impl<'src, 't> TokenCursor<'src, 't> {
         )
     }
 
-    /// Parse `Tag.id[.id...]` — a tag-rooted method or module path.
+    /// Parse a tag-rooted path: `Tag.id[.id...]` for methods and modules, or
+    /// `Tag.Tag[.Tag...]` when `segment_is_tag` selects qualified variants.
     /// Returns `None` if there is no segment after the root tag.
-    pub fn parse_tag_path(&mut self) -> Option<Spanned<ModPath>> {
+    pub fn parse_tag_rooted_path(&mut self, segment_is_tag: bool) -> Option<Spanned<ModPath>> {
         let result = self.parse_path_matching(
             |t| match t {
                 Token::Tag(n) => Some(n),
                 _ => None,
             },
             |t| match t {
-                Token::Id(n) => Some(n),
+                Token::Tag(n) if segment_is_tag => Some(n),
+                Token::Id(n) if !segment_is_tag => Some(n),
                 _ => None,
             },
         )?;
         // Require at least one segment (e.g. `Map.keys`, not bare `Map`).
-        if result.value.segments.is_empty() {
-            return None;
-        }
-        Some(result)
-    }
-
-    /// Parse `Tag.Tag[.Tag...]` — a qualified variant path.
-    /// Returns `None` if there is no segment after the root tag.
-    pub fn parse_tag_variant_path(&mut self) -> Option<Spanned<ModPath>> {
-        let result = self.parse_path_matching(
-            |t| match t {
-                Token::Tag(n) => Some(n),
-                _ => None,
-            },
-            |t| match t {
-                Token::Tag(n) => Some(n),
-                _ => None,
-            },
-        )?;
-        // Require at least one segment (e.g. `Http.Status`, not bare `Http`).
         if result.value.segments.is_empty() {
             return None;
         }

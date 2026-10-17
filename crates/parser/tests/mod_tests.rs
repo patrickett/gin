@@ -9,37 +9,31 @@ fn has_unexpected_token_symptom(output: &ParseOutput, token: &str) -> bool {
 
 #[test]
 fn standalone_equals_is_unexpected_token() {
-    let output = "main:\n  =\n    return".parse_source_full();
+    let output = "main:\n  =\n  return".parse_source_full();
     assert!(has_unexpected_token_symptom(&output, "`=`"));
 }
 
 #[test]
 fn standalone_double_equals_is_unexpected_token() {
-    let output = "main:\n  ==\n    return".parse_source_full();
+    let output = "main:\n  ==\n  return".parse_source_full();
     assert!(has_unexpected_token_symptom(&output, "`==`"));
 }
 
 #[test]
 fn standalone_not_equals_is_unexpected_token() {
-    let output = "main:\n  /=\n    return".parse_source_full();
+    let output = "main:\n  /=\n  return".parse_source_full();
     assert!(has_unexpected_token_symptom(&output, "`/=`"));
 }
 
 #[test]
 fn standalone_exclamation_equals_is_lex_error() {
-    let output = "main:\n  !=\n    return".parse_source_full();
+    let output = "main:\n  !=\n  return".parse_source_full();
     assert!(
         output
             .symptoms
             .iter()
             .any(|diagnostic| diagnostic.code.slug() == "lex-unexpected-character"),
     );
-}
-
-#[test]
-fn standalone_equals_after_blank_lines_uses_equals_span() {
-    let output = "main:\n  =\n    return".parse_source_full();
-    assert!(has_unexpected_token_symptom(&output, "`=`"));
 }
 
 #[test]

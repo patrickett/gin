@@ -4,48 +4,16 @@ use ast::FileAst;
 use internment::Intern;
 
 pub(crate) fn lower(file_ast: &mut FileAst) {
-    canonicalize_method_bind_names(file_ast);
-}
-
-fn canonicalize_method_bind_names(file_ast: &mut FileAst) {
-    let mut overload_counts = HashMap::<(Intern<String>, Intern<String>), usize>::new();
-
+    let mut members = HashMap::new();
     for bind in &file_ast.method_binds {
-        let Some(base_name) = method_base_name(bind) else {
+        let Some((receiver, method)) = method_base_name(bind) else {
             continue;
         };
-
-        *overload_counts.entry(base_name).or_default() += 1;
-    }
-
-    if overload_counts.is_empty() {
-        return;
-    }
-
-    let mut canonical_defs = file_ast.defs.clone();
-
-    for method_bind in &file_ast.method_binds {
-        let Some(base_name) = method_base_name(method_bind) else {
-            continue;
-        };
-        let key = canonical_method_key(method_bind, base_name, &overload_counts);
-        canonical_defs.insert(key, method_bind.clone());
-    }
-
-    file_ast.defs = canonical_defs;
-}
-
-fn canonical_method_key(
-    bind: &ast::Bind,
-    (receiver_name, method_name): (Intern<String>, Intern<String>),
-    overload_counts: &HashMap<(Intern<String>, Intern<String>), usize>,
-) -> Intern<String> {
-    let base_key = format!("{receiver_name}.{method_name}");
-    if overload_counts[&(receiver_name, method_name)] > 1 {
-        let arity = bind.params.as_ref().map_or(0, |params| params.len());
-        Intern::new(format!("{base_key}$arity{arity}"))
-    } else {
-        Intern::new(base_key)
+        let name = Intern::new(format!("{receiver}.{method}"));
+        let member = members.entry(name).or_insert(0);
+        let id = ast::DefinitionId::member(name, *member);
+        *member += 1;
+        file_ast.defs.insert(id, bind.clone());
     }
 }
 
@@ -74,6 +42,9 @@ mod tests {
     use crate::cursor::TokenCursor;
     use lexer::Lexer;
 
+    // `parse_expression` cannot be passed as a function item: its `&mut self`
+    // receiver does not unify with the higher-ranked `ExprFn` pointer lifetime.
+    #[allow(clippy::redundant_closure)]
     fn parse_file_without_lowering(source: &str) -> ast::FileAst {
         let mut lexer = Lexer::new(source);
         let tokens: Vec<_> = lexer.by_ref().collect();
@@ -86,7 +57,7 @@ mod tests {
             .collect();
 
         let mut parser = TokenCursor::new(&filtered_tokens, &mut span_table);
-        parser.parse_file_for_test(|cursor| TokenCursor::parse_expression(cursor))
+        parser.parse_file_without_lowering(|cursor| TokenCursor::parse_expression(cursor))
     }
 
     #[test]

@@ -61,7 +61,7 @@ main:
     -- for i in 0..10
         -- io.println('Hello, world!')
     -- loop
-return
+    return
 ";
     let out = source.parse_source_full();
     let bogus: Vec<_> = out
@@ -83,17 +83,17 @@ fn find_sum_coords(ast: &ast::FileAst) -> &ast::Typed<ast::Expr> {
             if bind.name.as_str() != "sum_coords" {
                 return None;
             }
-            let ast::BindValue::Expr(expr) = &bind.value else {
+            let ast::BindValue::Body { ret, .. } = &bind.value else {
                 return None;
             };
-            Some(expr.as_ref())
+            ret.values.first()
         })
         .expect("sum_coords bind")
 }
 
 #[test]
 fn dotted_path_without_call_is_record_get() {
-    let src = "Coord has x Int, y Int\n\nsum_coords(a Coord, b Coord) Int: a.x + b.x\n";
+    let src = "Coord has x Int, y Int\n\nsum_coords(a Coord, b Coord) Int: return a.x + b.x\n";
     let ast = src.parse_source_full().ast;
     let body = find_sum_coords(&ast);
     let Expr::Binary(bin) = &body.value else {
@@ -103,18 +103,21 @@ fn dotted_path_without_call_is_record_get() {
         panic!("expected RecordGet on lhs, got {:?}", bin.lhs.value);
     };
     assert_eq!(field.as_str(), "x");
-    let Expr::FnCall(FnCall { path, args: None }) = &base.value else {
+    let Expr::FnCall(FnCall {
+        path, args: None, ..
+    }) = &base.value
+    else {
         panic!("expected bare `a` reference, got {:?}", base.value);
     };
     assert_eq!(path.value.root.as_str(), "a");
     assert!(path.value.segments.is_empty());
 }
 
-/// Parse with a timeout and return the AST, or panic with a useful message.
+/// Parse with a timeout and return the AST, or panic with the case name.
 /// Callers that don't need the AST can ignore the return value.
-fn assert_handwritten_parses(source: &str) -> ast::FileAst {
+fn assert_handwritten_parses(case: &str, source: &str) -> ast::FileAst {
     eprintln!(
-        "  handwritten parsing: {:?}...",
+        "  handwritten parsing ({case}): {:?}...",
         &source[..source.len().min(60)]
     );
     let start = Instant::now();
@@ -123,7 +126,7 @@ fn assert_handwritten_parses(source: &str) -> ast::FileAst {
             eprintln!("    => OK in {:?}", start.elapsed());
             ast
         }
-        Err(msg) => panic!("{}", msg),
+        Err(msg) => panic!("case `{case}` failed: {msg}"),
     }
 }
 
@@ -131,91 +134,112 @@ fn assert_handwritten_parses(source: &str) -> ast::FileAst {
 // Each test parses a strictly larger slice of the failing source so a future
 // regression points at the slice that broke.
 
-#[test]
-fn bisect_just_declare() {
-    assert_handwritten_parses("Maybe(x) is Some(x) or None\n");
-}
-
-#[test]
-fn bisect_declare_and_empty_main() {
-    assert_handwritten_parses(
+const BISECT_CASES: &[(&str, &str)] = &[
+    ("bisect_just_declare", "Maybe(x) is Some(x) or None\n"),
+    (
+        "bisect_declare_and_empty_main",
         "Maybe[x] is Some(x) or None
 
 main:
     return 0
 ",
-    );
-}
-
-#[test]
-fn bisect_main_with_simple_bind() {
-    assert_handwritten_parses(
+    ),
+    (
+        "bisect_main_with_simple_bind",
         "main:
     x: 42
-return x
+    return x
 ",
-    );
-}
-
-#[test]
-fn bisect_main_with_tagged_bind() {
-    // val Maybe(3): Some(3) — a bind with a type annotation
-    assert_handwritten_parses(
+    ),
+    (
+        "bisect_main_with_tagged_bind",
         "main:
     val Maybe(3): Some(3)
-return val
+    return val
 ",
-    );
-}
-
-#[test]
-fn bisect_main_with_const_bind() {
-    assert_handwritten_parses(
+    ),
+    (
+        "bisect_main_with_const_bind",
         "main:
     val := Some(3)
-return val
+    return val
 ",
-    );
-}
-
-#[test]
-fn bisect_main_with_if() {
-    assert_handwritten_parses(
+    ),
+    (
+        "bisect_main_with_if",
         "main:
     x: 5
-    if x > 0
+    when x > 0 then
         x
+        return 0
     return 0
-return 0
 ",
-    );
-}
-
-#[test]
-fn bisect_main_with_if_is() {
-    assert_handwritten_parses(
+    ),
+    (
+        "bisect_main_with_if_is",
         "main:
     val: Some(3)
-    if val is Some(v)
+    when val is Some(v) then
         v
+        return 0
     return 0
-return 0
 ",
-    );
-}
-
-#[test]
-fn bisect_main_with_if_and_bind_body() {
-    assert_handwritten_parses(
+    ),
+    (
+        "bisect_main_with_if_and_bind_body",
         "main:
     z:
-        if true
+        when true then
             x: 1
             y: 2
-        return x
-    return z
+            return x
+        return z
 ",
-    );
+    ),
+];
+
+/// `core.` with nothing after — the exact reproducer that froze the LSP from a
+/// hello-world-style `core.` partial input before progress assertions landed.
+const PARTIAL_CASES: &[(&str, &str)] = &[
+    (
+        "partial_dangling_dot_after_id",
+        "main:\n    core.\n    return 0\n",
+    ),
+    ("partial_dangling_dot_at_top_level", "core.\n"),
+    ("partial_double_dot", "main:\n    core..\n    return 0\n"),
+    ("partial_dangling_dot_eof_no_newline", "core."),
+    ("partial_dangling_use_keyword", "use\n"),
+    ("partial_dangling_use_dot", "use core.\n"),
+    ("partial_open_paren_eof", "main:\n    f(\n    return 0\n"),
+    (
+        "partial_open_paren_id_eof",
+        "main:\n    f(x\n    return 0\n",
+    ),
+    (
+        "partial_dangling_binary_op",
+        "main:\n    x: 1 +\n    return 0\n",
+    ),
+    (
+        "partial_dangling_range_op",
+        "main:\n    r: 1 to\n    return 0\n",
+    ),
+    (
+        "partial_unterminated_string",
+        "main:\n    s: 'unclosed\n    return 0\n",
+    ),
+    (
+        "partial_unterminated_format_string",
+        "main:\n    s: \"hello {name\n    return 0\n",
+    ),
+    ("partial_bare_dot_in_body", "main:\n    .\n    return 0\n"),
+    ("partial_just_newlines_then_dot", "\n\n.\n"),
+];
+
+#[test]
+fn handwritten_parser_termination_cases() {
+    for &(name, source) in BISECT_CASES.iter().chain(PARTIAL_CASES) {
+        assert_handwritten_parses(name, source);
+    }
 }
 
 #[test]
@@ -223,55 +247,11 @@ fn bisect_bare_bind_with_unindented_if_then_another_bind() {
     // Full reproducer for the original hang: a bare bind followed by an
     // unindented `if` and then another bind tripped the parser into a loop.
     // Also verifies `parse_source_full` reports no parse flaws on this input.
-    let source = "Maybe(x) is Some(x) or None
-
-Int is in 1 to 400
-
-
--- is_empty(v Maybe(x)) Bool: when v is None then True else False
-
---- Find the index of a target value in a buffer.
---- Scans each byte from left to right until a match is found.
-#complexity(Linear(len))
-find_index(target Byte, buf Buffer, len Int) Int:
-    i: 0
-    while i < len is True
-        -- if buf.(i) = target
-        -- return i
-        i: i + 1
-    loop
-return -1
-
-
--- TODO: better type for this
--- but also would be sick if we know that the Int we get back is less then 10
--- so we can have functions narrow potential values for us and that is kept inside the type
--- system
-less_than_ten(num Int) Maybe(Int):
-    if num < 10 is True
-    return Some(num)
-return None
-
--- also this below
-is_positive(x): x > 0
-
-test:
-    value Int: 3
-    is_above_zero: is_positive(value)
-    if is_above_zero is True
-    return value
-return
-
-maid:
-    val Maybe(Int): Some(3)
-
-    if val is Some(v)
-    return v + 1
-
-
-return
-";
-    assert_handwritten_parses(source);
+    let source = "Maybe(x) is Some(x) or None\n\nInt is in 1 to 400\n\n\n-- is_empty(v Maybe(x)) Bool: when v is None then True else False\n\n--- Find the index of a target value in a buffer.\n--- Scans each byte from left to right until a match is found.\n#complexity(Linear(len))\nfind_index(target Byte, buf Buffer, len Int) Int:\n    i: 0\n    while i < len do\n        -- if buf.[i] = target\n        -- return i\n        i: i + 1\n    return -1\n\n\n-- TODO: better type for this\n-- but also would be sick if we know that the Int we get back is less then 10\n-- so we can have functions narrow potential values for us and that is kept inside the type\n-- system\nless_than_ten(num Int) Maybe(Int):\n    when num < 10 then\n        return Some(num)\n    return None\n\n-- also this below\nis_positive(x): return x > 0\n\ntest:\n    value Int: 3\n    is_above_zero: is_positive(value)\n    when is_above_zero is True then\n        return value\n    return\n\nmaid:\n    val Maybe(Int): Some(3)\n\n    when val is Some(v) then\n        return v + 1\n\n\n    return\n";
+    assert_handwritten_parses(
+        "bisect_bare_bind_with_unindented_if_then_another_bind",
+        source,
+    );
     let output = source.parse_source_full();
     let parse_flaws: Vec<_> = output
         .symptoms
@@ -290,8 +270,8 @@ return
 fn doc_comment_before_attribute_attaches_to_bind() {
     // Regression: a doc comment immediately before an attribute was previously
     // consumed by attribute parsing and lost.
-    let src = "--- Find the index of a target value in a buffer.\n--- Scans each byte from left to right until a match is found.\n#complexity(Linear(len))\nfind_index(target Byte, buf Buffer, len Int) Int:\n    i: 0\nreturn -1\n";
-    let ast = assert_handwritten_parses(src);
+    let src = "--- Find the index of a target value in a buffer.\n--- Scans each byte from left to right until a match is found.\n#complexity(Linear(len))\nfind_index(target Byte, buf Buffer, len Int) Int:\n    i: 0\n    return -1\n";
+    let ast = assert_handwritten_parses("doc_comment_before_attribute_attaches_to_bind", src);
 
     let bind = first_def_bind(&ast, "find_index");
 
@@ -337,29 +317,28 @@ Int is in 1 to 400
 #complexity(Linear(len))
 find_index(target Byte, buf Buffer, len Int) Int:
     i: 0
-    while i < len
-        if buf.(i) = target
-        return i
+    while i < len do
+        when buf.[i] = target then
+            return i
         i: i + 1
-    loop
-return -1
+    return -1
 
 main:
     val Maybe(3): Some(3)
 
-    if val is Some(v)
+    when val is Some(v) then
         val
         four: v + 1
-    return four
+        return four
 
     -- when v is Some(x)
     -- then S
     -- else D
 
     val
-return
+    return
 ";
-    let ast = assert_handwritten_parses(src);
+    let ast = assert_handwritten_parses("doc_comment_survives_full_regression_fixture", src);
 
     let bind = first_def_bind(&ast, "find_index");
 
@@ -388,7 +367,8 @@ return
 
 #[test]
 fn grouped_attributes_emit_removed_syntax_error() {
-    let out = "#[inline, complexity(Constant)]\nget(i Int) Byte: buf.(i)\n".parse_source_full();
+    let out =
+        "#[inline, complexity(Constant)]\nget(i Int) Byte: return buf.[i]\n".parse_source_full();
     assert!(
         out.symptoms
             .iter()
@@ -400,8 +380,9 @@ fn grouped_attributes_emit_removed_syntax_error() {
 
 #[test]
 fn consecutive_inline_and_complexity_attributes_parse() {
-    let src = "#inline\n#complexity(Constant)\nget(i Int) Byte: buf.(i)\nreturn buf.(i)\n";
-    let ast = assert_handwritten_parses(src);
+    let src =
+        "#inline\n#complexity(Constant)\nget(i Int) Byte: return buf.[i]\n    return buf.[i]\n";
+    let ast = assert_handwritten_parses("consecutive_inline_and_complexity_attributes_parse", src);
     let bind = first_def_bind(&ast, "get");
     assert!(bind.attributes.inline_always);
     let c = bind
@@ -416,7 +397,10 @@ fn consecutive_inline_and_complexity_attributes_parse() {
 fn record_declaration_with_provided_trait_parses_ast_shape() {
     let source =
         "Capacity has IsEmpty\n    count PointerSize\n    IsEmpty.is_empty: self.count > 0\n";
-    let ast = assert_handwritten_parses(source);
+    let ast = assert_handwritten_parses(
+        "record_declaration_with_provided_trait_parses_ast_shape",
+        source,
+    );
     let cap_tag = ast
         .tags
         .get(&internment::Intern::<String>::from_ref("Capacity"));
@@ -444,7 +428,10 @@ fn record_declaration_with_provided_trait_parses_ast_shape() {
 #[test]
 fn record_declaration_with_multiple_provided_traits_parse() {
     let source = "Capacity has IsEmpty and Display\n    count PointerSize\n    IsEmpty.is_empty: self.count > 0\n    Display.text: 'capacity'\n";
-    let ast = assert_handwritten_parses(source);
+    let ast = assert_handwritten_parses(
+        "record_declaration_with_multiple_provided_traits_parse",
+        source,
+    );
     let decl = ast
         .tags
         .get(&internment::Intern::<String>::from_ref("Capacity"))
@@ -463,7 +450,7 @@ fn record_declaration_with_multiple_provided_traits_parse() {
 #[test]
 fn interface_composition_uses_is_and() {
     let source = "InOut is Input and Output\n";
-    let ast = assert_handwritten_parses(source);
+    let ast = assert_handwritten_parses("interface_composition_uses_is_and", source);
     let decl = ast
         .tags
         .get(&internment::Intern::<String>::from_ref("InOut"))
@@ -485,8 +472,8 @@ fn interface_composition_uses_is_and() {
 
 #[test]
 fn composed_interface_accepts_qualified_method_body() {
-    let source = "TraitA has run(self ref) Int\nTraitB has stop(self ref) Int\nCombined has TraitA and TraitB\n    ordinary(self ref) Int: 0\n    TraitA.run(self ref) Int: 1\n";
-    let ast = assert_handwritten_parses(source);
+    let source = "TraitA has run(self ref) Int\nTraitB has stop(self ref) Int\nCombined has TraitA and TraitB\n    ordinary(self ref) Int: return 0\n    TraitA.run(self ref) Int: return 1\n";
+    let ast = assert_handwritten_parses("composed_interface_accepts_qualified_method_body", source);
     let decl = ast
         .tags
         .get(&internment::Intern::<String>::from_ref("Combined"))
@@ -521,8 +508,11 @@ fn composed_interface_accepts_qualified_method_body() {
 
 #[test]
 fn qualified_conflicting_methods_have_distinct_canonical_names() {
-    let source = "TraitA has run(self ref) Int\nTraitB has run(self ref) Int\nCombined has TraitA and TraitB\n    TraitA.run(self ref) Int: 1\n    TraitB.run(self ref) Int: 2\n";
-    let ast = assert_handwritten_parses(source);
+    let source = "TraitA has run(self ref) Int\nTraitB has run(self ref) Int\nCombined has TraitA and TraitB\n    TraitA.run(self ref) Int: return 1\n    TraitB.run(self ref) Int: return 2\n";
+    let ast = assert_handwritten_parses(
+        "qualified_conflicting_methods_have_distinct_canonical_names",
+        source,
+    );
 
     assert!(
         ast.defs
@@ -536,28 +526,9 @@ fn qualified_conflicting_methods_have_distinct_canonical_names() {
 }
 
 #[test]
-fn qualified_trait_property_attaches_to_declaration() {
-    let source =
-        "Capacity has IsEmpty\n    count PointerSize\n    IsEmpty.is_empty: self.count > 0\n";
-    let ast = assert_handwritten_parses(source);
-    let decl = ast
-        .tags
-        .get(&internment::Intern::<String>::from_ref("Capacity"))
-        .expect("Capacity tag should exist");
-
-    let pt = decl
-        .provided_traits
-        .iter()
-        .find(|pt| pt.trait_name.as_str() == "IsEmpty")
-        .expect("IsEmpty provided trait");
-    assert_eq!(pt.fields.len(), 1);
-    assert_eq!(pt.fields[0].0.as_str(), "is_empty");
-}
-
-#[test]
 fn provided_composed_interface_flattens_components() {
     let source = "Input has read\nOutput has write\nInOut is Input and Output\nX0 has InOut\n";
-    let ast = assert_handwritten_parses(source);
+    let ast = assert_handwritten_parses("provided_composed_interface_flattens_components", source);
     let decl = ast
         .tags
         .get(&internment::Intern::<String>::from_ref("X0"))
@@ -569,76 +540,4 @@ fn provided_composed_interface_flattens_components() {
         .map(|pt| pt.trait_name.as_str())
         .collect();
     assert_eq!(trait_names, ["InOut", "Input", "Output"]);
-}
-
-/// `core.` with nothing after — the exact reproducer that froze the LSP from a
-/// hello-world-style `core.` partial input before progress assertions landed.
-#[test]
-fn partial_dangling_dot_after_id() {
-    assert_handwritten_parses("main:\n    core.\nreturn 0\n");
-}
-
-#[test]
-fn partial_dangling_dot_at_top_level() {
-    assert_handwritten_parses("core.\n");
-}
-
-#[test]
-fn partial_double_dot() {
-    assert_handwritten_parses("main:\n    core..\nreturn 0\n");
-}
-
-#[test]
-fn partial_dangling_dot_eof_no_newline() {
-    assert_handwritten_parses("core.");
-}
-
-#[test]
-fn partial_dangling_use_keyword() {
-    assert_handwritten_parses("use\n");
-}
-
-#[test]
-fn partial_dangling_use_dot() {
-    assert_handwritten_parses("use core.\n");
-}
-
-#[test]
-fn partial_open_paren_eof() {
-    assert_handwritten_parses("main:\n    f(\nreturn 0\n");
-}
-
-#[test]
-fn partial_open_paren_id_eof() {
-    assert_handwritten_parses("main:\n    f(x\nreturn 0\n");
-}
-
-#[test]
-fn partial_dangling_binary_op() {
-    assert_handwritten_parses("main:\n    x: 1 +\nreturn 0\n");
-}
-
-#[test]
-fn partial_dangling_range_op() {
-    assert_handwritten_parses("main:\n    r: 1 to\nreturn 0\n");
-}
-
-#[test]
-fn partial_unterminated_string() {
-    assert_handwritten_parses("main:\n    s: 'unclosed\nreturn 0\n");
-}
-
-#[test]
-fn partial_unterminated_format_string() {
-    assert_handwritten_parses("main:\n    s: \"hello {name\nreturn 0\n");
-}
-
-#[test]
-fn partial_bare_dot_in_body() {
-    assert_handwritten_parses("main:\n    .\nreturn 0\n");
-}
-
-#[test]
-fn partial_just_newlines_then_dot() {
-    assert_handwritten_parses("\n\n.\n");
 }

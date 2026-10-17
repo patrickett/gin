@@ -4,8 +4,8 @@
 #[cfg(test)]
 extern crate self as parser;
 
-pub mod content_hash;
 pub mod cursor;
+mod declaration_source;
 pub mod declare;
 pub mod expr;
 mod int_range;
@@ -19,6 +19,7 @@ pub mod type_annotation;
 pub mod unescape;
 
 use ast::FileAst;
+pub use declaration_source::{SourceDeclaration, source_declarations};
 
 /// Convenience function to parse Gin source text directly.
 ///
