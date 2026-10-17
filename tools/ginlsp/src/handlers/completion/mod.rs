@@ -1,9 +1,10 @@
-pub(crate) mod json;
+mod manifest;
 mod path;
 
 use std::path::PathBuf;
 
 use crate::Backend;
+use crate::handlers::{RequestTarget, byte_position, request_target};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use typecheck::completions::{CompletionCandidate, CompletionKind};
@@ -17,61 +18,56 @@ impl Backend {
             return Ok(None);
         }
 
-        let doc_uri = params.text_document_position.text_document.uri.clone();
-        let uri = doc_uri.to_string();
+        let uri = params.text_document_position.text_document.uri.to_string();
         let position = params.text_document_position.position;
 
         #[cfg(debug_assertions)]
-        self.client
-            .log_message(
-                MessageType::INFO,
-                format!("completion requested for URI: {}", uri),
-            )
+        self.debug_log(format!("completion requested for URI: {}", uri))
             .await;
 
-        // flask.jsonc completions are handled separately via json_documents.
-        if let Some(state) = self.json_documents.get(&uri) {
-            let items = Backend::complete_flask_json(&state.source, position, &doc_uri);
+        // Manifest completions are handled separately via manifest_documents.
+        if let Some(state) = self.manifest_documents.get(&uri) {
+            let items = Backend::complete_manifest(
+                &state.source,
+                position,
+                &params.text_document_position.text_document.uri,
+            );
             #[cfg(debug_assertions)]
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    format!("Returning {} completions for flask.jsonc", items.len()),
-                )
-                .await;
+            self.debug_log(format!(
+                "Returning {} completions for mod.flask",
+                items.len()
+            ))
+            .await;
             return Ok(Some(CompletionResponse::Array(items)));
         }
 
-        let file_path = match Backend::file_path_from_uri(&doc_uri) {
-            Some(p) => p,
-            None => {
-                #[cfg(debug_assertions)]
-                self.client
-                    .log_message(
-                        MessageType::INFO,
-                        format!("No file path found for URI: {}", uri),
-                    )
-                    .await;
-                return Ok(None);
-            }
+        let Some(target) = request_target(&params.text_document_position) else {
+            #[cfg(debug_assertions)]
+            self.debug_log(format!("No file path found for URI: {}", uri))
+                .await;
+            return Ok(None);
         };
 
-        let config = self.get_or_load_config(&doc_uri);
+        let config = self.get_or_load_config(&target.uri);
 
         // Read source + line index from the engine for path completions
         // which need the current line text to parse `use` statements.
         let snapshot_st = self.snapshot();
-        if let Some(doc) = snapshot_st.cache.document_snapshot(&file_path)
+        if let Some(doc) = snapshot_st.cache.document_snapshot(&target.file_path)
             && let Some(items) =
-                Backend::use_completions(&doc.source, position, &doc_uri, config.as_ref())
+                Backend::use_completions(&doc.source, position, &target.uri, config.as_ref())
         {
             return Ok(Some(CompletionResponse::Array(items)));
         }
 
-        let file_path_clone = file_path.clone();
+        let RequestTarget {
+            file_path,
+            position,
+            ..
+        } = target;
         let result = self
             .run_blocking_request("completion", move |this| {
-                Self::compute_completions(&this, file_path_clone, position)
+                Self::compute_completions(&this, file_path, position)
             })
             .await;
 
@@ -88,16 +84,57 @@ impl Backend {
             Some(d) => d,
             None => return Vec::new(),
         };
-        let byte_pos =
-            match doc
-                .line_index
-                .position_to_byte(&doc.source, position.line, position.character)
-            {
-                Some(b) => b as u32,
-                None => return Vec::new(),
-            };
-        let candidates = snapshot.cache.completions_at(&file_path, byte_pos);
+        let Some(byte_pos) = byte_position(&doc, position) else {
+            return Vec::new();
+        };
+        let candidates = snapshot.cache.completions_at(&file_path, byte_pos as u32);
         Self::candidates_to_lsp(candidates)
+    }
+
+    pub(crate) fn edit_range(position: Position, start_character: u32) -> Range {
+        Range {
+            start: Position::new(position.line, start_character),
+            end: position,
+        }
+    }
+
+    pub(crate) fn file_dir(uri: &Url) -> Option<PathBuf> {
+        uri.to_file_path()
+            .ok()?
+            .parent()
+            .map(std::path::Path::to_path_buf)
+    }
+
+    pub(crate) fn token_prefix(before_cursor: &str) -> (usize, &str) {
+        let token_start = before_cursor
+            .rfind(|c: char| c.is_whitespace() || c == ',')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        (token_start, before_cursor[token_start..].trim())
+    }
+
+    fn completion_item(
+        label: String,
+        kind: CompletionItemKind,
+        detail: String,
+        edit: Option<TextEdit>,
+    ) -> CompletionItem {
+        CompletionItem {
+            label,
+            kind: Some(kind),
+            detail: Some(detail),
+            text_edit: edit.map(CompletionTextEdit::Edit),
+            ..Default::default()
+        }
+    }
+
+    fn dependency_item(name: String) -> CompletionItem {
+        Self::completion_item(
+            name,
+            CompletionItemKind::MODULE,
+            "dependency".to_string(),
+            None,
+        )
     }
 
     fn candidates_to_lsp(candidates: Vec<CompletionCandidate>) -> Vec<CompletionItem> {

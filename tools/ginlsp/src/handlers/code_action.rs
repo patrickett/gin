@@ -1,6 +1,9 @@
 use crate::Backend;
+use crate::handlers::{byte_range_to_range, line_byte_range, single_file_action};
 use ast::HasSpanId;
 use ast::source::SourceExt;
+use diagnostic::DiagnosticCode;
+use diagnostic::code::{ParseCode, SyntaxCode};
 use std::collections::HashMap;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -19,6 +22,8 @@ impl Backend {
             return Ok(None);
         }
 
+        let mut out = self.style_code_actions(&params);
+
         if let Some(ref only) = params.context.only
             && !only.is_empty()
             && !only.iter().any(|k| {
@@ -26,7 +31,7 @@ impl Backend {
                     || k.as_str().starts_with("quickfix.")
             })
         {
-            return Ok(Some(Vec::new()));
+            return Ok(Some(out));
         }
 
         // Read source and parse output from the engine (single source of truth).
@@ -42,10 +47,7 @@ impl Backend {
             source.unwrap_or_else(|| std::sync::Arc::new(String::new()));
         let engine_symptoms: Vec<diagnostic::Diagnostic> = engine_symptoms.unwrap_or_default();
 
-        let mut out: Vec<CodeActionOrCommand> = Vec::new();
-
         // Track diagnostics for "fix all" actions.
-        let mut indented_return_diags: Vec<&Diagnostic> = Vec::new();
         let mut cursor_comma_diags: Vec<&Diagnostic> = Vec::new();
 
         for diag in &params.context.diagnostics {
@@ -53,9 +55,6 @@ impl Backend {
                 out.push(CodeActionOrCommand::CodeAction(action));
             }
             if let Some(action) = Self::rename_bind_snake_case_code_action(uri, diag) {
-                out.push(CodeActionOrCommand::CodeAction(action));
-            }
-            if let Some(action) = Self::rename_duplicate_parameter_code_action(uri, diag) {
                 out.push(CodeActionOrCommand::CodeAction(action));
             }
             if let Some(actions) = Self::add_import_code_actions(uri, diag, &source) {
@@ -69,16 +68,10 @@ impl Backend {
             if let Some(action) = Self::sort_imports_code_action(uri, diag) {
                 out.push(CodeActionOrCommand::CodeAction(action));
             }
-            if let Some(action) = Self::fix_indented_return_code_action(uri, diag, &source) {
-                out.push(CodeActionOrCommand::CodeAction(action));
-            }
             if let Some(action) = Self::omit_unreachable_else_code_action(uri, diag, &source) {
                 out.push(CodeActionOrCommand::CodeAction(action));
             }
             // Collect for "fix all" actions.
-            if Self::is_indented_return_diag(diag) {
-                indented_return_diags.push(diag);
-            }
             if Self::is_unnecessary_comma_diag(diag) {
                 cursor_comma_diags.push(diag);
             }
@@ -94,21 +87,10 @@ impl Backend {
         // Collect ALL unnecessary comma diagnostics from the engine for the bulk action.
         let all_comma_diags: Vec<Range> = engine_symptoms
             .iter()
-            .filter(|s| s.code.slug() == "parse-unnecessary-comma")
-            .map(|s| {
-                let (sl, sc) = source.byte_offset_to_position(s.span.start());
-                let (el, ec) = source.byte_offset_to_position(s.span.end());
-                Range {
-                    start: Position {
-                        line: sl,
-                        character: sc,
-                    },
-                    end: Position {
-                        line: el,
-                        character: ec,
-                    },
-                }
+            .filter(|s| {
+                s.code == DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::UnnecessaryComma))
             })
+            .map(|s| byte_range_to_range(s.span.start(), s.span.end(), &source))
             .collect();
 
         if !all_comma_diags.is_empty()
@@ -118,52 +100,22 @@ impl Backend {
             out.push(CodeActionOrCommand::CodeAction(action));
         }
 
-        // Add "fix all" action if there are multiple indented returns.
-        if indented_return_diags.len() > 1
-            && let Some(action) =
-                Self::fix_all_indented_returns_code_action(uri, &indented_return_diags, &source)
-        {
-            out.push(CodeActionOrCommand::CodeAction(action));
-        }
-
         Ok(Some(out))
     }
 
-    fn is_indented_return_diag(diag: &Diagnostic) -> bool {
-        let v = match diag.data.as_ref() {
-            Some(v) => v,
-            None => return false,
-        };
-        let obj = match v.as_object() {
-            Some(obj) => obj,
-            None => return false,
-        };
-        obj.get("gincQuickFix").and_then(|x| x.as_str()) == Some("fix-indented-return")
+    fn quickfix(title: &str, diag: &Diagnostic, uri: &Url, edits: Vec<TextEdit>) -> CodeAction {
+        let mut action =
+            single_file_action(uri, title.to_string(), CodeActionKind::QUICKFIX, edits);
+        action.diagnostics = Some(vec![diag.clone()]);
+        action
     }
 
-    /// Compute the text edit that unindents a return line to column 0.
-    fn unindent_return_edit(diag: &Diagnostic, source: &str) -> Option<TextEdit> {
-        let line = diag.range.start.line;
-        let line_text = source.lines().nth(line as usize)?;
-
-        // Find the first non-whitespace character on the line.
-        let indent_end = line_text.len() - line_text.trim_start().len();
-        if indent_end == 0 {
-            return None; // already unindented
-        }
-
-        let range = Range {
-            start: Position { line, character: 0 },
-            end: Position {
-                line,
-                character: indent_end as u32,
-            },
-        };
-
-        Some(TextEdit {
-            range,
-            new_text: String::new(), // remove leading whitespace
-        })
+    fn quickfix_obj<'a>(
+        diag: &'a Diagnostic,
+        command: &str,
+    ) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+        let obj = diag.data.as_ref()?.as_object()?;
+        (obj.get("gincQuickFix").and_then(|x| x.as_str()) == Some(command)).then_some(obj)
     }
 
     fn omit_unreachable_else_edit(diag: &Diagnostic, source: &str) -> Option<TextEdit> {
@@ -171,7 +123,7 @@ impl Backend {
             source.position_to_byte_offset(diag.range.start.line, diag.range.start.character)?;
         let end_byte =
             source.position_to_byte_offset(diag.range.end.line, diag.range.end.character)?;
-        let line_start = source[..start_byte].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let (line_start, _) = line_byte_range(source, diag.range.start.line)?;
         let line_prefix = &source[line_start..start_byte];
         let delete_start = if line_prefix.chars().all(|c| matches!(c, ' ' | '\t')) {
             line_start
@@ -179,7 +131,7 @@ impl Backend {
             start_byte
         };
         Some(TextEdit {
-            range: Self::byte_range_to_range(delete_start, end_byte, source),
+            range: byte_range_to_range(delete_start, end_byte, source),
             new_text: String::new(),
         })
     }
@@ -189,116 +141,30 @@ impl Backend {
         diag: &Diagnostic,
         source: &str,
     ) -> Option<CodeAction> {
-        let v = diag.data.as_ref()?;
-        let obj = v.as_object()?;
-        if obj.get("gincQuickFix").and_then(|x| x.as_str()) != Some("omit-unreachable-else") {
-            return None;
-        }
+        Self::quickfix_obj(diag, "omit-unreachable-else")?;
         let edit = Self::omit_unreachable_else_edit(diag, source)?;
 
-        let mut changes = HashMap::new();
-        changes.insert(uri.clone(), vec![edit]);
-
-        Some(CodeAction {
-            title: "Remove unreachable `else` clause".to_string(),
-            kind: Some(CodeActionKind::QUICKFIX),
-            diagnostics: Some(vec![diag.clone()]),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            is_preferred: Some(true),
-            ..Default::default()
-        })
-    }
-
-    fn fix_indented_return_code_action(
-        uri: &Url,
-        diag: &Diagnostic,
-        source: &str,
-    ) -> Option<CodeAction> {
-        if !Self::is_indented_return_diag(diag) {
-            return None;
-        }
-        let edit = Self::unindent_return_edit(diag, source)?;
-
-        let mut changes = HashMap::new();
-        changes.insert(uri.clone(), vec![edit]);
-
-        Some(CodeAction {
-            title: "Unindent return".to_string(),
-            kind: Some(CodeActionKind::QUICKFIX),
-            diagnostics: Some(vec![diag.clone()]),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            is_preferred: Some(true),
-            ..Default::default()
-        })
-    }
-
-    fn fix_all_indented_returns_code_action(
-        uri: &Url,
-        diags: &[&Diagnostic],
-        source: &str,
-    ) -> Option<CodeAction> {
-        let mut changes = HashMap::new();
-        let mut edits: Vec<TextEdit> = Vec::new();
-
-        for diag in diags {
-            if let Some(edit) = Self::unindent_return_edit(diag, source) {
-                edits.push(edit);
-            }
-        }
-
-        if edits.is_empty() {
-            return None;
-        }
-
-        changes.insert(uri.clone(), edits);
-
-        Some(CodeAction {
-            title: format!("Unindent all {} returns", diags.len()),
-            kind: Some(CodeActionKind::QUICKFIX),
-            diagnostics: Some(diags.iter().map(|d| (*d).clone()).collect()),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            is_preferred: Some(false),
-            ..Default::default()
-        })
+        Some(Self::quickfix(
+            "Remove unreachable `else` clause",
+            diag,
+            uri,
+            vec![edit],
+        ))
     }
 
     fn sort_imports_code_action(uri: &Url, diag: &Diagnostic) -> Option<CodeAction> {
-        let v = diag.data.as_ref()?;
-        let obj = v.as_object()?;
-        if obj.get("gincQuickFix").and_then(|x| x.as_str()) != Some("sort-imports") {
-            return None;
-        }
+        let obj = Self::quickfix_obj(diag, "sort-imports")?;
         let sorted_text = obj.get("sortedText").and_then(|x| x.as_str())?;
 
-        let mut changes = HashMap::new();
-        changes.insert(
-            uri.clone(),
+        Some(Self::quickfix(
+            "Sort imports alphabetically",
+            diag,
+            uri,
             vec![TextEdit {
                 range: diag.range,
                 new_text: sorted_text.to_string(),
             }],
-        );
-
-        Some(CodeAction {
-            title: "Sort imports alphabetically".to_string(),
-            kind: Some(CodeActionKind::QUICKFIX),
-            diagnostics: Some(vec![diag.clone()]),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            is_preferred: Some(true),
-            ..Default::default()
-        })
+        ))
     }
 
     fn remove_bundle_member_code_action(
@@ -306,11 +172,7 @@ impl Backend {
         diag: &Diagnostic,
         source: &str,
     ) -> Option<CodeAction> {
-        let v = diag.data.as_ref()?;
-        let obj = v.as_object()?;
-        if obj.get("gincQuickFix").and_then(|x| x.as_str()) != Some("remove-bundle-member") {
-            return None;
-        }
+        let obj = Self::quickfix_obj(diag, "remove-bundle-member")?;
         let symbol = obj.get("symbol").and_then(|x| x.as_str())?;
 
         let line = diag.range.start.line;
@@ -343,26 +205,15 @@ impl Backend {
             },
         };
 
-        let mut changes = HashMap::new();
-        changes.insert(
-            uri.clone(),
+        Some(Self::quickfix(
+            &format!("Remove `{symbol}`"),
+            diag,
+            uri,
             vec![TextEdit {
                 range,
                 new_text: String::new(),
             }],
-        );
-
-        Some(CodeAction {
-            title: format!("Remove `{symbol}`"),
-            kind: Some(CodeActionKind::QUICKFIX),
-            diagnostics: Some(vec![diag.clone()]),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            is_preferred: Some(true),
-            ..Default::default()
-        })
+        ))
     }
 
     /// Byte/line position to insert a new `use` line (after the last `use` block, or at file start).
@@ -390,39 +241,6 @@ impl Backend {
         })
     }
 
-    fn line_byte_range(source: &str, line: u32) -> Option<(usize, usize)> {
-        let mut line_start = 0usize;
-        let mut current = 0u32;
-        for (i, b) in source.bytes().enumerate() {
-            if b == b'\n' {
-                if current == line {
-                    return Some((line_start, i + 1));
-                }
-                current += 1;
-                line_start = i + 1;
-            }
-        }
-        if current == line {
-            return Some((line_start, source.len()));
-        }
-        None
-    }
-
-    fn byte_range_to_range(start: usize, end: usize, source: &str) -> Range {
-        let (sl, sc) = source.byte_offset_to_position(start);
-        let (el, ec) = source.byte_offset_to_position(end);
-        Range {
-            start: Position {
-                line: sl,
-                character: sc,
-            },
-            end: Position {
-                line: el,
-                character: ec,
-            },
-        }
-    }
-
     fn build_add_import_edits(
         source: &str,
         use_line: &str,
@@ -434,9 +252,9 @@ impl Backend {
         let mut edits = Vec::new();
 
         if let Some(line) = replace_line {
-            if let Some((start, end)) = Self::line_byte_range(source, line) {
+            if let Some((start, end)) = line_byte_range(source, line) {
                 edits.push(TextEdit {
-                    range: Self::byte_range_to_range(start, end, source),
+                    range: byte_range_to_range(start, end, source),
                     new_text: format!("{use_line}\n"),
                 });
             }
@@ -461,9 +279,9 @@ impl Backend {
             if Some(line) == replace_line {
                 continue;
             }
-            if let Some((start, end)) = Self::line_byte_range(source, line) {
+            if let Some((start, end)) = line_byte_range(source, line) {
                 edits.push(TextEdit {
-                    range: Self::byte_range_to_range(start, end, source),
+                    range: byte_range_to_range(start, end, source),
                     new_text: String::new(),
                 });
             }
@@ -477,11 +295,7 @@ impl Backend {
         diag: &Diagnostic,
         source: &str,
     ) -> Option<Vec<CodeAction>> {
-        let v = diag.data.as_ref()?;
-        let obj = v.as_object()?;
-        if obj.get("gincQuickFix").and_then(|x| x.as_str()) != Some("add-import") {
-            return None;
-        }
+        let obj = Self::quickfix_obj(diag, "add-import")?;
         let suggestions = obj.get("suggestions")?.as_array()?;
 
         let insert_pos = Self::use_insert_position(source);
@@ -517,128 +331,49 @@ impl Backend {
                 insert_pos,
                 needs_leading_newline,
             );
-            let mut changes = HashMap::new();
-            changes.insert(uri.clone(), text_edits);
-            actions.push(CodeAction {
-                title: format!("Add `{use_line}`"),
-                kind: Some(CodeActionKind::QUICKFIX),
-                diagnostics: Some(vec![diag.clone()]),
-                edit: Some(WorkspaceEdit {
-                    changes: Some(changes),
-                    ..Default::default()
-                }),
-                is_preferred: Some(actions.is_empty()),
-                ..Default::default()
-            });
+            let mut action = Self::quickfix(&format!("Add `{use_line}`"), diag, uri, text_edits);
+            action.is_preferred = Some(actions.is_empty());
+            actions.push(action);
         }
 
         (!actions.is_empty()).then_some(actions)
     }
 
     fn rename_bind_snake_case_code_action(uri: &Url, diag: &Diagnostic) -> Option<CodeAction> {
-        let v = diag.data.as_ref()?;
-        let obj = v.as_object()?;
-        if obj.get("gincQuickFix").and_then(|x| x.as_str()) != Some("rename-bind-snake-case") {
-            return None;
-        }
+        let obj = Self::quickfix_obj(diag, "rename-bind-snake-case")?;
         let old_name = obj.get("oldName").and_then(|x| x.as_str())?;
         let new_name = obj.get("newName").and_then(|x| x.as_str())?;
 
-        let mut changes = HashMap::new();
-        changes.insert(
-            uri.clone(),
+        Some(Self::quickfix(
+            &format!("Rename bind `{old_name}` to `{new_name}`"),
+            diag,
+            uri,
             vec![TextEdit {
                 range: diag.range,
                 new_text: new_name.to_string(),
             }],
-        );
-
-        Some(CodeAction {
-            title: format!("Rename bind `{old_name}` to `{new_name}`"),
-            kind: Some(CodeActionKind::QUICKFIX),
-            diagnostics: Some(vec![diag.clone()]),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            is_preferred: Some(true),
-            ..Default::default()
-        })
-    }
-
-    fn rename_duplicate_parameter_code_action(uri: &Url, diag: &Diagnostic) -> Option<CodeAction> {
-        let v = diag.data.as_ref()?;
-        let obj = v.as_object()?;
-        if obj.get("gincQuickFix").and_then(|x| x.as_str()) != Some("rename-duplicate-parameter") {
-            return None;
-        }
-        let old_name = obj.get("oldName").and_then(|x| x.as_str())?;
-        let new_name = obj.get("newName").and_then(|x| x.as_str())?;
-
-        let mut changes = HashMap::new();
-        changes.insert(
-            uri.clone(),
-            vec![TextEdit {
-                range: diag.range,
-                new_text: new_name.to_string(),
-            }],
-        );
-
-        Some(CodeAction {
-            title: format!("Rename parameter `{old_name}` to `{new_name}`"),
-            kind: Some(CodeActionKind::QUICKFIX),
-            diagnostics: Some(vec![diag.clone()]),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            is_preferred: Some(true),
-            ..Default::default()
-        })
+        ))
     }
 
     fn replace_binding_code_action(uri: &Url, diag: &Diagnostic) -> Option<CodeAction> {
-        let v = diag.data.as_ref()?;
-        let obj = v.as_object()?;
-        if obj.get("gincQuickFix").and_then(|x| x.as_str()) != Some("replace-binding") {
-            return None;
-        }
+        let obj = Self::quickfix_obj(diag, "replace-binding")?;
         let old_name = obj.get("oldName").and_then(|x| x.as_str())?;
         let new_name = obj.get("newName").and_then(|x| x.as_str())?;
 
-        let mut changes = HashMap::new();
-        changes.insert(
-            uri.clone(),
+        Some(Self::quickfix(
+            &format!("Replace `{old_name}` with `{new_name}`"),
+            diag,
+            uri,
             vec![TextEdit {
                 range: diag.range,
                 new_text: new_name.to_string(),
             }],
-        );
-
-        Some(CodeAction {
-            title: format!("Replace `{old_name}` with `{new_name}`"),
-            kind: Some(CodeActionKind::QUICKFIX),
-            diagnostics: Some(vec![diag.clone()]),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            is_preferred: Some(true),
-            ..Default::default()
-        })
+        ))
     }
 
     /// Check if a diagnostic is an unnecessary-comma hint.
     fn is_unnecessary_comma_diag(diag: &Diagnostic) -> bool {
-        let v = match diag.data.as_ref() {
-            Some(v) => v,
-            None => return false,
-        };
-        let obj = match v.as_object() {
-            Some(obj) => obj,
-            None => return false,
-        };
-        obj.get("gincQuickFix").and_then(|x| x.as_str()) == Some("remove-unnecessary-comma")
+        Self::quickfix_obj(diag, "remove-unnecessary-comma").is_some()
     }
 
     /// Compute the text edit that removes an unnecessary comma.
@@ -649,7 +384,7 @@ impl Backend {
             source.position_to_byte_offset(diag.range.end.line, diag.range.end.character)?;
 
         Some(TextEdit {
-            range: Self::byte_range_to_range(start_byte, end_byte, source),
+            range: byte_range_to_range(start_byte, end_byte, source),
             new_text: String::new(),
         })
     }
@@ -665,20 +400,12 @@ impl Backend {
         }
         let edit = Self::remove_unnecessary_comma_edit(diag, source)?;
 
-        let mut changes = HashMap::new();
-        changes.insert(uri.clone(), vec![edit]);
-
-        Some(CodeAction {
-            title: "Remove unnecessary comma".to_string(),
-            kind: Some(CodeActionKind::QUICKFIX),
-            diagnostics: Some(vec![diag.clone()]),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            is_preferred: Some(true),
-            ..Default::default()
-        })
+        Some(Self::quickfix(
+            "Remove unnecessary comma",
+            diag,
+            uri,
+            vec![edit],
+        ))
     }
 
     /// Code action to remove all unnecessary commas in the file.

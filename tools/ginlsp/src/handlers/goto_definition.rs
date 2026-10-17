@@ -1,5 +1,6 @@
 use crate::Backend;
 use crate::diagnostics::DiagnosticConverter;
+use crate::handlers::{byte_position, request_target};
 
 use resolve::{CursorDefinition, DefLocation, ImportNavLocation};
 use tower_lsp::jsonrpc::Result;
@@ -14,31 +15,19 @@ impl Backend {
             return Ok(None);
         }
 
-        let uri = params
-            .text_document_position_params
-            .text_document
-            .uri
-            .clone();
-        let position = params.text_document_position_params.position;
-
-        let file_path = match Backend::file_path_from_uri(&uri) {
-            Some(p) => p,
-            None => return Ok(None),
+        let Some(target) = request_target(&params.text_document_position_params) else {
+            return Ok(None);
         };
 
         let locations = self
             .run_blocking_request("goto_definition", move |this| {
                 let snapshot = this.snapshot();
-                let doc = snapshot.cache.document_snapshot(&file_path)?;
-                let byte_pos = doc.line_index.position_to_byte(
-                    &doc.source,
-                    position.line,
-                    position.character,
-                )?;
+                let doc = snapshot.cache.document_snapshot(&target.file_path)?;
+                let byte_pos = byte_position(&doc, target.position)?;
                 let def = snapshot
                     .cache
-                    .goto_definition(&file_path, byte_pos as u32)?;
-                Self::cursor_definition_to_response(&uri, &doc.source, &doc.line_index, def)
+                    .goto_definition(&target.file_path, byte_pos as u32)?;
+                Self::cursor_definition_to_response(&target.uri, &doc.source, &doc.line_index, def)
             })
             .await;
 

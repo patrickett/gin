@@ -1,7 +1,8 @@
 use super::*;
 use ast::source::SourceExt;
+use diagnostic::code::{PatternCode, SymbolCode, SyntaxCode};
 use std::fs;
-use std::path::Path;
+use test_fixtures::TempPackage;
 use tower_lsp::lsp_types::Url;
 
 fn quickfix_kind(data: Option<&serde_json::Value>) -> Option<&str> {
@@ -11,34 +12,18 @@ fn quickfix_kind(data: Option<&serde_json::Value>) -> Option<&str> {
 /// `UnknownSymbol` uses the same `add-import` quickfix as undefined binds.
 #[test]
 fn unknown_symbol_add_import_quickfix_when_symbol_found_in_package() {
-    let root = std::env::temp_dir().join(format!("ginlsp_unknown_symbol_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(root.join("string")).unwrap();
-    fs::create_dir_all(root.join("primitive")).unwrap();
-    fs::write(
-        root.join("flask.jsonc"),
-        r#"{"name":"core","version":"0.0.0","authors":[]}"#,
-    )
-    .unwrap();
-    fs::write(
-        root.join("string/string.gin"),
-        "ToString has (to_string String)\n",
-    )
-    .unwrap();
-    fs::write(
-            root.join("primitive/bool.gin"),
-            "Bool is True or False and\n    has ToString(to_string: when self then 'true' else 'false')\n",
-        )
-        .unwrap();
+    let pkg = TempPackage::new("unknown_symbol");
+    pkg.write_flask("core");
+    pkg.write("string/string.gin", "ToString has (to_string String)\n");
+    let path = pkg.write(
+        "primitive/bool.gin",
+        "Bool is True or False and\n    has ToString(to_string: when self then 'true' else 'false')\n",
+    );
 
-    let source = fs::read_to_string(root.join("primitive/bool.gin")).unwrap();
-    let path = Path::new(&root).join("primitive/bool.gin");
-    let diag = Diagnostic::new(
-        "type-unknown-symbol",
-        "unknown symbol `ToString`".to_string(),
-    )
-    .with_arg("name", "ToString")
-    .at_span(span::Span::new(0, 0));
+    let source = fs::read_to_string(&path).unwrap();
+    let diag = Diagnostic::new(SymbolCode::Unknown, "unknown symbol `ToString`".to_string())
+        .with_arg("name", "ToString")
+        .at_span(span::Span::new(0, 0));
 
     let converter = DiagnosticConverter::new(source.clone(), LineIndex::new(&source));
     let data = converter.diagnostic_quickfix_data(&diag, Some(&path));
@@ -62,28 +47,17 @@ fn unknown_symbol_add_import_quickfix_when_symbol_found_in_package() {
         }),
         "expected import line for ToString: {suggestions:?}"
     );
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
 fn unknown_symbol_add_import_merges_with_existing_primitive_import() {
-    let root = std::env::temp_dir().join(format!("ginlsp_merge_import_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(root.join("string")).unwrap();
-    fs::create_dir_all(root.join("primitive")).unwrap();
-    fs::write(
-        root.join("flask.jsonc"),
-        r#"{"name":"core","version":"0.0.0","authors":[]}"#,
-    )
-    .unwrap();
-    fs::write(root.join("primitive/list.gin"), "List(x) is Unit\n").unwrap();
-    fs::write(root.join("primitive/int.gin"), "Byte is Unit\n").unwrap();
+    let pkg = TempPackage::new("merge_import");
+    pkg.write_flask("core");
+    pkg.write("primitive/list.gin", "List(x) is Unit\n");
+    pkg.write("primitive/int.gin", "Byte is Unit\n");
     let source = "use '../primitive/' List\n\nString has (bytes List(Byte))\n";
-    fs::write(root.join("string/string.gin"), source).unwrap();
-
-    let path = Path::new(&root).join("string/string.gin");
-    let diag = Diagnostic::new("type-unknown-symbol", "unknown symbol `Byte`".to_string())
+    let path = pkg.write("string/string.gin", source);
+    let diag = Diagnostic::new(SymbolCode::Unknown, "unknown symbol `Byte`".to_string())
         .with_arg("name", "Byte")
         .at_span(span::Span::new(0, 0));
 
@@ -110,31 +84,20 @@ fn unknown_symbol_add_import_merges_with_existing_primitive_import() {
         Some("use '../primitive/' Byte, List")
     );
     assert_eq!(merged.get("replaceLine").and_then(|v| v.as_u64()), Some(0));
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
 fn unknown_symbol_add_import_merges_with_existing_sibling_import() {
-    let root = std::env::temp_dir().join(format!("ginlsp_merge_sibling_{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(root.join("marker")).unwrap();
-    fs::write(
-        root.join("flask.jsonc"),
-        r#"{"name":"core","version":"0.0.0","authors":[]}"#,
-    )
-    .unwrap();
-    fs::write(
-        root.join("marker/marker.gin"),
+    let pkg = TempPackage::new("merge_sibling");
+    pkg.write_flask("core");
+    pkg.write(
+        "marker/marker.gin",
         "Marker has (infect Unit)\nInfection is Unit\n",
-    )
-    .unwrap();
+    );
     let source = "use Marker\n\nCopy is Marker(Unit)\n";
-    fs::write(root.join("marker/copy.gin"), source).unwrap();
-
-    let path = Path::new(&root).join("marker/copy.gin");
+    let path = pkg.write("marker/copy.gin", source);
     let diag = Diagnostic::new(
-        "type-unknown-symbol",
+        SymbolCode::Unknown,
         "unknown symbol `Infection`".to_string(),
     )
     .with_arg("name", "Infection")
@@ -163,8 +126,6 @@ fn unknown_symbol_add_import_merges_with_existing_sibling_import() {
         Some("use Infection, Marker")
     );
     assert_eq!(merged.get("replaceLine").and_then(|v| v.as_u64()), Some(0));
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -173,7 +134,7 @@ fn unknown_symbol_lsp_range_uses_diagnostic_span() {
     let start = source.find("AllFields").unwrap();
     let end = start + "AllFields".len();
     let diag = Diagnostic::new(
-        "type-unknown-symbol",
+        SymbolCode::Unknown,
         "unknown symbol `AllFields`".to_string(),
     )
     .with_arg("name", "AllFields")
@@ -191,7 +152,7 @@ fn unknown_symbol_lsp_range_uses_diagnostic_span() {
 #[test]
 fn unknown_symbol_replace_binding_when_did_you_mean() {
     let diag = Diagnostic::new(
-        "type-unknown-symbol",
+        SymbolCode::Unknown,
         "unknown symbol `foo`, did you mean `main`?",
     )
     .with_arg("name", "foo")
@@ -206,7 +167,7 @@ fn unknown_symbol_replace_binding_when_did_you_mean() {
 
 #[test]
 fn unreachable_else_omit_quickfix() {
-    let diag = Diagnostic::new("type-unreachable-else-arm", "`else` arm is unreachable")
+    let diag = Diagnostic::new(PatternCode::ElseUnreachable, "`else` arm is unreachable")
         .at_span(span::Span::new(0, 0));
     let converter = DiagnosticConverter::new(String::new(), LineIndex::new(""));
     assert_eq!(
@@ -217,14 +178,15 @@ fn unreachable_else_omit_quickfix() {
 
 #[test]
 fn indexed_diagnostics_produce_correct_ranges() {
-    let source = "use core true\n\nmain:\n    core.true\n    check(core.true)\nreturn\n";
+    let source = "use core true\n\nmain:\n    core.true\n    check(core.true)\n    return\n";
     let symptoms = [
-        Diagnostic::new("parse-custom", "unexpected token").at_span(span::Span::new(0, 3)),
-        Diagnostic::new("type-unknown-symbol", "unknown symbol `Foo`")
+        Diagnostic::new(SyntaxCode::UnexpectedToken, "unexpected token")
+            .at_span(span::Span::new(0, 3)),
+        Diagnostic::new(SymbolCode::Unknown, "unknown symbol `Foo`")
             .with_arg("name", "Foo")
             .at_span(span::Span::new(18, 21)),
         Diagnostic::new(
-            "parse-bind-name-not-snake-case",
+            SyntaxCode::BindingNameNotSnakeCase,
             "name should be snake_case",
         )
         .with_arg("name", "CamelCase")
@@ -255,7 +217,7 @@ fn indexed_diagnostics_produce_correct_ranges() {
 #[test]
 fn empty_parens_are_reported_as_warning() {
     use parser::query::SourceParseExt;
-    let source = "good() Int: 7\n";
+    let source = "good() Int: return 7\n";
     let output = source.parse_source_full();
     let converter = DiagnosticConverter::new(source.to_string(), LineIndex::new(source));
     let diagnostics = converter.symptoms_to_diagnostics(

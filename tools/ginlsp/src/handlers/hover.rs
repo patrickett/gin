@@ -1,4 +1,5 @@
 use crate::Backend;
+use crate::handlers::{byte_position, byte_range_to_range, request_target};
 use ast::source::SourceExt;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -9,29 +10,18 @@ impl Backend {
             return Ok(None);
         }
 
-        let uri = params
-            .text_document_position_params
-            .text_document
-            .uri
-            .clone();
-        let position = params.text_document_position_params.position;
-
-        let file_path = match Backend::file_path_from_uri(&uri) {
-            Some(p) => p,
-            None => return Ok(None),
+        let Some(target) = request_target(&params.text_document_position_params) else {
+            return Ok(None);
         };
 
         // Read source + line index from the engine (single source of truth).
         let snapshot_st = self.snapshot();
-        let doc = match snapshot_st.cache.document_snapshot(&file_path) {
+        let doc = match snapshot_st.cache.document_snapshot(&target.file_path) {
             Some(d) => d,
             None => return Ok(None),
         };
 
-        let Some(byte_pos) =
-            doc.line_index
-                .position_to_byte(&doc.source, position.line, position.character)
-        else {
+        let Some(byte_pos) = byte_position(&doc, target.position) else {
             return Ok(None);
         };
 
@@ -52,7 +42,7 @@ impl Backend {
         let content = self
             .run_blocking_request("hover", move |this| {
                 let snapshot = this.snapshot();
-                snapshot.cache.hover(&file_path, byte_pos_u32)
+                snapshot.cache.hover(&target.file_path, byte_pos_u32)
             })
             .await
             .flatten();
@@ -62,20 +52,9 @@ impl Backend {
                 kind: MarkupKind::Markdown,
                 value: content.markdown,
             }),
-            range: content.byte_range.map(|range| {
-                let (s_line, s_char) = doc.line_index.byte_to_position(&doc.source, range.start);
-                let (e_line, e_char) = doc.line_index.byte_to_position(&doc.source, range.end);
-                Range {
-                    start: Position {
-                        line: s_line,
-                        character: s_char,
-                    },
-                    end: Position {
-                        line: e_line,
-                        character: e_char,
-                    },
-                }
-            }),
+            range: content
+                .byte_range
+                .map(|range| byte_range_to_range(range.start, range.end, &doc.source)),
         }))
     }
 }

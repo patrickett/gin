@@ -1,59 +1,20 @@
 use super::*;
-use std::fs;
-use std::path::PathBuf;
-
-fn unique_temp_dir(name: &str) -> PathBuf {
-    let mut dir = std::env::temp_dir();
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .subsec_nanos();
-    dir.push(format!("ginlsp_use_complete_{name}_{pid}_{nanos}"));
-    dir
-}
-
-fn write_file(path: &std::path::Path, contents: &str) {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(path, contents).unwrap();
-}
+use test_fixtures::TempPackage;
 
 #[test]
 fn use_completion_dep_root_nested_packages() {
-    let dir = unique_temp_dir("dep_root_exports");
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-
-    write_file(
-        &dir.join("flask.jsonc"),
-        r#"
-{
-  "name": "root",
-  "version": "0.0.0",
-  "authors": [],
-  "dependencies": { "dep": { "path": "dep" } }
-}
+    let pkg = TempPackage::new("dep_root_exports");
+    pkg.write_flask_with_deps(
+        "root",
+        r#"dep: "./dep"
 "#,
     );
-    write_file(
-        &dir.join("dep/flask.jsonc"),
-        r#"
-{
-  "name": "dep",
-  "version": "0.0.0",
-  "authors": []
-}
-"#,
-    );
-    fs::create_dir_all(dir.join("dep/io")).unwrap();
-    fs::create_dir_all(dir.join("dep/math")).unwrap();
-    write_file(&dir.join("dep/io/socket.gin"), "connect := 1\n");
-    write_file(&dir.join("dep/math/add.gin"), "add := 1\n");
-    write_file(&dir.join("main.gin"), "use dep.\n");
+    pkg.write_nested_flask("dep", "dep");
+    pkg.write("dep/io/socket.gin", "connect := 1\n");
+    pkg.write("dep/math/add.gin", "add := 1\n");
+    pkg.write("main.gin", "use dep.\n");
 
-    let uri = Url::from_file_path(dir.join("main.gin")).unwrap();
+    let uri = Url::from_file_path(pkg.join("main.gin")).unwrap();
     let src = "use dep.\n";
     let pos = Position {
         line: 0,
@@ -63,45 +24,23 @@ fn use_completion_dep_root_nested_packages() {
     let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
     assert!(labels.contains(&"io"));
     assert!(labels.contains(&"math"));
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn use_completion_chained_nested_packages_under_dep_a() {
-    let dir = unique_temp_dir("dep_a_exports");
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-
-    write_file(
-        &dir.join("flask.jsonc"),
-        r#"
-{
-  "name": "root",
-  "version": "0.0.0",
-  "authors": [],
-  "dependencies": { "dep": { "path": "dep" } }
-}
+    let pkg = TempPackage::new("dep_a_exports");
+    pkg.write_flask_with_deps(
+        "root",
+        r#"dep: "./dep"
 "#,
     );
-    write_file(
-        &dir.join("dep/flask.jsonc"),
-        r#"
-{
-  "name": "dep",
-  "version": "0.0.0",
-  "authors": []
-}
-"#,
-    );
-    fs::create_dir_all(dir.join("dep/a/b")).unwrap();
-    fs::create_dir_all(dir.join("dep/a/c")).unwrap();
-    write_file(&dir.join("dep/a/root.gin"), "a_root := 1\n");
-    write_file(&dir.join("dep/a/b/one.gin"), "b_fn := 1\n");
-    write_file(&dir.join("dep/a/c/two.gin"), "c_fn := 1\n");
-    write_file(&dir.join("main.gin"), "use dep.a.\n");
+    pkg.write_nested_flask("dep", "dep");
+    pkg.write("dep/a/root.gin", "a_root := 1\n");
+    pkg.write("dep/a/b/one.gin", "b_fn := 1\n");
+    pkg.write("dep/a/c/two.gin", "c_fn := 1\n");
+    pkg.write("main.gin", "use dep.a.\n");
 
-    let uri = Url::from_file_path(dir.join("main.gin")).unwrap();
+    let uri = Url::from_file_path(pkg.join("main.gin")).unwrap();
     let src = "use dep.a.\n";
     let pos = Position {
         line: 0,
@@ -111,44 +50,22 @@ fn use_completion_chained_nested_packages_under_dep_a() {
     let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
     assert!(labels.contains(&"b"));
     assert!(labels.contains(&"c"));
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn use_completion_filters_nested_names_by_partial() {
-    let dir = unique_temp_dir("dep_root_exports_partial");
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-
-    write_file(
-        &dir.join("flask.jsonc"),
-        r#"
-{
-  "name": "root",
-  "version": "0.0.0",
-  "authors": [],
-  "dependencies": { "dep": { "path": "dep" } }
-}
+    let pkg = TempPackage::new("dep_root_exports_partial");
+    pkg.write_flask_with_deps(
+        "root",
+        r#"dep: "./dep"
 "#,
     );
-    write_file(
-        &dir.join("dep/flask.jsonc"),
-        r#"
-{
-  "name": "dep",
-  "version": "0.0.0",
-  "authors": []
-}
-"#,
-    );
-    fs::create_dir_all(dir.join("dep/io")).unwrap();
-    fs::create_dir_all(dir.join("dep/math")).unwrap();
-    write_file(&dir.join("dep/io/socket.gin"), "connect := 1\n");
-    write_file(&dir.join("dep/math/add.gin"), "add := 1\n");
-    write_file(&dir.join("main.gin"), "use dep.i\n");
+    pkg.write_nested_flask("dep", "dep");
+    pkg.write("dep/io/socket.gin", "connect := 1\n");
+    pkg.write("dep/math/add.gin", "add := 1\n");
+    pkg.write("main.gin", "use dep.i\n");
 
-    let uri = Url::from_file_path(dir.join("main.gin")).unwrap();
+    let uri = Url::from_file_path(pkg.join("main.gin")).unwrap();
     let src = "use dep.i\n";
     let pos = Position {
         line: 0,
@@ -158,30 +75,20 @@ fn use_completion_filters_nested_names_by_partial() {
     let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
     assert!(labels.contains(&"io"));
     assert!(!labels.contains(&"math"));
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn use_completion_without_dot_completes_dependency_names() {
-    let dir = unique_temp_dir("dep_names");
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-
-    write_file(
-        &dir.join("flask.jsonc"),
-        r#"
-{
-  "name": "root",
-  "version": "0.0.0",
-  "authors": [],
-  "dependencies": { "core": { "path": "core" }, "dep": { "path": "dep" } }
-}
+    let pkg = TempPackage::new("dep_names");
+    pkg.write_flask_with_deps(
+        "root",
+        r#"core: "./core"
+dep: "./dep"
 "#,
     );
-    write_file(&dir.join("main.gin"), "use c\n");
+    pkg.write("main.gin", "use c\n");
 
-    let uri = Url::from_file_path(dir.join("main.gin")).unwrap();
+    let uri = Url::from_file_path(pkg.join("main.gin")).unwrap();
     let src = "use c\n";
     let pos = Position {
         line: 0,
@@ -192,28 +99,21 @@ fn use_completion_without_dot_completes_dependency_names() {
     // Dependency name completion is currently unfiltered; ensure the deps appear.
     assert!(labels.contains(&"core"));
     assert!(labels.contains(&"dep"));
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn use_completion_package_member_import() {
-    let dir = unique_temp_dir("member_import");
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-
-    write_file(
-        &dir.join("flask.jsonc"),
-        r#"{"name":"root","version":"0.0.0","authors":[],"dependencies":{"core":{"path":"core"}}}"#,
+    let pkg = TempPackage::new("member_import");
+    pkg.write_flask_with_deps(
+        "root",
+        r#"core: "./core"
+"#,
     );
-    write_file(
-        &dir.join("core/flask.jsonc"),
-        r#"{"name":"core","version":"0.0.0","authors":[]}"#,
-    );
-    write_file(&dir.join("core/int.gin"), "Int is Unit\n");
-    write_file(&dir.join("main.gin"), "use core \n");
+    pkg.write_nested_flask("core", "core");
+    pkg.write("core/int.gin", "Int is Unit\n");
+    pkg.write("main.gin", "use core \n");
 
-    let uri = Url::from_file_path(dir.join("main.gin")).unwrap();
+    let uri = Url::from_file_path(pkg.join("main.gin")).unwrap();
     let src = "use core \n";
     let pos = Position {
         line: 0,
@@ -226,45 +126,25 @@ fn use_completion_package_member_import() {
         "expected Int in completions after `use core `, got {:?}",
         labels
     );
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn use_completion_shows_public_symbols() {
-    let dir = unique_temp_dir("public_syms");
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-
-    write_file(
-        &dir.join("flask.jsonc"),
-        r#"
-{
-  "name": "root",
-  "version": "0.0.0",
-  "authors": [],
-  "dependencies": { "dep": { "path": "dep" } }
-}
+    let pkg = TempPackage::new("public_syms");
+    pkg.write_flask_with_deps(
+        "root",
+        r#"dep: "./dep"
 "#,
     );
-    write_file(
-        &dir.join("dep/flask.jsonc"),
-        r#"
-{
-  "name": "dep",
-  "version": "0.0.0",
-  "authors": []
-}
-"#,
+    pkg.write_nested_flask("dep", "dep");
+    pkg.write(
+        "dep/io.gin",
+        "println(s Str): return s\nprint(s Str): return s\n",
     );
-    write_file(
-        &dir.join("dep/io.gin"),
-        "println(s Str): s\nprint(s Str): s\n",
-    );
-    write_file(&dir.join("dep/maybe.gin"), "Maybe is Some(value) or None\n");
-    write_file(&dir.join("main.gin"), "use dep \n");
+    pkg.write("dep/maybe.gin", "Maybe is Some(value) or None\n");
+    pkg.write("main.gin", "use dep \n");
 
-    let uri = Url::from_file_path(dir.join("main.gin")).unwrap();
+    let uri = Url::from_file_path(pkg.join("main.gin")).unwrap();
     let src = "use dep \n";
     let pos = Position {
         line: 0,
@@ -297,45 +177,25 @@ fn use_completion_shows_public_symbols() {
             );
         }
     }
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn use_completion_filters_public_symbols_by_partial() {
-    let dir = unique_temp_dir("public_syms_partial");
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-
-    write_file(
-        &dir.join("flask.jsonc"),
-        r#"
-{
-  "name": "root",
-  "version": "0.0.0",
-  "authors": [],
-  "dependencies": { "dep": { "path": "dep" } }
-}
+    let pkg = TempPackage::new("public_syms_partial");
+    pkg.write_flask_with_deps(
+        "root",
+        r#"dep: "./dep"
 "#,
     );
-    write_file(
-        &dir.join("dep/flask.jsonc"),
-        r#"
-{
-  "name": "dep",
-  "version": "0.0.0",
-  "authors": []
-}
-"#,
+    pkg.write_nested_flask("dep", "dep");
+    pkg.write(
+        "dep/io.gin",
+        "println(s Str): return s\nprint(s Str): return s\n",
     );
-    write_file(
-        &dir.join("dep/io.gin"),
-        "println(s Str): s\nprint(s Str): s\n",
-    );
-    write_file(&dir.join("dep/maybe.gin"), "Maybe is Some(value) or None\n");
-    write_file(&dir.join("main.gin"), "use dep p\n");
+    pkg.write("dep/maybe.gin", "Maybe is Some(value) or None\n");
+    pkg.write("main.gin", "use dep p\n");
 
-    let uri = Url::from_file_path(dir.join("main.gin")).unwrap();
+    let uri = Url::from_file_path(pkg.join("main.gin")).unwrap();
     let src = "use dep p\n";
     let pos = Position {
         line: 0,
@@ -346,20 +206,19 @@ fn use_completion_filters_public_symbols_by_partial() {
     assert!(labels.contains(&"println"));
     assert!(labels.contains(&"print"));
     assert!(!labels.contains(&"Maybe"));
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn source_first_import_completion_selects_exports_left_to_right() {
-    let dir = unique_temp_dir("source_first");
-    write_file(
-        &dir.join("flask.jsonc"),
-        r#"{"name":"sample","version":"0.0.0","authors":[],"dependencies":{"calc":{"path":"math"}}}"#,
+    let pkg = TempPackage::new("source_first");
+    pkg.write_flask_with_deps(
+        "sample",
+        r#"calc: "./math"
+"#,
     );
-    write_file(&dir.join("main.gin"), "");
-    write_file(&dir.join("math/ops.gin"), "add := 1\nsub := 2\n");
-    let uri = Url::from_file_path(dir.join("main.gin")).unwrap();
+    pkg.write("main.gin", "");
+    pkg.write("math/ops.gin", "add := 1\nsub := 2\n");
+    let uri = Url::from_file_path(pkg.join("main.gin")).unwrap();
     for (src, line, col, expected) in [
         ("use './math' ", 0, 13, vec!["add", "sub"]),
         ("use calc ", 0, 9, vec!["add", "sub"]),
@@ -402,23 +261,20 @@ fn source_first_import_completion_selects_exports_left_to_right() {
         )
         .is_none()
     );
-    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
 fn dotted_source_completion_only_suggests_modules() {
-    let dir = unique_temp_dir("module_only");
-    write_file(
-        &dir.join("flask.jsonc"),
-        r#"{"name":"app","version":"0","authors":[],"dependencies":{"dep":{"path":"dep"}}}"#,
+    let pkg = TempPackage::new("module_only");
+    pkg.write_flask_with_deps(
+        "app",
+        r#"dep: "./dep"
+"#,
     );
-    write_file(
-        &dir.join("dep/flask.jsonc"),
-        r#"{"name":"library","version":"0","authors":[]}"#,
-    );
-    write_file(&dir.join("dep/ops.gin"), "add: 1\n");
-    write_file(&dir.join("dep/math/ops.gin"), "sub: 1\n");
-    let uri = Url::from_file_path(dir.join("main.gin")).unwrap();
+    pkg.write_nested_flask("dep", "library");
+    pkg.write("dep/ops.gin", "add: 1\n");
+    pkg.write("dep/math/ops.gin", "sub: 1\n");
+    let uri = Url::from_file_path(pkg.join("main.gin")).unwrap();
     let items = Backend::use_completions("use dep.", Position::new(0, 8), &uri, None).unwrap();
     assert!(items.iter().any(|item| item.label == "math"));
     assert!(
@@ -426,5 +282,4 @@ fn dotted_source_completion_only_suggests_modules() {
             .iter()
             .all(|item| item.kind == Some(CompletionItemKind::MODULE))
     );
-    fs::remove_dir_all(dir).unwrap();
 }

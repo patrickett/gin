@@ -1,5 +1,6 @@
 use crate::Backend;
 use crate::diagnostics::DiagnosticConverter;
+use crate::handlers::{byte_position, request_target};
 
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -13,27 +14,19 @@ impl Backend {
             return Ok(None);
         }
 
-        let uri = params.text_document_position.text_document.uri.clone();
-        let position = params.text_document_position.position;
-
-        let file_path = match Backend::file_path_from_uri(&uri) {
-            Some(p) => p,
-            None => return Ok(None),
+        let Some(target) = request_target(&params.text_document_position) else {
+            return Ok(None);
         };
 
-        let uri_for_locs = uri.clone();
+        let uri_for_locs = target.uri.clone();
         let locations = self
             .run_blocking_request("references", move |this| {
                 let snapshot = this.snapshot();
-                let doc = snapshot.cache.document_snapshot(&file_path)?;
+                let doc = snapshot.cache.document_snapshot(&target.file_path)?;
                 let converter =
                     DiagnosticConverter::new((*doc.source).clone(), (*doc.line_index).clone());
-                let byte_pos = doc.line_index.position_to_byte(
-                    &doc.source,
-                    position.line,
-                    position.character,
-                )? as u32;
-                let refs = snapshot.cache.references_at(&file_path, byte_pos)?;
+                let byte_pos = byte_position(&doc, target.position)? as u32;
+                let refs = snapshot.cache.references_at(&target.file_path, byte_pos)?;
                 Some(
                     refs.spans
                         .into_iter()

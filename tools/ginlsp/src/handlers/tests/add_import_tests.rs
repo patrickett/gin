@@ -39,7 +39,7 @@ fn build_add_import_edits_replaces_sibling_use_line() {
 
 #[test]
 fn build_add_import_edits_inserts_when_no_replace_line() {
-    let source = "main:\nreturn\n";
+    let source = "main:\n    return\n";
     let insert_pos = Backend::use_insert_position(source);
     let edits =
         Backend::build_add_import_edits(source, "use core Int", None, &[], insert_pos, false);

@@ -1,5 +1,6 @@
 use ast::source::LineIndex;
-use diagnostic::{Category, Diagnostic};
+use diagnostic::code::{ImportCode, ParseCode, PatternCode, SymbolCode, SyntaxCode, TypeCode};
+use diagnostic::{Category, Diagnostic, DiagnosticCode};
 use resolve::find_import_suggestions;
 use std::path::Path;
 use tower_lsp::lsp_types::{
@@ -55,8 +56,8 @@ impl DiagnosticConverter {
         symptom: &Diagnostic,
         file_path: Option<&Path>,
     ) -> Option<serde_json::Value> {
-        match symptom.code.slug() {
-            "type-unknown-symbol" => {
+        match symptom.code {
+            DiagnosticCode::Type(TypeCode::Symbol(SymbolCode::Unknown)) => {
                 let name = symptom.arg("name")?;
                 let did_you_mean = symptom.arg("suggested");
                 if let Some(suggested) = did_you_mean {
@@ -88,17 +89,14 @@ impl DiagnosticConverter {
                     }))
                 }
             }
-            "use-not-exported" => {
+            DiagnosticCode::Import(ImportCode::NotExported) => {
                 let symbol = symptom.arg("symbol")?;
                 Some(serde_json::json!({
                     "gincQuickFix": "remove-bundle-member",
                     "symbol": symbol,
                 }))
             }
-            "parse-indented-return" => Some(serde_json::json!({
-                "gincQuickFix": "fix-indented-return",
-            })),
-            "parse-bind-name-not-snake-case" => {
+            DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::BindingNameNotSnakeCase)) => {
                 let name = symptom.arg("name")?;
                 let suggested = symptom.arg("suggested")?;
                 Some(serde_json::json!({
@@ -107,21 +105,16 @@ impl DiagnosticConverter {
                     "newName": suggested,
                 }))
             }
-            "style-duplicate-parameter-name" => {
-                let name = symptom.arg("parameter")?;
-                let suggested = symptom.arg("suggestion")?;
+            DiagnosticCode::Type(TypeCode::Pattern(PatternCode::ElseUnreachable)) => {
                 Some(serde_json::json!({
-                    "gincQuickFix": "rename-duplicate-parameter",
-                    "oldName": name,
-                    "newName": suggested,
+                    "gincQuickFix": "omit-unreachable-else",
                 }))
             }
-            "type-unreachable-else-arm" => Some(serde_json::json!({
-                "gincQuickFix": "omit-unreachable-else",
-            })),
-            "parse-unnecessary-comma" => Some(serde_json::json!({
-                "gincQuickFix": "remove-unnecessary-comma",
-            })),
+            DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::UnnecessaryComma)) => {
+                Some(serde_json::json!({
+                    "gincQuickFix": "remove-unnecessary-comma",
+                }))
+            }
             _ => None,
         }
     }
@@ -163,8 +156,11 @@ impl DiagnosticConverter {
             .iter()
             .map(|symptom| {
                 let range = self.span_to_range_indexed(symptom.span.start(), symptom.span.end());
-                let severity = match symptom.code.slug() {
-                    "parse-bind-name-not-snake-case" | "parse-empty-parens" => {
+                let severity = match symptom.code {
+                    DiagnosticCode::Parse(ParseCode::Syntax(
+                        SyntaxCode::BindingNameNotSnakeCase,
+                    ))
+                    | DiagnosticCode::Parse(ParseCode::Syntax(SyntaxCode::EmptyParens)) => {
                         DiagnosticSeverity::WARNING
                     }
                     _ => match symptom.category {
@@ -173,7 +169,7 @@ impl DiagnosticConverter {
                         Category::Help => DiagnosticSeverity::HINT,
                     },
                 };
-                let slug = symptom.error_code().to_string();
+                let slug = symptom.error_code();
                 let message = self.lsp_diagnostic_message(&symptom.message);
                 let related_information = self.diagnostic_related_information(
                     document_uri,

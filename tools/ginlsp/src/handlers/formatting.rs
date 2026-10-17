@@ -1,5 +1,5 @@
 use crate::Backend;
-use ast::source::SourceExt;
+use crate::handlers::byte_range_to_range;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
@@ -37,10 +37,7 @@ impl Backend {
         }
 
         Ok(Some(vec![TextEdit::new(
-            Range::new(Position::new(0, 0), {
-                let (line, character) = source.byte_offset_to_position(source.len());
-                Position::new(line, character)
-            }),
+            byte_range_to_range(0, source.len(), &source),
             formatted,
         )]))
     }

@@ -6,20 +6,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub struct JsonDocumentState {
+pub struct ManifestDocumentState {
     pub source: String,
 }
 
 pub struct GinSnapshot {
     pub cache: Arc<PackageCache>,
-}
-
-impl Clone for GinSnapshot {
-    fn clone(&self) -> Self {
-        Self {
-            cache: Arc::clone(&self.cache),
-        }
-    }
 }
 
 /// Information about the files belonging to a Gin package.
@@ -36,8 +28,16 @@ pub struct GinHost {
 impl GinHost {
     pub fn new() -> Self {
         let (tx, _rx) = unbounded();
+        let cache = match resolve::default_check_session() {
+            Some(session) => {
+                PackageCache::with_check_session(tx, session).with_resolved_result_reuse()
+            }
+            // If the worker pool cannot be built, fall back to the stateless path
+            // rather than failing to start the language server.
+            None => PackageCache::new(tx),
+        };
         Self {
-            cache: Arc::new(PackageCache::new(tx)),
+            cache: Arc::new(cache),
             package_file_cache: HashMap::new(),
         }
     }
@@ -52,7 +52,7 @@ impl GinHost {
     /// Called when a file tab is closed to free typed AST memory.
     pub fn evict_package_for(&mut self, path: &Path) {
         let path = path.normalize_diagnostic_path();
-        self.cache.invalidate_package_cache_for(&path);
+        self.cache.evict_package_cache_for(&path);
         if let Some(root) = resolve::find_package_root(&path) {
             self.package_file_cache
                 .remove(&root.normalize_diagnostic_path());

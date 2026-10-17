@@ -1,7 +1,7 @@
 use crate::Backend;
 use ast::source::SourceExt;
 use resolve::GinPackageExt;
-use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position, Range, Url};
+use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position, TextEdit, Url};
 
 impl Backend {
     pub(crate) fn use_completions(
@@ -33,11 +33,7 @@ impl Backend {
         }
 
         // Determine the token currently being typed (after `use `).
-        let token_start = before_cursor
-            .rfind(|c: char| c.is_whitespace() || c == ',')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let token = before_cursor[token_start..].trim();
+        let (token_start, token) = Self::token_prefix(before_cursor);
 
         // Bare identifier (no dot, no quote): offer current-module public symbols
         // alongside dependency names, unless the token matches a known dep exactly.
@@ -45,15 +41,8 @@ impl Backend {
             let dep_names = Self::dependency_names(file_uri, config);
             let is_known_dep = !token.is_empty() && dep_names.iter().any(|n| n == token);
             if !is_known_dep {
-                let mut items: Vec<CompletionItem> = dep_names
-                    .into_iter()
-                    .map(|name| CompletionItem {
-                        label: name.clone(),
-                        kind: Some(CompletionItemKind::MODULE),
-                        detail: Some("dependency".to_string()),
-                        ..Default::default()
-                    })
-                    .collect();
+                let mut items: Vec<CompletionItem> =
+                    dep_names.into_iter().map(Self::dependency_item).collect();
                 items.extend(Self::complete_current_module_symbols(
                     file_uri,
                     position,
@@ -130,33 +119,13 @@ impl Backend {
     }
 
     fn dependency_names(file_uri: &Url, config: Option<&flask::FlaskConfigHandle>) -> Vec<String> {
-        if let Some(handle) = config {
-            let cfg = handle.read();
-            return cfg
-                .config
-                .dependency_names()
-                .into_iter()
-                .map(|s| s.to_string())
-                .collect();
-        }
-
-        let file_path = match file_uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return vec![],
+        let Some((cfg, _)) = Self::load_config_and_dir(file_uri, config) else {
+            return vec![];
         };
-        let file_dir = match file_path.parent() {
-            Some(d) => d,
-            None => return vec![],
-        };
-
-        match flask::FlaskConfig::find_package_config(file_dir).map(|(cfg, _)| cfg) {
-            Some(cfg) => cfg
-                .dependency_names()
-                .into_iter()
-                .map(|s| s.to_string())
-                .collect(),
-            None => vec![],
-        }
+        cfg.dependency_names()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect()
     }
 
     fn complete_current_module_symbols(
@@ -165,16 +134,11 @@ impl Backend {
         token_start: usize,
         partial: &str,
     ) -> Vec<CompletionItem> {
-        let file_path = match file_uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return vec![],
-        };
-        let file_dir = match file_path.parent() {
-            Some(d) => d,
-            None => return vec![],
+        let Some(file_dir) = Self::file_dir(file_uri) else {
+            return vec![];
         };
 
-        if flask::FlaskConfig::find_package_config(file_dir).is_none() {
+        if flask::FlaskConfig::find_package_config(&file_dir).is_none() {
             return vec![];
         }
 
@@ -184,24 +148,15 @@ impl Backend {
             if !sym.starts_with(partial) {
                 continue;
             }
-            items.push(CompletionItem {
-                label: sym.clone(),
-                kind: Some(CompletionItemKind::FUNCTION),
-                detail: Some("public symbol".to_string()),
-                text_edit: Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(
-                    tower_lsp::lsp_types::TextEdit {
-                        range: Range {
-                            start: Position {
-                                line: position.line,
-                                character: token_start as u32,
-                            },
-                            end: position,
-                        },
-                        new_text: sym,
-                    },
-                )),
-                ..Default::default()
-            });
+            items.push(Self::completion_item(
+                sym.clone(),
+                CompletionItemKind::FUNCTION,
+                "public symbol".to_string(),
+                Some(TextEdit {
+                    range: Self::edit_range(position, token_start as u32),
+                    new_text: sym,
+                }),
+            ));
         }
 
         items
@@ -214,15 +169,7 @@ impl Backend {
         position: Position,
     ) -> Vec<CompletionItem> {
         let col = position.character as usize;
-        let before_cursor = &line_text[..col.min(line_text.len())];
-
-        // Only complete the token currently being typed (after last space/comma).
-        let token_start = before_cursor
-            .rfind(|c: char| c.is_whitespace() || c == ',')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-
-        let token = before_cursor[token_start..].trim();
+        let (token_start, token) = Self::token_prefix(&line_text[..col.min(line_text.len())]);
         if token.is_empty() {
             return Self::complete_dependency_names(file_uri, config);
         }
@@ -241,7 +188,7 @@ impl Backend {
             return vec![];
         };
 
-        // Nested package names: immediate subdirectories of the dependency (or chained folder) that contain `flask.jsonc`.
+        // Nested package names: immediate subdirectories of the dependency (or chained folder) that contain `mod.flask`.
         let mut segments: Vec<&str> = rest.split('.').collect();
         let ends_with_dot = token.ends_with('.');
         if ends_with_dot && segments.last().copied() == Some("") {
@@ -253,53 +200,35 @@ impl Backend {
             segments.pop().unwrap_or("")
         };
 
-        let Some(base_pkg_dir) = Self::walk_nested_package_dir(&dep_dir, &segments) else {
-            return vec![];
+        let base_pkg_dir = if segments.is_empty() {
+            dep_dir
+        } else {
+            let Some(dir) = resolve::resolve_logical_module_dir(&dep_dir, &segments) else {
+                return vec![];
+            };
+            dir
         };
 
         let base_prefix = &token[..token.rfind('.').unwrap_or(token.len()) + 1];
         let mut items: Vec<CompletionItem> = Vec::new();
 
-        // Add nested folder modules (sub-packages with flask.jsonc).
-        for k in Self::nested_folder_module_names(&base_pkg_dir) {
+        // Add nested folder modules (sub-packages with mod.flask).
+        for k in resolve::child_folder_module_names(&base_pkg_dir) {
             if !k.starts_with(partial) {
                 continue;
             }
-            items.push(CompletionItem {
-                label: k.clone(),
-                kind: Some(CompletionItemKind::MODULE),
-                detail: Some("nested package".to_string()),
-                text_edit: Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(
-                    tower_lsp::lsp_types::TextEdit {
-                        range: Range {
-                            start: Position {
-                                line: position.line,
-                                character: token_start as u32,
-                            },
-                            end: position,
-                        },
-                        new_text: format!("{base_prefix}{k}"),
-                    },
-                )),
-                ..Default::default()
-            });
+            items.push(Self::completion_item(
+                k.clone(),
+                CompletionItemKind::MODULE,
+                "nested package".to_string(),
+                Some(TextEdit {
+                    range: Self::edit_range(position, token_start as u32),
+                    new_text: format!("{base_prefix}{k}"),
+                }),
+            ));
         }
 
         items
-    }
-
-    fn nested_folder_module_names(package_dir: &std::path::Path) -> Vec<String> {
-        resolve::child_folder_module_names(package_dir)
-    }
-
-    fn walk_nested_package_dir(
-        dep_dir: &std::path::Path,
-        segments: &[&str],
-    ) -> Option<std::path::PathBuf> {
-        if segments.is_empty() {
-            return Some(dep_dir.to_path_buf());
-        }
-        resolve::resolve_logical_module_dir(dep_dir, segments)
     }
 
     fn resolve_dep_dir(
@@ -335,17 +264,12 @@ impl Backend {
         quote_pos: usize,
         partial: &str,
     ) -> Vec<CompletionItem> {
-        let file_path = match file_uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return vec![],
-        };
-        let file_dir = match file_path.parent() {
-            Some(d) => d,
-            None => return vec![],
+        let Some(file_dir) = Self::file_dir(file_uri) else {
+            return vec![];
         };
 
         let search_dir = if partial.is_empty() {
-            file_dir.to_path_buf()
+            file_dir
         } else {
             let partial_path = std::path::Path::new(partial);
             let resolved = file_dir.join(partial_path);
@@ -384,29 +308,17 @@ impl Backend {
 
             let insert_text = format!("{prefix}{name}'");
             let label = format!("{prefix}{name}");
-            let kind = CompletionItemKind::FOLDER;
 
             // The text edit range replaces only the partial path after the quote
-            let text_edit_range = Range {
-                start: Position {
-                    line: position.line,
-                    character: (quote_pos + 1) as u32,
-                },
-                end: position,
-            };
-
-            items.push(CompletionItem {
+            items.push(Self::completion_item(
                 label,
-                text_edit: Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(
-                    tower_lsp::lsp_types::TextEdit {
-                        range: text_edit_range,
-                        new_text: insert_text,
-                    },
-                )),
-                kind: Some(kind),
-                detail: Some("module".to_string()),
-                ..Default::default()
-            });
+                CompletionItemKind::FOLDER,
+                "module".to_string(),
+                Some(TextEdit {
+                    range: Self::edit_range(position, (quote_pos + 1) as u32),
+                    new_text: insert_text,
+                }),
+            ));
         }
 
         items
@@ -454,17 +366,12 @@ impl Backend {
         partial: &str,
         position: Position,
     ) -> Vec<CompletionItem> {
-        let file_path = match file_uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return vec![],
-        };
-        let file_dir = match file_path.parent() {
-            Some(d) => d,
-            None => return vec![],
+        let Some(file_dir) = Self::file_dir(file_uri) else {
+            return vec![];
         };
 
         let Some(mod_dir) =
-            Self::resolve_module_dir_for_import_path(file_uri, config, file_dir, mod_name)
+            Self::resolve_module_dir_for_import_path(file_uri, config, &file_dir, mod_name)
         else {
             return vec![];
         };
@@ -480,32 +387,20 @@ impl Backend {
             .character
             .saturating_sub(current_partial.encode_utf16().count() as u32);
 
-        let text_edit_range = Range {
-            start: Position {
-                line: position.line,
-                character: edit_start_col,
-            },
-            end: position,
-        };
-
         let mut items = Vec::new();
         for sym in mod_dir.list_public_symbols() {
             if !sym.starts_with(current_partial) || already.iter().any(|s| s == &sym) {
                 continue;
             }
-            let new_text = sym.clone();
-            items.push(CompletionItem {
-                label: sym.clone(),
-                kind: Some(CompletionItemKind::FUNCTION),
-                detail: Some(format!("{}.{}", mod_name.trim_matches('\''), sym)),
-                text_edit: Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(
-                    tower_lsp::lsp_types::TextEdit {
-                        range: text_edit_range,
-                        new_text,
-                    },
-                )),
-                ..Default::default()
-            });
+            items.push(Self::completion_item(
+                sym.clone(),
+                CompletionItemKind::FUNCTION,
+                format!("{}.{}", mod_name.trim_matches('\''), sym),
+                Some(TextEdit {
+                    range: Self::edit_range(position, edit_start_col),
+                    new_text: sym.clone(),
+                }),
+            ));
         }
         items
     }
@@ -514,44 +409,9 @@ impl Backend {
         file_uri: &Url,
         config: Option<&flask::FlaskConfigHandle>,
     ) -> Vec<CompletionItem> {
-        if let Some(handle) = config {
-            let cfg = handle.read();
-            return cfg
-                .config
-                .dependency_names()
-                .into_iter()
-                .map(|name| CompletionItem {
-                    label: name.to_string(),
-                    kind: Some(CompletionItemKind::MODULE),
-                    detail: Some("dependency".to_string()),
-                    ..Default::default()
-                })
-                .collect();
-        }
-
-        let file_path = match file_uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return vec![],
-        };
-        let file_dir = match file_path.parent() {
-            Some(d) => d,
-            None => return vec![],
-        };
-
-        let config = match flask::FlaskConfig::find_package_config(file_dir).map(|(cfg, _)| cfg) {
-            Some(c) => c,
-            None => return vec![],
-        };
-
-        config
-            .dependency_names()
+        Self::dependency_names(file_uri, config)
             .into_iter()
-            .map(|name| CompletionItem {
-                label: name.to_string(),
-                kind: Some(CompletionItemKind::MODULE),
-                detail: Some("dependency".to_string()),
-                ..Default::default()
-            })
+            .map(Self::dependency_item)
             .collect()
     }
 }

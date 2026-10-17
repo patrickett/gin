@@ -1,16 +1,17 @@
+use diagnostic::code::ImportCode;
 mod diagnostics;
 mod handlers;
 mod state;
 
 use ast::HasSpanId;
-use ast::ImportSource;
 use ast::source::SourceExt;
 use dashmap::DashMap;
 use diagnostic::DiagnosticPathExt;
 use diagnostics::DiagnosticConverter;
 use futures::FutureExt;
+use handlers::{byte_range_to_range, line_byte_range};
 use resolve::GinPackageExt;
-use state::{GinHost, JsonDocumentState};
+use state::{GinHost, ManifestDocumentState};
 use std::collections::HashSet;
 use std::ops::Deref;
 use std::panic::AssertUnwindSafe;
@@ -38,27 +39,11 @@ impl Backend {
     /// Produce LSP diagnostics and code-action data for `use` statements whose
     /// comma-separated items are not in alphabetical order.
     fn find_unsorted_imports(source: &str, file_ast: &ast::FileAst) -> Vec<Diagnostic> {
-        fn import_sort_key(mi: &ast::ModuleImport) -> String {
-            match &mi.source {
-                ImportSource::Package(path) => {
-                    let mut s = path.root.as_str().to_lowercase();
-                    for seg in &path.segments {
-                        s.push('.');
-                        s.push_str(seg.as_str().to_lowercase().as_str());
-                    }
-                    s
-                }
-                ImportSource::Local(p, _) => p.to_string_lossy().to_lowercase(),
-                ImportSource::LocalFile(p, _) => p.to_string_lossy().to_lowercase(),
-                ImportSource::LocalBundle(b) => b.root.as_str().to_lowercase(),
-                ImportSource::CurrentModule { member } => member.export.as_str().to_lowercase(),
-            }
-        }
-
         fn is_unsorted(items: &[&ast::ModuleImport]) -> bool {
-            items
-                .windows(2)
-                .any(|w| import_sort_key(w[0]) > import_sort_key(w[1]))
+            items.windows(2).any(|window| {
+                ginfmt::ast_formatter::import_display_key(window[0])
+                    > ginfmt::ast_formatter::import_display_key(window[1])
+            })
         }
 
         /// Compute the byte span of a full `use …` line from the first and last
@@ -71,12 +56,8 @@ impl Backend {
         ) -> Option<(usize, usize)> {
             let first = span_table.get(first_span_id);
             let last = span_table.get(last_span_id);
-            // Walk backward from first bytes to find "use "
-            let line_start = source[..first.start()]
-                .rfind('\n')
-                .map(|p| p + 1)
-                .unwrap_or(0);
-            // Walk forward from last bytes to end of line
+            let first_line = source.byte_offset_to_position(first.start()).0;
+            let line_start = line_byte_range(source, first_line)?.0;
             let line_end = source[last.end()..]
                 .find('\n')
                 .map(|p| last.end() + p)
@@ -119,19 +100,7 @@ impl Backend {
                 .trim_end()
                 .to_string();
 
-            let (sl, sc) = source.byte_offset_to_position(line_start_byte);
-            let (el, ec) = source.byte_offset_to_position(line_end_byte);
-
-            let range = Range {
-                start: Position {
-                    line: sl,
-                    character: sc,
-                },
-                end: Position {
-                    line: el,
-                    character: ec,
-                },
-            };
+            let range = byte_range_to_range(line_start_byte, line_end_byte, source);
 
             result.push(Diagnostic {
                 range,
@@ -178,8 +147,9 @@ impl Backend {
                 for (name, span_id) in names {
                     if name.len() >= 2 && !body.contains(name.as_str()) {
                         out.push(
+                            // use-unused-import
                             diagnostic::Diagnostic::new(
-                                "use-unused-import",
+                                ImportCode::UnusedImport,
                                 format!("unused import `{name}`"),
                             )
                             .with_arg("name", name.clone())
@@ -194,25 +164,15 @@ impl Backend {
         out
     }
     fn package_root_containing(from_dir: &Path) -> Option<std::path::PathBuf> {
-        let mut search = from_dir.to_path_buf();
-        loop {
-            search.push(flask::PACKAGE_CONFIG_NAME);
-            if search.exists() {
-                search.pop();
-                return std::fs::canonicalize(&search).ok().or(Some(search));
-            }
-            search.pop();
-            if !search.pop() {
-                return None;
-            }
-        }
+        let root = resolve::find_package_root(from_dir)?;
+        Some(std::fs::canonicalize(&root).unwrap_or(root))
     }
 }
 
 pub(crate) struct GinLspBackend {
     pub(crate) client: Client,
     pub(crate) host: Arc<Mutex<GinHost>>,
-    pub(crate) json_documents: DashMap<String, JsonDocumentState>,
+    pub(crate) manifest_documents: DashMap<String, ManifestDocumentState>,
     pub(crate) package_configs: DashMap<std::path::PathBuf, flask::FlaskConfigHandle>,
     pub(crate) shutdown: AtomicBool,
     pub(crate) latest_diagnostic_gen: AtomicU64,
@@ -235,7 +195,7 @@ impl Backend {
         Self(Arc::new(GinLspBackend {
             client,
             host: Arc::new(Mutex::new(GinHost::new())),
-            json_documents: DashMap::new(),
+            manifest_documents: DashMap::new(),
             package_configs: DashMap::new(),
             shutdown: AtomicBool::new(false),
             latest_diagnostic_gen: AtomicU64::new(0),
@@ -452,22 +412,17 @@ impl Backend {
 
         let mut results = Vec::with_capacity(all_file_paths.len());
         for pkg_path in &all_file_paths {
-            let normalized_pkg_path = pkg_path.normalize_diagnostic_path();
-            let pkg_uri = match Url::from_file_path(&normalized_pkg_path) {
+            let pkg_uri = match Url::from_file_path(pkg_path) {
                 Ok(u) => u,
                 Err(_) => continue,
             };
 
-            let Some(doc) = snapshot.cache.document_snapshot(&normalized_pkg_path) else {
+            let Some(doc) = snapshot.cache.document_snapshot(pkg_path) else {
                 results.push((pkg_uri, Vec::new()));
                 continue;
             };
 
-            let mut symptoms = all_diags
-                .get(&normalized_pkg_path)
-                .or_else(|| all_diags.get(pkg_path))
-                .cloned()
-                .unwrap_or_default();
+            let mut symptoms = all_diags.get(pkg_path).cloned().unwrap_or_default();
 
             let span_table = &doc.parse.ast.span_table;
             symptoms.extend(Self::collect_unused_import_symptoms(
@@ -475,14 +430,12 @@ impl Backend {
                 &doc.parse.ast,
                 span_table,
             ));
+            symptoms.extend(self.redundant_binding_symptoms(pkg_path));
 
             let converter =
                 DiagnosticConverter::new((*doc.source).clone(), (*doc.line_index).clone());
-            let mut diagnostics = converter.symptoms_to_diagnostics(
-                &symptoms,
-                &pkg_uri,
-                Some(normalized_pkg_path.as_path()),
-            );
+            let mut diagnostics =
+                converter.symptoms_to_diagnostics(&symptoms, &pkg_uri, Some(pkg_path.as_path()));
 
             // Check for unsorted imports and emit hints
             let unsorted = Self::find_unsorted_imports(&doc.source, &doc.parse.ast);

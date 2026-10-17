@@ -38,7 +38,13 @@ impl Backend {
                 ..Default::default()
             }),
             hover_provider: Some(HoverProviderCapability::Simple(true)),
-            code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+            code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
+                code_action_kinds: Some(vec![
+                    CodeActionKind::QUICKFIX,
+                    CodeActionKind::new("source.fixAll.ginfmt"),
+                ]),
+                ..Default::default()
+            })),
             signature_help_provider: Some(SignatureHelpOptions {
                 trigger_characters: Some(vec!["(".to_string()]),
                 retrigger_characters: Some(vec![",".to_string()]),
@@ -63,7 +69,7 @@ impl Backend {
         // reason this path exists) cannot be cancelled, and shutdown must
         // not hang on it.
         self.shutdown.store(true, Ordering::SeqCst);
-        self.json_documents.clear();
+        self.manifest_documents.clear();
         self.package_configs.clear();
         Ok(())
     }

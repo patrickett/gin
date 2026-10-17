@@ -87,7 +87,19 @@ fn main() {
     println!("repo_root={}", root_path.display());
 
     let (_tx, _rx) = crossbeam_channel::unbounded();
-    let cache = PackageCache::new(_tx);
+    let mode = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "legacy".to_owned());
+    let cache = match mode.as_str() {
+        "editor" => match resolve::default_check_session() {
+            Some(session) => {
+                PackageCache::with_check_session(_tx, session).with_resolved_result_reuse()
+            }
+            None => PackageCache::new(_tx),
+        },
+        _ => PackageCache::new(_tx),
+    };
+    println!("mode={mode}");
 
     report("start");
     report_cache(&cache, "start");
@@ -121,7 +133,12 @@ fn main() {
         report("after_set_contents_spike_mutation");
         report_cache(&cache, "after_set_contents_spike_mutation");
 
+        let t = Instant::now();
         let _ = cache.all_diagnostics(&paths);
+        println!(
+            "edit_recompute_ms={:.3}",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
         report("after_recompute_after_mutation");
         report_cache(&cache, "after_recompute_after_mutation");
     }

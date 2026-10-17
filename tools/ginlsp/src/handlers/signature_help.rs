@@ -1,4 +1,5 @@
 use crate::Backend;
+use crate::handlers::request_target;
 use ast::FileAst;
 
 use ast::source::SourceExt;
@@ -15,23 +16,15 @@ impl Backend {
             return Ok(None);
         }
 
-        let uri = params
-            .text_document_position_params
-            .text_document
-            .uri
-            .clone();
-        let position = params.text_document_position_params.position;
-
-        let file_path = match Backend::file_path_from_uri(&uri) {
-            Some(p) => p,
-            None => return Ok(None),
+        let Some(target) = request_target(&params.text_document_position_params) else {
+            return Ok(None);
         };
 
         let result = self
             .run_blocking_request("signature_help", move |this| {
                 let snapshot = this.snapshot();
-                let (source, parse) = snapshot.cache.source_and_parse(&file_path)?;
-                Self::build_signature_help(&source, &parse.ast, position)
+                let (source, parse) = snapshot.cache.source_and_parse(&target.file_path)?;
+                Self::build_signature_help(&source, &parse.ast, target.position)
             })
             .await;
 
