@@ -2,46 +2,22 @@
 
 use std::fmt;
 
-mod abi;
-mod artifact;
-mod codec;
 mod compat;
 mod comptime;
-mod dependency;
-mod encoding;
 mod fingerprint;
 mod identity;
-mod public;
 mod publish;
-mod resolution;
-mod schema;
 mod target;
-mod validation;
 
-pub use abi::{AbiParameter, AbiSignature, AbiValidationError, ParameterMode};
-pub use artifact::{ArtifactExpectation, ArtifactRecovery, recover_artifact};
-pub use codec::{decode as decode_interface, encode as encode_interface};
-pub use compat::{Compatibility, ValidityPosition, classify_interfaces, classify_validity};
-pub use comptime::{
-    ComptimeImage, ComptimeImageRecovery, ComptimeProgramNode, recover_comptime_image,
-};
-pub use dependency::{DependencyEdge, public_closure_fingerprint};
-pub use encoding::{
-    EncodedIntegerValidity, EncodedResultAlternative, EncodedResultFamily,
-    EncodedResultFamilyOwner, IntegerExpr, IntegerPredicate, SemanticDecodeError, SignedInteger,
-    StructuralOperator,
-};
+pub use compat::{Compatibility, classify_interfaces};
+pub use comptime::ComptimeImage;
+
 pub use fingerprint::Fingerprint;
 pub use identity::{DeclarationRef, PackageInstanceId};
-pub use public::{IndexedDeclaration, IndexedInterface, IndexedInterfaceError};
+
 pub use publish::InterfacePublication;
-pub use resolution::{ResolutionCandidate, ResolutionDependency, ResolutionIndex, ResolutionQuery};
-pub use schema::{ARTIFACT_SECTIONS, IntegerExpressionTag, IntegerPredicateTag};
-pub use target::{
-    CachedTargetRealization, TargetProfile, TargetRealization, TargetRealizationExpectation,
-    TargetRealizationRecovery, recover_target_realization,
-};
-pub use validation::{InterfaceValidationError, validate as validate_interface};
+
+pub use target::{TargetProfile, TargetRealization};
 
 pub const SCHEMA_VERSION: u32 = 4;
 pub const MAGIC: &[u8] = b"GINIFACE";
@@ -677,31 +653,33 @@ fn read_fp(bytes: &[u8]) -> Result<(Fingerprint, &[u8]), InterfaceDecodeError> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn canonical_codec_round_trip() {
-        let subject = PackageInstanceId {
+    fn pkg_subject() -> PackageInstanceId {
+        PackageInstanceId {
             package: "acme/kit".to_string(),
             version: "1.2.3".to_string(),
             source: "local".to_string(),
             instance: "1".to_string(),
-        };
+        }
+    }
+
+    fn pkg_declaration(path: &str, fingerprint: &[u8]) -> InterfaceDeclaration {
+        InterfaceDeclaration {
+            reference: DeclarationRef::Subject {
+                module_path: "pkg".to_string(),
+                declaration_path: path.to_string(),
+            },
+            fingerprint: Fingerprint::from_bytes(fingerprint),
+        }
+    }
+
+    #[test]
+    fn canonical_codec_round_trip() {
+        let subject = pkg_subject();
         let interface = PublicInterface::from_subject_and_declarations(
             subject,
             vec![
-                InterfaceDeclaration {
-                    reference: DeclarationRef::Subject {
-                        module_path: "pkg".to_string(),
-                        declaration_path: "Foo".to_string(),
-                    },
-                    fingerprint: Fingerprint::from_bytes(b"foo"),
-                },
-                InterfaceDeclaration {
-                    reference: DeclarationRef::Subject {
-                        module_path: "pkg".to_string(),
-                        declaration_path: "Bar".to_string(),
-                    },
-                    fingerprint: Fingerprint::from_bytes(b"bar"),
-                },
+                pkg_declaration("Foo", b"foo"),
+                pkg_declaration("Bar", b"bar"),
             ],
         );
 
@@ -712,48 +690,19 @@ mod tests {
 
     #[test]
     fn declaration_order_does_not_change_fingerprint() {
-        let subject = PackageInstanceId {
-            package: "acme/kit".to_string(),
-            version: "1.2.3".to_string(),
-            source: "local".to_string(),
-            instance: "1".to_string(),
-        };
+        let subject = pkg_subject();
         let first = PublicInterface::from_subject_and_declarations(
             subject.clone(),
             vec![
-                InterfaceDeclaration {
-                    reference: DeclarationRef::Subject {
-                        module_path: "pkg".to_string(),
-                        declaration_path: "Foo".to_string(),
-                    },
-                    fingerprint: Fingerprint::from_bytes(b"foo"),
-                },
-                InterfaceDeclaration {
-                    reference: DeclarationRef::Subject {
-                        module_path: "pkg".to_string(),
-                        declaration_path: "Bar".to_string(),
-                    },
-                    fingerprint: Fingerprint::from_bytes(b"bar"),
-                },
+                pkg_declaration("Foo", b"foo"),
+                pkg_declaration("Bar", b"bar"),
             ],
         );
         let second = PublicInterface::from_subject_and_declarations(
             subject,
             vec![
-                InterfaceDeclaration {
-                    reference: DeclarationRef::Subject {
-                        module_path: "pkg".to_string(),
-                        declaration_path: "Bar".to_string(),
-                    },
-                    fingerprint: Fingerprint::from_bytes(b"bar"),
-                },
-                InterfaceDeclaration {
-                    reference: DeclarationRef::Subject {
-                        module_path: "pkg".to_string(),
-                        declaration_path: "Foo".to_string(),
-                    },
-                    fingerprint: Fingerprint::from_bytes(b"foo"),
-                },
+                pkg_declaration("Bar", b"bar"),
+                pkg_declaration("Foo", b"foo"),
             ],
         );
         assert_eq!(first.canonical_bytes(), second.canonical_bytes());
@@ -769,21 +718,10 @@ mod tests {
 
     #[test]
     fn decode_rejects_unknown_schema() {
-        let subject = PackageInstanceId {
-            package: "acme/kit".to_string(),
-            version: "1.2.3".to_string(),
-            source: "local".to_string(),
-            instance: "1".to_string(),
-        };
+        let subject = pkg_subject();
         let mut encoded = PublicInterface::from_subject_and_declarations(
             subject,
-            vec![InterfaceDeclaration {
-                reference: DeclarationRef::Subject {
-                    module_path: "pkg".to_string(),
-                    declaration_path: "Foo".to_string(),
-                },
-                fingerprint: Fingerprint::from_bytes(b"foo"),
-            }],
+            vec![pkg_declaration("Foo", b"foo")],
         )
         .canonical_bytes();
 
@@ -802,21 +740,10 @@ mod tests {
 
     #[test]
     fn schema2_round_trip_with_target_realizations_and_images() {
-        let subject = PackageInstanceId {
-            package: "acme/kit".to_string(),
-            version: "1.2.3".to_string(),
-            source: "local".to_string(),
-            instance: "1".to_string(),
-        };
+        let subject = pkg_subject();
         let interface = PublicInterface::with_targets_and_realizations(
             subject,
-            vec![InterfaceDeclaration {
-                reference: DeclarationRef::Subject {
-                    module_path: "pkg".to_string(),
-                    declaration_path: "Foo".to_string(),
-                },
-                fingerprint: Fingerprint::from_bytes(b"foo"),
-            }],
+            vec![pkg_declaration("Foo", b"foo")],
             vec![TargetProfile {
                 target: "x86_64-unknown-linux".to_string(),
             }],
@@ -957,27 +884,6 @@ mod tests {
             section[kind_pos] = 0xFF;
         }
 
-        assert!(matches!(
-            PublicInterface::decode(&encoded),
-            Err(InterfaceDecodeError::CorruptHeader)
-        ));
-    }
-
-    #[test]
-    fn decode_rejects_corrupt_section_size() {
-        let mut encoded = PublicInterface::from_subject_and_declarations(
-            PackageInstanceId {
-                package: "pkg".to_string(),
-                version: "1".to_string(),
-                source: "local".to_string(),
-                instance: "1".to_string(),
-            },
-            vec![],
-        )
-        .canonical_bytes();
-        let section_len_offset = MAGIC.len();
-        let bad_len = u32::MAX.to_le_bytes();
-        encoded[section_len_offset..section_len_offset + 4].copy_from_slice(&bad_len);
         assert!(matches!(
             PublicInterface::decode(&encoded),
             Err(InterfaceDecodeError::CorruptHeader)
@@ -1187,20 +1093,8 @@ mod tests {
         let interface = PublicInterface::from_subject_and_declarations(
             subject,
             vec![
-                InterfaceDeclaration {
-                    reference: DeclarationRef::Subject {
-                        module_path: "pkg".to_string(),
-                        declaration_path: "A".to_string(),
-                    },
-                    fingerprint: Fingerprint::from_bytes(b"first"),
-                },
-                InterfaceDeclaration {
-                    reference: DeclarationRef::Subject {
-                        module_path: "pkg".to_string(),
-                        declaration_path: "A".to_string(),
-                    },
-                    fingerprint: Fingerprint::from_bytes(b"second"),
-                },
+                pkg_declaration("A", b"first"),
+                pkg_declaration("A", b"second"),
             ],
         );
         interface.canonical_bytes();

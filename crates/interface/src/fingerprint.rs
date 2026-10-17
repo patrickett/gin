@@ -17,11 +17,4 @@ impl Fingerprint {
         hasher.update(payload);
         Self(hasher.finalize().into())
     }
-
-    pub fn to_hex(self) -> String {
-        self.0
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    }
 }
