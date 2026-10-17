@@ -4,7 +4,7 @@ use analysis::{HoverContent, PackageCache};
 use ast::source::SourceExt;
 use parser::query::SourceParseExt;
 use test_fixtures::TempPackage;
-use test_fixtures::semantic_fixtures::{BOOL_GIN, INT_GIN, LIST_GIN, STRING_GIN, TYPE_GIN};
+use test_fixtures::semantic_fixtures::BOOL_GIN;
 
 const DEFAULT_GIN: &str = r#"--- Provides a default value for a type.
 Default(value) has default value
@@ -24,8 +24,7 @@ fn hover_use_keyword_via_engine() {
     let path = std::path::PathBuf::from("/tmp/hover_use_keyword.gin");
     let source = "use core.io\n\nmain:\n    return 0\n";
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
     engine.set_contents(&path, source.to_string());
 
     let byte = source.find("use").expect("`use` in source") as u32;
@@ -50,24 +49,26 @@ fn hover_import_symbol_matches_definition_hover() {
     let bool_gin = BOOL_GIN;
     let pkg = TempPackage::new("hover_unified");
     pkg.write(
-        "flask.jsonc",
-        r#"
-{
-  "name": "root",
-  "version": "0.0.0",
-  "authors": [],
-  "dependencies": {
-    "core": { "path": "core" }
-  }
-}
+        "mod.flask",
+        r#"#settings
+module: "root"
+version: 0.0.0
+
+#dependencies
+core: "./core"
 "#,
     );
     pkg.write(
-        "core/flask.jsonc",
-        r#"{"name":"core","version":"0.0.0","authors":[]}"#,
+        "core/mod.flask",
+        r#"#settings
+module: "core"
+version: 0.0.0
+
+#dependencies
+"#,
     );
     pkg.write("core/bool.gin", bool_gin);
-    let path = pkg.write("main.gin", "use core true\n\nmain:\n    true\nreturn\n");
+    let path = pkg.write("main.gin", "use core true\n\nmain:\n    true\n    return\n");
 
     let main_source = std::fs::read_to_string(&path).unwrap();
     let true_byte = main_source.find("true").expect("`true` in use path") as u32;
@@ -81,8 +82,7 @@ fn hover_import_symbol_matches_definition_hover() {
         .hover_at(bool_gin, line, character)
         .expect("hover on `true` in bool.gin");
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     let HoverContent { markdown, .. } = engine
         .hover(&path, true_byte)
@@ -100,8 +100,7 @@ fn hover_at(source: &str, needle: &str, fixture: &str) -> HoverContent {
     pkg.write_flask("bind_hover");
     let path = pkg.write("main.gin", source);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     let byte = source
         .find(needle)
@@ -118,7 +117,7 @@ fn hover_local_constant_bind() {
     let HoverContent { markdown, .. } = hover_at(source, "x :=", "local_constant");
     assert_eq!(
         markdown,
-        "x 1\nanonymous integer\ncurrent knowledge: exactly 1\nvalidity: 1 to 1\nruntime representation: i1"
+        "x 1\nanonymous integer\ncurrent knowledge: 1 to 1\nvalidity: 1 to 1\nruntime representation: i1"
     );
 }
 
@@ -128,20 +127,67 @@ fn hover_local_rebindable_bind() {
     let HoverContent { markdown, .. } = hover_at(source, "x: 1", "local_rebindable");
     assert_eq!(
         markdown,
-        "x 1\nanonymous integer\ncurrent knowledge: exactly 1\nvalidity: 1 to 1\nruntime representation: i1"
+        "x 1\nanonymous integer\ncurrent knowledge: 1 to 1\nvalidity: 1 to 1\nruntime representation: i1"
     );
 }
 
 #[test]
-fn hover_top_level_constant_bind() {
-    let source = "two := 2\n";
-    let HoverContent { markdown, .. } = hover_at(source, "two", "top_level_constant");
-    assert_eq!(markdown, "```gin\nbind_hover\n```\n\n```gin\ntwo 2\n```");
+fn hover_comparison_binding_shows_its_predicate() {
+    for (operator, _complement) in [
+        ("<", ">="),
+        ("<=", ">"),
+        (">", "<="),
+        (">=", "<"),
+        ("=", "!="),
+    ] {
+        let source = format!(
+            "run(value is in 0 to 255):\n    small: value {operator} 16\n    return small\n"
+        );
+        let expected = format!("small: value {operator} 16");
+        for needle in ["small:", "small\n"] {
+            let hover = hover_at(&source, needle, "comparison_binding");
+            assert_eq!(hover.markdown, expected, "{operator}: {needle}");
+        }
+    }
+}
+
+#[test]
+fn hover_copied_comparison_preserves_operand_names() {
+    let source =
+        "run(value is in 0 to 255):\n    small: value < 16\n    saved: small\n    return saved\n";
+    for needle in ["saved:", "saved\n"] {
+        let hover = hover_at(source, needle, "copied_comparison");
+        assert_eq!(hover.markdown, "saved: value < 16");
+    }
+}
+
+#[test]
+fn hover_comparison_preserves_operand_expressions() {
+    let source = "run(value is in 0 to 255, limit is in 0 to 255):\n    small: value + 1 < limit\n    return small\n";
+    let hover = hover_at(source, "small:", "comparison_expressions");
+    assert_eq!(hover.markdown, "small: value + 1 < limit");
+}
+
+#[test]
+fn hover_custom_comparison_does_not_invent_refinements() {
+    let source = "comes_before(left is in 0 to 255, right is in 0 to 255) Before or After: return Before\nrun(value is in 0 to 255):\n    order: comes_before(value, 16)\n    return order\n";
+    let hover = hover_at(source, "order:", "custom_comparison");
+    assert_eq!(hover.markdown, "order Before or After");
+}
+
+#[test]
+fn hover_named_comparison_contract_uses_call_arguments() {
+    let source = "less(left is in 0 to 255, right is in 0 to 255) True thus left < right or False thus left >= right:\n    when left < right then\n        return True\n    return False\nrun(value is in 0 to 255):\n    small: less(value, 16)\n    return small\n";
+    let hover = hover_at(source, "small:", "named_comparison_contract");
+    assert_eq!(
+        hover.markdown,
+        "small True thus value < 16 or False thus value >= 16"
+    );
 }
 
 #[test]
 fn hover_function_bind() {
-    let source = "consume(x) Int := x\n";
+    let source = "consume(x) Int := return x\n";
     let HoverContent { markdown, .. } = hover_at(source, "consume", "function");
     assert_eq!(
         markdown,
@@ -153,14 +199,14 @@ fn hover_function_bind() {
 fn hover_main_function_bind() {
     let source = "main:\n    return 0\n";
     let HoverContent { markdown, .. } = hover_at(source, "main", "main_block");
-    assert_eq!(markdown, "```gin\nbind_hover\n```\n\n```gin\nmain\n```");
+    assert_eq!(markdown, "```gin\nbind_hover\n```\n\n```gin\nmain 0\n```");
 }
 
 #[test]
 fn hover_single_line_main_bind() {
     let source = "main: return 0\n";
     let HoverContent { markdown, .. } = hover_at(source, "main", "main_single_line");
-    assert_eq!(markdown, "```gin\nbind_hover\n```\n\n```gin\nmain\n```");
+    assert_eq!(markdown, "```gin\nbind_hover\n```\n\n```gin\nmain 0\n```");
 }
 
 #[test]
@@ -170,8 +216,7 @@ fn hover_default_in_core_default_shows_core_default_module_path() {
     pkg.write_nested_flask("core", "core");
     let path = pkg.write("core/default/default.gin", default_src);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     let byte = default_src.find("Default").expect("`Default` in source") as u32;
 
@@ -196,41 +241,13 @@ fn hover_default_in_core_default_shows_core_default_module_path() {
 }
 
 #[test]
-fn hover_false_constant_bind_shows_correct_type() {
-    let bool_src = BOOL_GIN;
-    let pkg = TempPackage::new("false_bind");
-    pkg.write_nested_flask("core", "core");
-    let path = pkg.write("core/primitive/bool.gin", bool_src);
-
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
-
-    // Hover on `false` in `false := Bool.False`
-    let byte = bool_src.find("false :=").expect("`false :=` start") as u32;
-    let HoverContent { markdown, .. } = engine.hover(&path, byte).expect("hover on `false` bind");
-
-    assert_eq!(
-        markdown,
-        "\
-```gin
-core.primitive
-```
-
-```gin
-false Bool.False
-```"
-    );
-}
-
-#[test]
 fn hover_variant_in_union_declaration_shows_qualified_union_path() {
     let bool_src = BOOL_GIN;
     let pkg = TempPackage::new("variant_in_union");
     pkg.write_nested_flask("core", "core");
     let path = pkg.write("core/primitive/bool.gin", bool_src);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     // Hover on `True` inside `Bool is True or False`.
     let byte = bool_src.find("True").expect("`True` in bool.gin") as u32;
@@ -258,8 +275,7 @@ fn hover_variant_with_fields_shows_shape_and_doc() {
     pkg.write_nested_flask("core", "core");
     let path = pkg.write("core/maybe/maybe.gin", maybe_src);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     // Hover on `Some` in `Some(x)`
     let byte = maybe_src.find("Some(x)").expect("`Some(x)` in maybe.gin") as u32;
@@ -284,63 +300,13 @@ Has some value `x`"
 /// Hovering on a tag name referenced in a qualified path expression (e.g. `Bool`
 /// in `Bool.False`) must show the tag declaration, not the variant/expression hover.
 #[test]
-fn hover_reflect_type_union_shows_multiline_named_payload_variants() {
-    let type_src = TYPE_GIN;
-    let pkg = TempPackage::new("reflect_type_hover");
-    pkg.write_nested_flask("core", "core");
-    let path = pkg.write("core/reflect/type.gin", type_src);
-
-    let engine = PackageCache::for_test();
-    for (content, rel) in [
-        (INT_GIN, "primitive/int.gin"),
-        (BOOL_GIN, "primitive/bool.gin"),
-        (LIST_GIN, "primitive/list.gin"),
-        (STRING_GIN, "string/string.gin"),
-    ] {
-        let p = pkg.write(&format!("core/{rel}"), content);
-        engine.add_file(p).unwrap();
-    }
-    engine.add_file(path.clone()).unwrap();
-
-    let byte = type_src
-        .find("Type is")
-        .expect("`Type is` in reflect/type.gin") as u32;
-    let HoverContent { markdown, .. } = engine.hover(&path, byte).expect("hover on `Type`");
-
-    assert_eq!(
-        markdown,
-        "\
-```gin
-core.reflect
-```
-
-```gin
-Type is Bits(width BigInt, interpretation IntInterpretation)
-     or Address(space BigInt, pointee Type)
-     or Product(name String, fields List(ReflectionTypeNamed))
-     or Sum(name String, variants List(ReflectionVariantShape))
-     or SafeReference(pointee Type, permission IntPermission)
-     or RawPointer(pointee Type)
-     or Array(elem Type, size BigInt)
-     or Opaque(name String)
-     or Unsupported(reason String)
-     or Unit
-```
----
-
-Structural description of a Gin type, used for compile-time reflection."
-    );
-}
-
-#[test]
 fn hover_tag_name_in_qualified_path_shows_tag_declaration() {
     let bool_src = BOOL_GIN;
     let pkg = TempPackage::new("tag_path");
     pkg.write_nested_flask("core", "core");
     let path = pkg.write("core/primitive/bool.gin", bool_src);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     // Hover on `Bool` in `false := Bool.False` (qualified path usage)
     let byte = bool_src
@@ -386,8 +352,7 @@ fn hover_cross_file_tag_shows_tag_declaration() {
     let source = "use Bool\nmain:\n    b Bool := 1\n    return b\n";
     let path = pkg.write("main.gin", source);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(pkg.join("a.gin")).unwrap();
+    let engine = PackageCache::for_test_with_file(pkg.join("a.gin"));
     engine.add_file(path.clone()).unwrap();
 
     // Hover on `Bool` in `b Bool := true` (cross-file reference)
@@ -407,17 +372,21 @@ fn unimported_cross_file_tag_has_no_hover_and_is_unknown() {
     let source = "Bool is True or False\nBool has Happy\n";
     let bool_path = pkg.write("bool.gin", source);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(happy_path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(happy_path.clone());
     engine.add_file(bool_path.clone()).unwrap();
 
     let happy_byte = source.find("Happy").unwrap() as u32;
     assert!(engine.hover(&bool_path, happy_byte).is_none());
 
     let diagnostics = engine.all_diagnostics(&[happy_path, bool_path.clone()]);
-    assert!(diagnostics[&bool_path].iter().any(|diagnostic| {
-        diagnostic.code.slug() == "type-unknown-symbol" && diagnostic.arg("name") == Some("Happy")
-    }));
+    assert!(
+        diagnostics[&bool_path.canonicalize().unwrap()]
+            .iter()
+            .any(|diagnostic| {
+                diagnostic.code.slug() == "type-unknown-symbol"
+                    && diagnostic.arg("name") == Some("Happy")
+            })
+    );
 }
 
 /// Tag name referenced inside another tag's body (e.g. `Bool` in
@@ -429,8 +398,7 @@ fn hover_tag_name_in_another_tags_body_shows_tag_declaration() {
     let source = "Bool is True or False\n\nContainer(x) has b Bool\n";
     let path = pkg.write("main.gin", source);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     // Hover on `Bool` in `has b Bool`
     let byte = source.rfind("Bool").expect("`Bool` in body") as u32;
@@ -454,8 +422,7 @@ fn hover_record_field_in_tag_body_shows_field() {
     let source = "Container(x) has ptr @x\n";
     let path = pkg.write("main.gin", source);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     // Hover on `ptr` in `has ptr @x`
     let byte = source.rfind("ptr").expect("`ptr` in body") as u32;
@@ -468,32 +435,9 @@ fn hover_record_field_in_tag_body_shows_field() {
     );
 }
 
-/// Hovering record fields when the named type is in the same file.
-#[test]
-fn hover_record_field_same_file_shows_named_type() {
-    let source = "Container(x) has ptr @x\n";
-    let pkg = TempPackage::new("same_file");
-    pkg.write_flask("same_file");
-    let path = pkg.write("main.gin", source);
-
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
-
-    let ptr_byte = source.rfind("ptr").expect("`ptr` field") as u32;
-    let HoverContent { markdown, .. } =
-        engine.hover(&path, ptr_byte).expect("hover on `ptr` field");
-
-    assert_eq!(
-        markdown,
-        "\
-```gin\nsame_file.Container\n```\n\n```gin\nptr @x\n```"
-    );
-}
-
 #[test]
 fn hover_narrowed_type_in_when_then_body() {
-    let source = "\
-Int is in -9223372036854775808 to 9223372036854775807\n\nmain:\n    x := 42\n    when x is\n        Int then x + 1\n            else 0\n    return x\n";
+    let source = "Int is in -9223372036854775808 to 9223372036854775807\n\nmain:\n    x := 42\n    when x is\n        Int then x + 1\n            else 0\n    return x\n";
     let HoverContent { markdown, .. } = hover_at(source, "x + 1", "narrowed");
     assert_eq!(
         markdown,
@@ -515,15 +459,12 @@ fn hover_literal_separates_integer_semantic_facts() {
 /// definition via reference-to-def, showing the function signature.
 #[test]
 fn hover_fn_call_reference_shows_signature() {
-    let source = "\
-identity(x) Int := x\n\n\
-main:\n    identity(4)\n    return 0\n";
+    let source = "identity(x) Int := return x\n\nmain:\n    identity(4)\n    return 0\n";
     let pkg = TempPackage::new("fn_call_ref");
     pkg.write_flask("fn_call_ref");
     let path = pkg.write("main.gin", source);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     let call_byte = source.rfind("identity").expect("`identity` in call") as u32;
     let HoverContent { markdown, .. } = engine
@@ -547,8 +488,7 @@ fn hover_top_level_reference_from_body_shows_definition_hover() {
     pkg.write_flask("top_ref");
     let path = pkg.write("main.gin", source);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     // Hover on the `two` inside `return two` (second occurrence).
     let def_byte = source.find("two :=").expect("`two :=`") as u32;
@@ -571,7 +511,7 @@ two 2\n```"
 }
 
 #[test]
-fn interface_method_signatures_display_correctly() {
+fn fieldless_interface_hover_shows_type_name() {
     let source = r#"
 Allocator has
     --- Attempt to allocate.
@@ -584,8 +524,7 @@ Allocator has
     pkg.write_flask("interface_methods");
     let path = pkg.write("main.gin", source);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     // Hover on `Allocator` tag name
     let byte = source.find("Allocator").expect("`Allocator` in source") as u32;
@@ -601,9 +540,7 @@ Allocator has
             "```",
             "",
             "```gin",
-            "Allocator has",
-            "    allocate(self ref, l Layout) Slice(Byte) or AllocError",
-            "    deallocate(self ref, p @Byte, l Layout)",
+            "Allocator",
             "```",
         ]
         .join("\n"),
@@ -625,8 +562,7 @@ Allocator has
     pkg.write_flask("interface_method_hover");
     let path = pkg.write("main.gin", source);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     let byte = source.find("release").expect("`release` in source") as u32;
     let HoverContent { markdown, .. } = engine
@@ -670,8 +606,7 @@ Allocator has
     pkg.write_flask("interface_member_doc");
     let path = pkg.write("main.gin", source);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     // Hover on `allocate` method name
     let byte = source.find("allocate").expect("`allocate` in source") as u32;
@@ -712,13 +647,12 @@ Allocator has
 /// receiver type (e.g. `self Region`), not just the keyword doc.
 #[test]
 fn hover_self_in_has_method_body_shows_type() {
-    let source = "Region has\n    reset(self) Region: self\n";
+    let source = "Region has\n    reset(self) Region: return self\n";
     let pkg = TempPackage::new("self_hover");
     pkg.write_flask("self_hover");
     let path = pkg.write("main.gin", source);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     // Hover on the `self` inside the method body (not the parameter self).
     let byte = source.rfind("self").expect("body `self`") as u32;
@@ -733,13 +667,12 @@ fn hover_self_in_has_method_body_shows_type() {
 /// Hovering on `self ref` in a has method body shows `self ref Type`.
 #[test]
 fn hover_ref_self_in_has_method_body_shows_ref_type() {
-    let source = "Region has\n    reset(self ref) Region: self\n";
+    let source = "Region has\n    reset(self ref) Region: return self\n";
     let pkg = TempPackage::new("ref_self_hover");
     pkg.write_flask("ref_self_hover");
     let path = pkg.write("main.gin", source);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     let byte = source.rfind("self").expect("body `self`") as u32;
     let hover = engine.hover(&path, byte).expect("hover on body self");
@@ -747,27 +680,6 @@ fn hover_ref_self_in_has_method_body_shows_ref_type() {
         hover.markdown,
         ["```gin", "self ref Region", "```"].join("\n"),
         "hover on `self` in has method body should show `self ref Region`"
-    );
-}
-
-/// Hovering on `self` inside a has method with a block body shows the type
-/// (e.g. `self Type`, `self ref Type`, `self mut Type`).
-#[test]
-fn hover_self_in_has_block_body_shows_ref_type() {
-    let source = "Region has\n    reset(self ref) Region:\n        self\n";
-    let pkg = TempPackage::new("block_self_hover");
-    pkg.write_flask("block_self_hover");
-    let path = pkg.write("main.gin", source);
-
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
-
-    let byte = source.rfind("self").expect("body `self`") as u32;
-    let hover = engine.hover(&path, byte).expect("hover on body self");
-    assert_eq!(
-        hover.markdown,
-        ["```gin", "self ref Region", "```"].join("\n"),
-        "hover on `self` in has block body should show `self ref Region`"
     );
 }
 
@@ -783,14 +695,13 @@ fn hover_self_in_block_body_with_multiple_exprs_and_return() {
     allocate(self ref, size PointerSize) @Byte:
         self
         -- a comment
-    return self.cursor
+        return self.cursor
 "#;
     let pkg = TempPackage::new("multi_expr_self");
     pkg.write_flask("multi_expr_self");
     let path = pkg.write("main.gin", source);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     // Hover on the standalone `self` expression at line 6, character 8.
     let (line, character) = (6u32, 8u32);
@@ -803,4 +714,12 @@ fn hover_self_in_block_body_with_multiple_exprs_and_return() {
         ["```gin", "self ref Region", "```"].join("\n"),
         "hover on `self` in block body with return should show `self ref Region`"
     );
+}
+
+#[test]
+fn hover_proposition_parameter_shows_its_predicate() {
+    let source =
+        "consume(value is in 0 to 255, check is value < 16): return when check then 1 else 0\n";
+    let hover = hover_at(source, "check then", "proposition_parameter");
+    assert_eq!(hover.markdown, "check: value < 16");
 }

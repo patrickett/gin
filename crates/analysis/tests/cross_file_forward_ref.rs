@@ -16,8 +16,8 @@ fn unknown_foo_in_package(engine: &PackageCache, paths: &[PathBuf]) -> bool {
 fn package_semantics_forward_ref_caller_first() {
     let caller_path = PathBuf::from("/tmp/gin_fwd_ref_caller_a.gin");
     let callee_path = PathBuf::from("/tmp/gin_fwd_ref_callee_a.gin");
-    let caller_src = "bar() Int := foo() + 1\n";
-    let callee_src = "foo() Int := 42\n";
+    let caller_src = "bar() Int := return foo() + 1\n";
+    let callee_src = "foo() Int := return 42\n";
 
     let engine = PackageCache::for_test();
     let package = engine.new_adhoc_package();
@@ -36,8 +36,8 @@ fn package_semantics_forward_ref_caller_first() {
 fn package_semantics_forward_ref_callee_first() {
     let caller_path = PathBuf::from("/tmp/gin_fwd_ref_caller_b.gin");
     let callee_path = PathBuf::from("/tmp/gin_fwd_ref_callee_b.gin");
-    let caller_src = "bar() Int := foo() + 1\n";
-    let callee_src = "foo() Int := 42\n";
+    let caller_src = "bar() Int := return foo() + 1\n";
+    let callee_src = "foo() Int := return 42\n";
 
     let engine = PackageCache::for_test();
     let package = engine.new_adhoc_package();

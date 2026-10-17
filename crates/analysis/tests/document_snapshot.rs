@@ -4,30 +4,14 @@
 use analysis::PackageCache;
 use ast::source::SourceExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Create a unique temporary directory per call so parallel tests don't collide.
-fn unique_temp_dir(name: &str) -> PathBuf {
-    let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-    std::env::temp_dir().join(format!("ginlsp_snapshot_{name}_{id}"))
-}
-
-fn make_test_file(dir: &PathBuf, name: &str, content: &str) -> PathBuf {
-    std::fs::create_dir_all(dir).unwrap();
-    let path = dir.join(name);
-    std::fs::write(&path, content).unwrap();
-    path
-}
+use test_fixtures::TempPackage;
 
 #[test]
 fn document_snapshot_returns_all_three_fields() {
-    let dir = unique_temp_dir("three_fields");
-    let path = make_test_file(&dir, "main.gin", "hello is Unit\nworld is Unit\n");
+    let pkg = TempPackage::new("snapshot_three_fields");
+    let path = pkg.write("main.gin", "hello is Unit\nworld is Unit\n");
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     let doc = engine
         .document_snapshot(&path)
@@ -49,11 +33,10 @@ fn document_snapshot_returns_all_three_fields() {
 
 #[test]
 fn document_snapshot_uses_cached_line_index() {
-    let dir = unique_temp_dir("cached");
-    let path = make_test_file(&dir, "data.gin", "a\nb\nc\n");
+    let pkg = TempPackage::new("snapshot_cached");
+    let path = pkg.write("data.gin", "a\nb\nc\n");
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     // First snapshot — "a\nb\nc\n" has 4 line starts: [0, 2, 4, 6]
     // bytes: a0 \n1 b2 \n3 c4 \n5
@@ -76,12 +59,11 @@ fn document_snapshot_uses_cached_line_index() {
 
 #[test]
 fn document_snapshot_line_index_consistent_with_sourceext() {
-    let dir = unique_temp_dir("consistency");
-    let content = "use core true\n\nmain:\n    core.true\n    check(core.true)\nreturn\n";
-    let path = make_test_file(&dir, "main.gin", content);
+    let pkg = TempPackage::new("snapshot_consistency");
+    let content = "use core true\n\nmain:\n    core.true\n    check(core.true)\n    return\n";
+    let path = pkg.write("main.gin", content);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     let doc = engine.document_snapshot(&path).unwrap();
 
@@ -126,11 +108,10 @@ fn document_snapshot_returns_none_for_unknown_file() {
 
 #[test]
 fn document_snapshot_fields_are_coherent() {
-    let dir = unique_temp_dir("coherent");
-    let path = make_test_file(&dir, "test.gin", "x is Unit\n");
+    let pkg = TempPackage::new("snapshot_coherent");
+    let path = pkg.write("test.gin", "x is Unit\n");
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     let doc = engine.document_snapshot(&path).unwrap();
 

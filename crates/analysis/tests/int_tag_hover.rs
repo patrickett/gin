@@ -17,8 +17,7 @@ fn package_hover_signed_int_range_not_arch_literal() {
     let byte = int_src.find(line).expect("SignedInt line") as u32
         + line.find("2147483647").expect("range end") as u32;
 
-    let engine = PackageCache::for_test();
-    engine.add_file(int_path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(int_path.clone());
     engine.add_file(pointer_path).unwrap();
 
     let hover = engine

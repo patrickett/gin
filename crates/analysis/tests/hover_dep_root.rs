@@ -5,26 +5,24 @@ use test_fixtures::TempPackage;
 fn hover_dep_root_shows_metadata() {
     let pkg = TempPackage::new("hover_dep_root");
     pkg.write(
-        "flask.jsonc",
-        r#"
-{
-  "name": "root",
-  "version": "0.0.0",
-  "authors": [],
-  "dependencies": {
-    "core": { "path": "core" }
-  }
-}
+        "mod.flask",
+        r#"#settings
+module: "root"
+version: 0.0.0
+
+#dependencies
+core: "./core"
 "#,
     );
     pkg.write(
-        "core/flask.jsonc",
-        r#"{
-  "name": "core",
-  "version": "1.0.0",
-  "description": "Core types and utilities",
-  "authors": []
-}"#,
+        "core/mod.flask",
+        r#"#settings
+module: "core"
+version: 1.0.0
+description: "Core types and utilities"
+
+#dependencies
+"#,
     );
     let base_path = pkg.write("main.gin", "main:\n    return 0\n");
 
@@ -39,14 +37,12 @@ fn hover_dep_root_shows_metadata() {
 fn hover_dep_root_unknown_dep_returns_none() {
     let pkg = TempPackage::new("hover_dep_unknown");
     pkg.write(
-        "flask.jsonc",
-        r#"
-{
-  "name": "root",
-  "version": "0.0.0",
-  "authors": [],
-  "dependencies": {}
-}
+        "mod.flask",
+        r#"#settings
+module: "root"
+version: 0.0.0
+
+#dependencies
 "#,
     );
     let base_path = pkg.write("main.gin", "main:\n    return 0\n");

@@ -7,22 +7,22 @@ edition = "2024"
 workspace = true
 
 [dependencies]
-derive_more = { workspace = true }
+compiler-profile = { workspace = true }
 diagnostic = { workspace = true }
-span = { workspace = true }
 ast = { workspace = true }
+ast-format = { workspace = true }
 typecheck = { workspace = true }
 parser = { workspace = true }
 flask = { workspace = true }
 interface = { workspace = true }
 resolve = { workspace = true }
+serde_json = { workspace = true }
 internment = "0.8"
 crossbeam-channel = { workspace = true }
 notify-debouncer-mini = "0.4.1"
 
 [dev-dependencies]
-internment = "0.8"
-parser = { workspace = true }
-ast = { workspace = true }
-span = { workspace = true }
 test-fixtures = { workspace = true }
+
+[features]
+profile-allocations = ["compiler-profile/allocations"]

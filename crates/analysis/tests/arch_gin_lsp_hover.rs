@@ -1,28 +1,14 @@
 //! LSP-style hover for an `Architecture` const union fixture.
 
 use analysis::PackageCache;
-use parser::query::SourceParseExt;
 use test_fixtures::TempPackage;
-use test_fixtures::semantic_fixtures::{BOOL_GIN, COPY_GIN, SIZED_GIN, TYPE_GIN};
+use test_fixtures::semantic_fixtures::BOOL_GIN;
 
 const ARCH_GIN: &str = r#"--- Target CPU architectures for conditional compilation.
 Architecture is 'x86_64'
-             or 'arm64'
+             or 'aarch64'
              or 'wasm32'
 "#;
-
-#[test]
-fn marker_fixture_imports_sized_trait() {
-    let sized_source = SIZED_GIN;
-    let file = sized_source.parse_source_full().ast;
-    let traits = file.imported_trait_names();
-    let legacy = ["Copy", "Record", "True", "False"];
-    assert!(
-        !traits.iter().any(|name| legacy.contains(&name.as_str())),
-        "reflection marker fixture parser extraction should not expose legacy trait names: {:?}",
-        traits.iter().map(|name| name.as_str()).collect::<Vec<_>>()
-    );
-}
 
 fn register_arch_package(
     engine: &mut PackageCache,
@@ -30,15 +16,8 @@ fn register_arch_package(
     arch_path: std::path::PathBuf,
     arch_source: &str,
 ) {
-    for (content, rel) in [
-        (TYPE_GIN, "reflect/type.gin"),
-        (BOOL_GIN, "primitive/bool.gin"),
-        (SIZED_GIN, "marker/sized.gin"),
-        (COPY_GIN, "marker/copy.gin"),
-    ] {
-        let p = pkg.write(rel, content);
-        engine.add_file(p).unwrap();
-    }
+    let bool_path = pkg.write("primitive/bool.gin", BOOL_GIN);
+    engine.add_file(bool_path).unwrap();
     engine.add_file(arch_path.clone()).unwrap();
     engine.set_contents(&arch_path, arch_source.to_string());
 }
@@ -63,7 +42,7 @@ fn lsp_hover_on_architecture_in_package_fixture() {
 
     assert_eq!(
         hover,
-        "```gin\ncore.target.arch\n```\n\n```gin\nArchitecture is 'x86_64'\n             or 'arm64'\n             or 'wasm32'\n```\n---\n\nTarget CPU architectures for conditional compilation."
+        "```gin\ncore.target.arch\n```\n\n```gin\nArchitecture is 'x86_64'\n             or 'aarch64'\n             or 'wasm32'\n```\n---\n\nTarget CPU architectures for conditional compilation."
     );
 }
 

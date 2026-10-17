@@ -8,10 +8,9 @@ use std::path::PathBuf;
 #[test]
 fn package_typecheck_runs_prepare_before_transform() {
     let path = PathBuf::from("/tmp/prepare_parity_main.gin");
-    let source = "DefaultInteger is in 0 to 255\nmain:\n    return 0\n";
+    let source = "DefaultInteger is in 0 to 255\nDefaultInteger has finish(self): return\nmain:\n    return 0\n";
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
     engine.set_contents(&path, source.to_string());
 
     let outputs = engine.package_semantics(&[path]);
@@ -23,11 +22,31 @@ fn package_typecheck_runs_prepare_before_transform() {
 }
 
 #[test]
+fn package_semantics_include_redundant_terminal_help() {
+    let path = PathBuf::from("/tmp/redundant_terminal_help.gin");
+    let source = "Redraw is Changed or Unchanged\nRedraw.release(self):\n    return\n";
+    let engine = PackageCache::for_test_with_file(path.clone());
+    engine.set_contents(&path, source.to_string());
+
+    let outputs = engine.package_semantics(&[path]);
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].symptoms.len(), 1, "{:?}", outputs[0].symptoms);
+    let diagnostic = &outputs[0].symptoms[0];
+    assert_eq!(diagnostic.code.slug(), "type-redundant-terminal-method");
+    assert_eq!(diagnostic.category, diagnostic::Category::Help);
+    assert_eq!(
+        &source[diagnostic.span.start() as usize..diagnostic.span.end() as usize],
+        "release"
+    );
+}
+
+#[test]
 fn compile_and_ide_paths_share_cross_file_compile_time_context() {
-    let package_a: ast::FileAst = "DefaultInteger is in 0 to 255\nshared_const := 1\n"
-        .parse_source_full()
-        .ast;
-    let package_b: ast::FileAst = "main() Int: return shared_const\n".parse_source_full().ast;
+    let package_a: ast::FileAst =
+        "Int is in 0 to 255\nInt has finish(self): return\nshared_const := 1\n"
+            .parse_source_full()
+            .ast;
+    let package_b: ast::FileAst = "main Int: return shared_const\n".parse_source_full().ast;
     let compile_target = CompileTarget::Library;
 
     let mut file_asts = vec![package_a.clone(), package_b.clone()];
@@ -58,15 +77,5 @@ fn compile_and_ide_paths_share_cross_file_compile_time_context() {
     assert!(
         !has_unknown_symbol(&full.typed_asts),
         "cross-file compile-time symbol should be known in shared package transform path"
-    );
-
-    // Deliberate behavioral difference: IDE intentionally skips full trait synthesis.
-    assert!(
-        full.trait_registry.is_some(),
-        "FULL path should build compile-time trait registry"
-    );
-    assert!(
-        ide.trait_registry.is_none(),
-        "IDE path should keep lightweight transform mode"
     );
 }

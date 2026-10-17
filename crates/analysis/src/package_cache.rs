@@ -7,18 +7,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossbeam_channel::Sender;
-use derive_more::From;
 use notify_debouncer_mini::{
     DebounceEventResult, Debouncer, new_debouncer, notify::RecommendedWatcher,
 };
 
 use parser::query::{ParseOutput, SourceParseExt};
-use typecheck::transform::PackageTransformOptions;
+use typecheck::transform::{PackageCheckSession, PackageCheckStats, PackageTransformOptions};
 use typecheck::{
     CompletionCandidate, PackageSemanticIndex, TypedFileAst, completions::FileAstCompletionExt,
 };
 
-use crate::HoverDocExt;
+use crate::SemanticQueries;
 use crate::engine::{DocumentSnapshot, FileSemanticOutput, HoverContent, SharedSource};
 use ast::source::{LineIndex, SourceExt};
 use flask::{CompileTarget, FlaskConfig};
@@ -35,12 +34,13 @@ pub enum PackageIdentity {
     AdHoc(AdHocPackageId),
 }
 
-#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, From)]
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
 pub struct AdHocPackageId(u64);
 
 /// Cached output for a fully analyzed package.
 pub struct PackageEntry {
     registry_resolution: Option<flask::PackageResolution>,
+    configuration: Option<serde_json::Value>,
     pub typed_asts: Vec<TypedFileAst>,
     pub public_interface: interface::PublicInterface,
     pub package_index: PackageSemanticIndex,
@@ -69,11 +69,6 @@ impl PackageEntry {
         }
         FileSemanticOutput { symptoms }
     }
-
-    /// Build all diagnostic symptoms (type flaws + non-flaw prepare) for a file.
-    pub fn diagnostic_symptoms(&self, file_idx: usize) -> Vec<Diagnostic> {
-        self.semantic_output(file_idx).symptoms
-    }
 }
 
 /// Parsed file entry.
@@ -84,6 +79,16 @@ struct ParseEntry {
     /// Pre-computed line-start offsets for fast LSP position conversion.
     line_index: Arc<LineIndex>,
     package: PackageIdentity,
+}
+
+impl ParseEntry {
+    fn parsed_file(&self, path: PathBuf) -> ParsedFile {
+        ParsedFile {
+            path,
+            source: (*self.source).clone(),
+            output: (*self.parse).clone(),
+        }
+    }
 }
 
 /// Cache for parsed files and package analysis.
@@ -97,18 +102,35 @@ pub struct PackageCache {
     /// Package identity → import graph from the last import resolution.
     import_graphs: Mutex<HashMap<PackageIdentity, resolve::ImportDependencyGraph>>,
     next_package_id: AtomicU64,
+    revision: AtomicU64,
+    checking: Option<CheckingSessions>,
+    resolved_results: Option<Mutex<HashMap<PackageIdentity, ResolvedResult>>>,
     /// File watcher for disk changes (kept alive for the lifetime of the cache)
     _watcher: Arc<Mutex<Debouncer<RecommendedWatcher>>>,
 }
 
+struct CheckingSessions {
+    template: PackageCheckSession,
+    packages: Mutex<HashMap<PackageIdentity, Arc<Mutex<PackageCheckSession>>>>,
+}
+
+struct ResolvedResult {
+    inputs: Arc<resolve::PackageFrontEndInputs>,
+    entry: Arc<PackageEntry>,
+    reused: bool,
+}
+
+struct PackageComputation {
+    entry: Arc<PackageEntry>,
+    inputs: Option<Arc<resolve::PackageFrontEndInputs>>,
+    reused: bool,
+    modules: resolve::ParsedModuleCache,
+    graph: Option<resolve::ImportDependencyGraph>,
+}
+
 impl PackageCache {
     pub fn new_adhoc_package(&self) -> AdHocPackageId {
-        let id = self.next_package_id.fetch_add(1, Ordering::SeqCst);
-        if id == 0 {
-            AdHocPackageId(self.next_package_id.fetch_add(1, Ordering::SeqCst))
-        } else {
-            AdHocPackageId(id)
-        }
+        AdHocPackageId(self.next_package_id.fetch_add(1, Ordering::SeqCst))
     }
 
     fn identity_for_path(path: &Path) -> PackageIdentity {
@@ -127,6 +149,17 @@ impl PackageCache {
 
         package_files.sort();
         package_files
+    }
+
+    fn package_entry_for(&self, path: &Path) -> Option<Arc<PackageEntry>> {
+        let files = self.package_file_paths(path)?;
+        self.get_or_compute_package(&files)
+    }
+
+    fn compile_target_for(path: &Path) -> CompileTarget {
+        FlaskConfig::find_package_config(path)
+            .and_then(|(config, _)| CompileTarget::resolve(&config, None).ok())
+            .unwrap_or(CompileTarget::Library)
     }
 
     fn file_identity(&self, path: &Path) -> Option<PackageIdentity> {
@@ -152,15 +185,21 @@ impl PackageCache {
                     package: package.clone(),
                 },
             );
+            self.revision.fetch_add(1, Ordering::SeqCst);
+            let mut packages = self.packages.lock().unwrap();
+            packages.remove(&package);
+            if let Some(previous) = &previous {
+                packages.remove(&previous.package);
+            }
             previous.map(|entry| entry.package)
         };
 
         if let Some(old_package) = old_package
             && old_package != package
         {
-            self.invalidate_cached_packages_for(old_package);
+            self.invalidate_cached_packages_for(&old_package);
         }
-        self.invalidate_cached_packages_for(package);
+        self.invalidate_cached_packages_for(&package);
     }
 
     pub fn new(tx: Sender<DebounceEventResult>) -> Self {
@@ -170,11 +209,45 @@ impl PackageCache {
             module_caches: Mutex::new(HashMap::new()),
             import_graphs: Mutex::new(HashMap::new()),
             next_package_id: AtomicU64::new(1),
+            revision: AtomicU64::new(0),
+            checking: None,
+            resolved_results: None,
             _watcher: Arc::new(Mutex::new(
                 new_debouncer(Duration::from_secs(1), tx)
                     .expect("failed to create file watcher debouncer"),
             )),
         }
+    }
+
+    pub fn with_check_session(
+        tx: Sender<DebounceEventResult>,
+        session: PackageCheckSession,
+    ) -> Self {
+        let mut cache = Self::new(tx);
+        cache.checking = Some(CheckingSessions {
+            template: session.fork_empty(),
+            packages: Mutex::new(HashMap::new()),
+        });
+        cache
+    }
+
+    pub fn with_resolved_result_reuse(mut self) -> Self {
+        self.resolved_results = Some(Mutex::new(HashMap::new()));
+        self
+    }
+
+    pub fn resolved_result_reused(&self, path: &Path) -> Option<bool> {
+        let package = self.file_identity(path)?;
+        let results = self.resolved_results.as_ref()?.lock().unwrap();
+        Some(results.get(&package)?.reused)
+    }
+
+    pub fn check_stats(&self, path: &Path) -> Option<PackageCheckStats> {
+        let package = self.file_identity(path)?;
+        let checking = self.checking.as_ref()?;
+        let session = checking.packages.lock().unwrap().get(&package)?.clone();
+        let stats = session.lock().unwrap().stats().clone();
+        Some(stats)
     }
 
     /// Test-friendly constructor: wires an unbounded channel whose receiver is
@@ -184,6 +257,12 @@ impl PackageCache {
         Self::new(tx)
     }
 
+    pub fn for_test_with_file(path: PathBuf) -> Self {
+        let cache = Self::for_test();
+        cache.add_file(path).unwrap();
+        cache
+    }
+
     /// Register a file by reading it from disk and parsing it.
     ///
     /// If the file does not exist on disk (e.g. LSP adds the file before
@@ -191,18 +270,7 @@ impl PackageCache {
     /// [`set_contents`](Self::set_contents) to provide the real contents.
     pub fn add_file(&self, path: PathBuf) -> Result<(), String> {
         let source = std::fs::read_to_string(&path).unwrap_or_default();
-
-        let package = match self.file_identity(&path) {
-            Some(known) => known,
-            None => {
-                let mut identity = Self::identity_for_path(&path);
-                if matches!(identity, PackageIdentity::AdHoc(_)) {
-                    identity = PackageIdentity::AdHoc(self.new_adhoc_package());
-                }
-                identity
-            }
-        };
-
+        let package = self.package_identity_for(&path);
         self.set_parsed_file(path, source, package);
         Ok(())
     }
@@ -223,7 +291,13 @@ impl PackageCache {
 
     /// Update a file's contents, re-parse it, and evict its package analysis.
     pub fn set_contents(&self, path: &Path, contents: String) {
-        let package = match self.file_identity(path) {
+        let package = self.package_identity_for(path);
+        self.set_parsed_file(path.to_path_buf(), contents, package);
+        self.invalidate_package_cache_for(path);
+    }
+
+    fn package_identity_for(&self, path: &Path) -> PackageIdentity {
+        match self.file_identity(path) {
             Some(identity) => identity,
             None => {
                 let mut identity = Self::identity_for_path(path);
@@ -232,23 +306,30 @@ impl PackageCache {
                 }
                 identity
             }
-        };
+        }
+    }
 
-        self.set_parsed_file(path.to_path_buf(), contents, package);
-        self.invalidate_package_cache_for(path);
+    fn import_graph_path(path: &Path) -> PathBuf {
+        path.canonicalize()
+            .ok()
+            .or_else(|| Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?)))
+            .unwrap_or_else(|| path.to_path_buf())
     }
 
     fn impacted_package_roots(&self, path: &Path) -> HashSet<PackageIdentity> {
+        let graph_path = Self::import_graph_path(path);
         let mut affected = HashSet::new();
 
         if let Some(identity) = self.file_identity(path) {
             affected.insert(identity);
+        } else if let identity @ PackageIdentity::Configured { .. } = Self::identity_for_path(path)
+        {
+            affected.insert(identity);
         }
-
         {
             let import_graphs = self.import_graphs.lock().unwrap();
             for (package, graph) in import_graphs.iter() {
-                if !graph.impacted_modules(path).is_empty() {
+                if !graph.impacted_modules(&graph_path).is_empty() {
                     affected.insert(package.clone());
                 }
             }
@@ -258,10 +339,19 @@ impl PackageCache {
     }
 
     /// Remove resolver/module caches and package entry for a package root.
-    fn invalidate_cached_packages_for(&self, package: PackageIdentity) {
-        self.packages.lock().unwrap().remove(&package);
-        self.import_graphs.lock().unwrap().remove(&package);
-        self.module_caches.lock().unwrap().remove(&package);
+    fn invalidate_cached_packages_for(&self, package: &PackageIdentity) {
+        self.revision.fetch_add(1, Ordering::SeqCst);
+        self.packages.lock().unwrap().remove(package);
+        self.import_graphs.lock().unwrap().remove(package);
+        self.module_caches.lock().unwrap().remove(package);
+        if self.package_files_for_identity(package).is_empty() {
+            if let Some(checking) = &self.checking {
+                checking.packages.lock().unwrap().remove(package);
+            }
+            if let Some(results) = &self.resolved_results {
+                results.lock().unwrap().remove(package);
+            }
+        }
     }
 
     /// Get source text and parse output for a file.
@@ -270,12 +360,6 @@ impl PackageCache {
         files
             .get(path)
             .map(|e| (Arc::clone(&e.source), Arc::clone(&e.parse)))
-    }
-
-    /// Get parse output for a file.
-    pub fn parse_output(&self, path: &Path) -> Option<Arc<ParseOutput>> {
-        let files = self.files.lock().unwrap();
-        files.get(path).map(|e| e.parse.clone())
     }
 
     /// Collect all registered files belonging to the same package as `path`.
@@ -294,82 +378,146 @@ impl PackageCache {
             return None;
         }
 
-        let package = self.file_identity(&paths[0])?;
-
-        let config = FlaskConfig::find_package_config(&paths[0]).map(|(config, _)| config);
-        let resolution = config.as_ref().and_then(|config| config.resolution.clone());
-        let registry_valid = config.as_ref().is_none_or(|config| {
-            if !config
-                .dependencies()
-                .values()
-                .any(|dep| matches!(dep.kind, flask::DependencyKind::Version { .. }))
-            {
-                return true;
-            }
-            let verified = (|| -> std::io::Result<()> {
-                let client = flask::RegistryClient::load(flask::GinHome::discover()?)?;
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(std::io::Error::other)?
-                    .as_secs();
-                client.verify_cached(config, now)?;
-                Ok(())
-            })();
-            verified.is_ok()
-        });
-        if registry_valid {
-            if let Some(entry) = self.packages.lock().unwrap().get(&package) {
-                if entry.registry_resolution == resolution {
-                    return Some(Arc::clone(entry));
+        loop {
+            let revision = self.revision.load(Ordering::SeqCst);
+            let package = self.file_identity(&paths[0])?;
+            let discovered = FlaskConfig::discover(&paths[0]);
+            let discovered = discovered.and_then(|found| {
+                found
+                    .map(|(config, root)| {
+                        config
+                            .with_workspace_requirements(&root)
+                            .map_err(|e| e.to_string())
+                    })
+                    .transpose()
+            });
+            let manifest_valid = discovered.is_ok();
+            let config = discovered.ok().flatten();
+            let configuration = config.as_ref().map(|config| {
+                serde_json::to_value(config).expect("package configuration is serializable")
+            });
+            let resolution = config.as_ref().and_then(|config| config.resolution.clone());
+            let registry_valid = config.as_ref().is_none_or(|config| {
+                if !config
+                    .dependencies()
+                    .values()
+                    .any(|dep| matches!(dep.kind, flask::DependencyKind::Version { .. }))
+                {
+                    return true;
                 }
+                let verified = (|| -> std::io::Result<()> {
+                    let client = flask::RegistryClient::load(flask::GinHome::discover()?)?;
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_err(std::io::Error::other)?
+                        .as_secs();
+                    client.verify_cached(config, now)?;
+                    Ok(())
+                })();
+                verified.is_ok()
+            });
+            let configuration_changed = {
+                let packages = self.packages.lock().unwrap();
+                if let Some(entry) = packages.get(&package) {
+                    if manifest_valid
+                        && registry_valid
+                        && entry.registry_resolution == resolution
+                        && entry.configuration == configuration
+                    {
+                        return Some(Arc::clone(entry));
+                    }
+                    entry.configuration != configuration
+                } else {
+                    false
+                }
+            };
+            if configuration_changed || !manifest_valid || !registry_valid || resolution.is_some() {
+                self.module_caches.lock().unwrap().remove(&package);
+            }
+            let compile_target = match &package {
+                PackageIdentity::Configured { root } => Self::compile_target_for(root),
+                PackageIdentity::AdHoc(_) => CompileTarget::Library,
+            };
+            let all_files = self.package_file_paths(&paths[0])?;
+            let mut computation = self.compute_package(
+                revision,
+                &package,
+                &all_files,
+                compile_target,
+                &configuration,
+                &resolution,
+            )?;
+            if !computation.reused {
+                let entry = Arc::get_mut(&mut computation.entry)
+                    .expect("fresh package result is uniquely owned");
+                entry.registry_resolution = resolution;
+                entry.configuration = configuration;
+            }
+            if let Some(entry) = self.publish_package(package, revision, computation) {
+                return Some(entry);
             }
         }
-        if !registry_valid || resolution.is_some() {
-            self.module_caches.lock().unwrap().remove(&package);
+    }
+
+    fn publish_package(
+        &self,
+        package: PackageIdentity,
+        revision: u64,
+        computation: PackageComputation,
+    ) -> Option<Arc<PackageEntry>> {
+        let mut packages = self.packages.lock().unwrap();
+        if self.revision.load(Ordering::SeqCst) != revision {
+            return None;
         }
-
-        // Slow path: compute using all registered files in the package.
-        let all_files = self.package_file_paths(&paths[0])?;
-        let entry = self.compute_package(&package, &all_files)?;
-
-        let mut entry = entry;
-        entry.registry_resolution = resolution;
-        let entry = Arc::new(entry);
-        self.packages
+        self.module_caches
             .lock()
             .unwrap()
-            .insert(package, Arc::clone(&entry));
+            .insert(package.clone(), computation.modules);
+        let mut graphs = self.import_graphs.lock().unwrap();
+        if let Some(graph) = computation.graph {
+            graphs.insert(package.clone(), graph);
+        } else {
+            graphs.remove(&package);
+        }
+        let entry = computation.entry;
+        if let Some(results) = &self.resolved_results {
+            let mut results = results.lock().unwrap();
+            if let Some(inputs) = computation.inputs {
+                results.insert(
+                    package.clone(),
+                    ResolvedResult {
+                        inputs,
+                        entry: Arc::clone(&entry),
+                        reused: computation.reused,
+                    },
+                );
+            }
+        }
+        packages.insert(package, Arc::clone(&entry));
         Some(entry)
     }
 
     fn compute_package(
         &self,
+        revision: u64,
         package: &PackageIdentity,
         all_files: &[PathBuf],
-    ) -> Option<PackageEntry> {
+        compile_target: CompileTarget,
+        configuration: &Option<serde_json::Value>,
+        resolution: &Option<flask::PackageResolution>,
+    ) -> Option<PackageComputation> {
         let files = self.files.lock().unwrap();
 
         let mut parsed: Vec<ParsedFile> = all_files
             .iter()
-            .filter_map(|path| {
-                files.get(path).map(|entry| ParsedFile {
-                    path: path.clone(),
-                    source: (*entry.source).clone(),
-                    output: (*entry.parse).clone(),
-                })
-            })
+            .filter_map(|path| files.get(path).map(|entry| entry.parsed_file(path.clone())))
             .collect();
         if parsed.is_empty() {
             return None;
         }
         parsed.sort_by(|a, b| a.path.cmp(&b.path));
 
-        let compile_target = match package {
-            PackageIdentity::Configured { root } => FlaskConfig::find_package_config(root)
-                .and_then(|(config, _)| CompileTarget::resolve(&config, None).ok())
-                .unwrap_or(flask::CompileTarget::Library),
-            PackageIdentity::AdHoc(_) => flask::CompileTarget::Library,
-        };
+        drop(files);
 
         let deps = parsed
             .first()
@@ -392,46 +540,72 @@ impl PackageCache {
                 ast::ty::PackageInstanceKey::workspace("adhoc", &format!("session-{}", id.0))
             }
         };
-        let front_end = resolve::run_package_front_end(
-            parsed,
-            &deps,
-            cache,
-            resolve::PackageFrontEndOptions {
-                gin_home: None,
-                compile_target,
-                transform: PackageTransformOptions::IDE,
-                resolve_imports,
-                package_fallback,
-                transform_paths: None,
-            },
-        );
-        self.module_caches
-            .lock()
-            .unwrap()
-            .insert(package.clone(), front_end.cache);
-        let import_graph = front_end.import_graph;
-        if let Some(import_graph) = &import_graph {
-            self.import_graphs
-                .lock()
-                .unwrap()
-                .insert(package.clone(), import_graph.clone());
+        let options = resolve::PackageFrontEndOptions {
+            gin_home: None,
+            compile_target,
+            transform: PackageTransformOptions::IDE,
+            resolve_imports,
+            package_fallback,
+            transform_paths: None,
+        };
+        let prepared = resolve::prepare_package_front_end(parsed, &deps, cache, options);
+        if let Some(results) = &self.resolved_results {
+            let mut results = results.lock().unwrap();
+            if let Some(previous) = results.get(package) {
+                if previous.entry.configuration == *configuration
+                    && previous.entry.registry_resolution == *resolution
+                    && previous.entry.dependency_dirs == deps
+                    && previous.inputs.matches(&prepared)
+                {
+                    let entry = Arc::clone(&previous.entry);
+                    let inputs = Some(Arc::clone(&previous.inputs));
+                    let (modules, graph) = prepared.into_dependency_state();
+                    return Some(PackageComputation {
+                        entry,
+                        inputs,
+                        reused: true,
+                        modules,
+                        graph,
+                    });
+                }
+                if self.revision.load(Ordering::SeqCst) == revision {
+                    results.remove(package);
+                }
+            }
         }
-        let mut file_paths = Vec::with_capacity(front_end.files.len());
-        let mut typed_asts = Vec::with_capacity(front_end.files.len());
-        let mut prepare_diags = Vec::with_capacity(front_end.files.len());
-        let mut typecheck_outputs = Vec::with_capacity(front_end.files.len());
+        let inputs = self
+            .resolved_results
+            .as_ref()
+            .map(|_| Arc::new(prepared.input_snapshot()));
+        let front_end = match &self.checking {
+            Some(checking) => {
+                let session = checking
+                    .packages
+                    .lock()
+                    .unwrap()
+                    .entry(package.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(checking.template.fork_empty())))
+                    .clone();
+                let mut session = session.lock().unwrap();
+                resolve::check_package_front_end(prepared, Some(&mut session))
+            }
+            None => resolve::check_package_front_end(prepared, None),
+        };
+        let solved = resolve::AssembledPackage::assemble(front_end);
+        let package_index = solved.semantic_index();
+        let mut file_paths = Vec::with_capacity(solved.files.len());
+        let mut typed_asts = Vec::with_capacity(solved.files.len());
+        let mut prepare_diags = Vec::with_capacity(solved.files.len());
+        let mut typecheck_outputs = Vec::with_capacity(solved.files.len());
         let mut import_diags = HashMap::new();
-        for file in front_end.files {
-            let typed = file
-                .typed
-                .expect("IDE package transformation checks every file");
-            typecheck_outputs.push(
-                typed
-                    .all_flaws()
-                    .into_iter()
-                    .map(|(_, flaw)| flaw.clone())
-                    .collect(),
-            );
+        for file in solved.files {
+            let typed = file.typed;
+            let mut flaws = typed.flaws_with_spans();
+            flaws.extend_from_slice(typed.all_warnings());
+            flaws.sort_by_cached_key(|flaw| {
+                (flaw.span.start(), flaw.span.end(), format!("{flaw:?}"))
+            });
+            typecheck_outputs.push(flaws);
             let mut diagnostics = file.parsed.output.symptoms;
             diagnostics.extend(file.prepare_diagnostics);
             prepare_diags.push(diagnostics);
@@ -441,40 +615,39 @@ impl PackageCache {
             file_paths.push(file.parsed.path);
             typed_asts.push(typed);
         }
-        let package_index =
-            PackageSemanticIndex::from_typed_asts(&typed_asts.iter().collect::<Vec<_>>());
-        Some(PackageEntry {
+        let entry = PackageEntry {
             registry_resolution: None,
+            configuration: None,
             typed_asts,
-            public_interface: front_end.public_interface,
+            public_interface: solved.public_interface,
             package_index,
             file_paths,
             typecheck_outputs,
             import_diags,
             dependency_dirs: deps,
             prepare_diags,
+        };
+        Some(PackageComputation {
+            entry: Arc::new(entry),
+            inputs,
+            reused: false,
+            modules: solved.cache,
+            graph: solved.import_graph,
         })
     }
 
     /// Get semantic outputs in caller-requested path order.
     pub fn package_semantics(&self, paths: &[PathBuf]) -> Vec<FileSemanticOutput> {
-        let Some(entry) = self.get_or_compute_package(paths) else {
-            return vec![FileSemanticOutput::default(); paths.len()];
-        };
-        if paths.is_empty() {
-            return Vec::new();
-        }
-        let mut by_path = HashMap::with_capacity(entry.file_paths.len());
-        for (fp, out) in entry
-            .file_paths
-            .iter()
-            .zip((0..entry.file_paths.len()).map(|i| entry.semantic_output(i)))
-        {
-            by_path.insert(fp.clone(), out);
-        }
+        let by_path = self.all_diagnostics(paths);
         paths
             .iter()
-            .map(|path| by_path.get(path).cloned().unwrap_or_default())
+            .map(|path| FileSemanticOutput {
+                symptoms: by_path
+                    .get(path)
+                    .or_else(|| path.canonicalize().ok().and_then(|path| by_path.get(&path)))
+                    .cloned()
+                    .unwrap_or_default(),
+            })
             .collect()
     }
 
@@ -489,6 +662,68 @@ impl PackageCache {
             return Vec::new();
         };
         let byte_pos = byte_pos as usize;
+        if let Some((probe, receiver, partial)) =
+            typecheck::completions::member_completion_input(&source, byte_pos)
+            && let Some(entry) = self.package_entry_for(path)
+            && let Some(index) = entry.file_paths.iter().position(|file| file == path)
+        {
+            let original = &entry.typed_asts[index];
+            let mut ctx = typecheck::transform::TransformCtx::from_typed_asts(
+                &entry.typed_asts.iter().collect::<Vec<_>>(),
+            );
+            if let Some(origin) = &original.semantic_origin {
+                ctx.package_instance = origin.package.clone();
+            }
+            ctx.ide_package = true;
+            ctx.compile_time_eval_ast = original.eval_ast.clone();
+            ctx.compile_target = Self::compile_target_for(path);
+            let input = ParsedFile {
+                path: path.to_path_buf(),
+                output: probe.parse_source_full(),
+                source: probe,
+            };
+            let mut inputs: Vec<_> = self
+                .files
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(file, _)| entry.file_paths.contains(file) && file.as_path() != path)
+                .map(|(file, cached)| cached.parsed_file(file.clone()))
+                .collect();
+            inputs.push(input);
+            let resolved = resolve::resolve_imports(inputs, &entry.dependency_dirs);
+            let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            let Some(mut parsed) = resolved.into_iter().find(|file| file.path == canonical) else {
+                return Vec::new();
+            };
+            parsed.output.ast.semantic_origin = original.semantic_origin.as_deref().cloned();
+            typecheck::prepare_parse_ast(&mut parsed.output.ast, &ctx.compile_target);
+            let members = typecheck::transform::member_completions(
+                &parsed.output.ast,
+                original.file_id,
+                &ctx,
+                receiver,
+            );
+            return members
+                .into_iter()
+                .filter(|member| member.label.starts_with(&partial))
+                .collect();
+        }
+        let query_path = Self::import_graph_path(path);
+        if let Some(entry) = self.package_entry_for(path)
+            && let Some(index) = entry
+                .file_paths
+                .iter()
+                .position(|file| file == path || *file == query_path)
+        {
+            return SemanticQueries::new(
+                &source,
+                &output.ast,
+                &entry.typed_asts[index],
+                &entry.package_index,
+            )
+            .completions(byte_pos);
+        }
         let tag_types = self.tag_types_for_file(path);
         output
             .ast
@@ -523,11 +758,10 @@ impl PackageCache {
         &self,
         path: &Path,
     ) -> Option<HashMap<internment::Intern<String>, ast::ty::Ty>> {
-        let pkg_files = self.package_file_paths(path)?;
-        let entry = self.get_or_compute_package(&pkg_files)?;
+        let entry = self.package_entry_for(path)?;
         let mut tag_types = HashMap::new();
         for typed in &entry.typed_asts {
-            for (tag_id, ty) in &typed.tag_types {
+            for (tag_id, ty) in typed.tag_types.iter() {
                 tag_types.insert(
                     tag_id.0,
                     typed.type_registry.resolved_definition_for_type(ty),
@@ -555,42 +789,21 @@ impl PackageCache {
         let ast = &parse.ast;
         let word = source.word_at_byte_offset(byte_pos).unwrap_or_default();
 
-        // 1. Parse-only hover (keywords, literals)
-        // Skip `self` — the typed hover provides the receiver type (e.g. `self Type`,
-        // `self ref Type`, `self mut Type`) which is more useful than a generic keyword doc.
-        if word != "self"
-            && let Some(h) = crate::hover::HoverSnippet::keyword(source, byte_pos)
-        {
-            return Some(HoverContent {
-                markdown: h.markdown,
-                byte_range: h.byte_range,
-            });
-        }
-
-        // 2. Import hover — fall through to typed_hover when it returns None
-        //    (e.g. when the import path references a local folder not in dependencies).
-        if let Some(target) = resolve::resolve_import_at(ast, source, byte_pos)
-            && let Some(markdown) =
-                resolve::hover_for_import_target(path, target, &|p| resolve::ParsedFile::read(p))
-        {
-            return Some(HoverContent {
-                markdown,
-                byte_range: source.word_byte_range(byte_pos).map(|(s, e)| s..e),
-            });
+        if let Some(hover) = SemanticQueries::source_hover(path, source, ast, byte_pos, &|p| {
+            self.document_snapshot(p)
+                .map(|snapshot| resolve::ParsedFile {
+                    path: p.to_path_buf(),
+                    source: (*snapshot.source).clone(),
+                    output: (*snapshot.parse).clone(),
+                })
+                .or_else(|| resolve::ParsedFile::read(p))
+        }) {
+            return Some(hover);
         }
 
         // 3. Typed hover (with package context when possible)
-        let result = self.typed_hover(path, source, &snapshot.line_index, byte_pos);
+        let result = self.typed_hover(path, source, &snapshot.parse.ast, byte_pos);
         if result.is_none() {
-            // Fall back to keyword hover for `self` if the typed hover didn't resolve.
-            if word == "self"
-                && let Some(h) = crate::hover::HoverSnippet::keyword(source, byte_pos)
-            {
-                return Some(HoverContent {
-                    markdown: h.markdown,
-                    byte_range: h.byte_range,
-                });
-            }
             eprintln!(
                 "[ginlsp] hover returned None for word={word:?} at byte={byte_pos} in {:?}",
                 path
@@ -603,31 +816,16 @@ impl PackageCache {
         &self,
         path: &Path,
         source: &str,
-        line_index: &LineIndex,
+        ast: &ast::FileAst,
         byte_pos: usize,
     ) -> Option<HoverContent> {
-        let (line, character) = line_index.byte_to_position(source, byte_pos);
-
         // Try with full package context (better cross-file hover results).
-        if let Some(pkg_files) = self.package_file_paths(path)
-            && let Some(entry) = self.get_or_compute_package(&pkg_files)
-        {
+        if let Some(entry) = self.package_entry_for(path) {
+            let canonical_path = path.canonicalize().ok();
             for (file_path, typed) in entry.file_paths.iter().zip(entry.typed_asts.iter()) {
-                if file_path == path {
-                    let hover = typed.hover_at_with_package(
-                        source,
-                        line,
-                        character,
-                        Some(&entry.package_index),
-                    )?;
-                    let markdown = ast::HoverDoc::format_markdown(
-                        &hover.markdown,
-                        hover.module_prefix.as_deref(),
-                    );
-                    return Some(HoverContent {
-                        markdown,
-                        byte_range: source.word_byte_range(byte_pos).map(|(s, e)| s..e),
-                    });
+                if file_path == path || canonical_path.as_ref() == Some(file_path) {
+                    return SemanticQueries::new(source, ast, typed, &entry.package_index)
+                        .hover(byte_pos);
                 }
             }
         }
@@ -644,9 +842,27 @@ impl PackageCache {
     /// The next request for any file in this package recomputes the entry; safe
     /// to call even if no package entry exists for this path.
     pub fn invalidate_package_cache_for(&self, path: &Path) {
-        for package in self.impacted_package_roots(path) {
+        self.invalidate_impacted_packages(path);
+    }
+
+    pub fn evict_package_cache_for(&self, path: &Path) {
+        for package in self.invalidate_impacted_packages(path) {
+            if let Some(checking) = &self.checking {
+                checking.packages.lock().unwrap().remove(&package);
+            }
+            if let Some(results) = &self.resolved_results {
+                results.lock().unwrap().remove(&package);
+            }
+        }
+    }
+
+    fn invalidate_impacted_packages(&self, path: &Path) -> HashSet<PackageIdentity> {
+        self.revision.fetch_add(1, Ordering::SeqCst);
+        let impacted = self.impacted_package_roots(path);
+        for package in &impacted {
             self.invalidate_cached_packages_for(package);
         }
+        impacted
     }
 
     pub fn contains(&self, path: &Path) -> bool {
@@ -654,12 +870,13 @@ impl PackageCache {
     }
 
     pub fn evict_file(&self, path: &Path) -> bool {
-        let mut affected = HashSet::new();
+        let affected = self.impacted_package_roots(path);
 
         let removed = {
             let mut files = self.files.lock().unwrap();
             files.remove(path).map(|entry| {
-                affected.insert(entry.package.clone());
+                self.revision.fetch_add(1, Ordering::SeqCst);
+                self.packages.lock().unwrap().remove(&entry.package);
                 entry.package.clone()
             })
         };
@@ -668,17 +885,8 @@ impl PackageCache {
             return false;
         }
 
-        {
-            let import_graphs = self.import_graphs.lock().unwrap();
-            for (package, graph) in import_graphs.iter() {
-                if !graph.impacted_modules(path).is_empty() {
-                    affected.insert(package.clone());
-                }
-            }
-        }
-
         for package in affected {
-            self.invalidate_cached_packages_for(package);
+            self.invalidate_cached_packages_for(&package);
         }
 
         true
@@ -705,10 +913,6 @@ impl PackageCache {
         })
     }
 
-    pub fn file_paths(&self) -> Vec<PathBuf> {
-        self.files.lock().unwrap().keys().cloned().collect()
-    }
-
     /// All package diagnostics (type flaws, prepare, import) in one call.
     ///
     /// Semantic diagnostics are derived on access from `typecheck_outputs` +
@@ -726,7 +930,7 @@ impl PackageCache {
         };
 
         for (i, path) in entry.file_paths.iter().enumerate() {
-            let symptoms = entry.diagnostic_symptoms(i);
+            let symptoms = entry.semantic_output(i).symptoms;
             by_path.entry(path.clone()).or_default().extend(symptoms);
         }
 
@@ -737,3 +941,11 @@ impl PackageCache {
 #[cfg(test)]
 #[path = "package_cache_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "package_cache/session_tests.rs"]
+mod session_tests;
+
+#[cfg(test)]
+#[path = "package_cache/resolved_result_tests.rs"]
+mod resolved_result_tests;

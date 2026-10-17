@@ -15,8 +15,7 @@ fn hover_false_shows_bool_false_variant() {
     pkg.write_flask("core");
     let path = pkg.write("primitive/bool.gin", bool_src);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     let byte = bool_src.find("false :=").expect("`false :=` in bool.gin") as u32;
     let HoverContent { markdown, .. } = engine
@@ -43,8 +42,7 @@ fn hover_true_shows_bool_true_variant() {
     pkg.write_flask("core");
     let path = pkg.write("primitive/bool.gin", bool_src);
 
-    let engine = PackageCache::for_test();
-    engine.add_file(path.clone()).unwrap();
+    let engine = PackageCache::for_test_with_file(path.clone());
 
     let byte = bool_src.find("true  :=").expect("`true  :=` in bool.gin") as u32;
     let HoverContent { markdown, .. } = engine

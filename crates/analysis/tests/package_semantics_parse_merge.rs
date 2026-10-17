@@ -16,8 +16,7 @@ fn package_semantics_spans_match_unknown_symbols() {
     let path = PathBuf::from("/tmp/test_package_semantics.gin");
     let source = STRING_GIN_SOURCE;
 
-    let engine = PackageCache::for_test();
-    let _ = engine.add_file(path.clone());
+    let engine = PackageCache::for_test_with_file(path.clone());
     engine.set_contents(&path, source.to_string());
 
     let outputs = engine.package_semantics(&[path]);
@@ -41,11 +40,10 @@ fn package_semantics_includes_non_flaw_parse_symptoms() {
     let path = PathBuf::from("/tmp/test_parse_merge.gin");
     let source = "x := 1\n";
 
-    let engine = PackageCache::for_test();
-    let _ = engine.add_file(path.clone());
+    let engine = PackageCache::for_test_with_file(path.clone());
     engine.set_contents(&path, source.to_string());
 
-    let po = engine.parse_output(&path).expect("parse");
+    let (_, po) = engine.source_and_parse(&path).expect("parse");
     let parse_non_flaw: Vec<_> = po
         .symptoms
         .iter()
@@ -73,16 +71,15 @@ fn package_semantics_includes_deprecated_token_flaw() {
     // A standalone `=` should produce a ParseSymptom::UnexpectedToken flaw.
     let source = "=\n";
 
-    let engine = PackageCache::for_test();
-    let _ = engine.add_file(path.clone());
+    let engine = PackageCache::for_test_with_file(path.clone());
     engine.set_contents(&path, source.to_string());
 
     // Verify the parse output contains the deprecated token symptom
-    let po = engine.parse_output(&path).expect("parse");
+    let (_, po) = engine.source_and_parse(&path).expect("parse");
     let has_token_flaw = po.symptoms.iter().any(is_unexpected_equals_token);
     assert!(
         has_token_flaw,
-        "parse_output should contain deprecation error for `=`, got symptoms: {:?}",
+        "parse output should contain deprecation error for `=`, got symptoms: {:?}",
         po.symptoms
             .iter()
             .map(|d| (d.code.slug().to_string(), d.message.clone()))
