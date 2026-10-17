@@ -1,6 +1,10 @@
 use ginfmt::format;
 use parser::query::SourceParseExt;
 
+mod common;
+
+use common::assert_roundtrip;
+
 fn assert_real_source_formats_cleanly(name: &str, source: &str) {
     assert!(!source.trim().is_empty(), "{name} fixture is empty");
 
@@ -30,13 +34,13 @@ const ALLOCATOR_SOURCE: &str = "Allocation(element) has pointer @element, capaci
 
 #[test]
 fn preserves_standalone_comments_while_formatting() {
-    let source = "-- leading\nValue is in 0 to 255\n\n-- callable boundary\nValue.new(value Value) Value: value\n-- trailing\n";
+    let source = "-- leading\nValue is in 0 to 255\n\n-- callable boundary\nValue.new(value Value) Value: return value\n-- trailing\n";
     let formatted = format(source);
     assert!(formatted.contains("Value is in 0 to 255"));
-    assert!(formatted.contains("-- callable boundary\nValue.new(value Value) Value: value"));
+    assert!(formatted.contains("-- callable boundary\nValue.new(value Value) Value: return value"));
     assert!(formatted.starts_with("-- leading\n"));
     assert!(formatted.ends_with("-- trailing\n"));
-    assert_eq!(formatted, format(&formatted));
+    assert_roundtrip(&formatted);
 }
 
 #[test]
@@ -45,26 +49,26 @@ fn parser_hints_do_not_prevent_formatting() {
     assert!(!source.parse_source_full().symptoms.is_empty());
     let formatted = format(source);
     assert_ne!(formatted, source);
-    assert_eq!(formatted, format(&formatted));
+    assert_roundtrip(&formatted);
 }
 
 #[test]
 fn block_bodies_have_no_trailing_spaces_or_extra_blank_lines() {
-    let source = "first:\n    fetch()\nreturn\nsecond:\n    fetch()\nreturn\n";
+    let source = "first:\n    fetch()\n    return\nsecond:\n    fetch()\n    return\n";
     let formatted = format(source);
     assert!(formatted.lines().all(|line| line == line.trim_end()));
     assert!(!formatted.contains("\n\n\n"));
     assert!(!formatted.ends_with("\n\n"));
-    assert_eq!(formatted, format(&formatted));
+    assert_roundtrip(&formatted);
 }
 
 #[test]
 fn preserves_sources_with_nested_or_inline_comments() {
     for source in [
         "value:1 -- inline\n",
-        "main:\n    -- nested\n    value:1\nreturn value\n",
+        "main:\n    -- nested\n    value:1\n    return value\n",
     ] {
-        assert_eq!(format(source), source);
+        assert_roundtrip(source);
     }
 }
 
@@ -82,18 +86,18 @@ fn formats_generated_comparison_fixture() {
 fn formats_real_program() {
     assert_real_source_formats_cleanly(
         "generated program fixture",
-        "main:\n    value := 42\nreturn value\n",
+        "main:\n    value := 42\n    return value\n",
     );
 }
 
 #[test]
 fn formats_long_parameter_lists_as_newline_separated_arguments() {
-    let source = "signed_big_int_add_bits(lhs own SignedBigInt, rhs own SignedBigInt) SignedBigInt: lhs\n";
+    let source = "signed_big_int_add_bits(lhs own SignedBigInt, rhs own SignedBigInt) SignedBigInt: return lhs\n";
     let formatted = format(source);
 
     assert_eq!(
         formatted,
-        "signed_big_int_add_bits(\n    lhs own SignedBigInt\n    rhs own SignedBigInt\n) SignedBigInt: lhs\n"
+        "signed_big_int_add_bits(\n    lhs own SignedBigInt\n    rhs own SignedBigInt\n) SignedBigInt: return lhs\n"
     );
 }
 

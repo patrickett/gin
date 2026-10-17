@@ -9,7 +9,6 @@ workspace = true
 [dependencies]
 parser = { workspace = true }
 ast = { workspace = true }
-span = { workspace = true }
 resolve = { workspace = true }
 internment = "0.8"
 indexmap = { workspace = true }
@@ -17,3 +16,8 @@ indexmap = { workspace = true }
 lexer = { workspace = true }
 diagnostic = { workspace = true }
 ast-format = { workspace = true }
+flask = { workspace = true }
+typecheck = { workspace = true }
+
+[dev-dependencies]
+test-fixtures = { workspace = true }

@@ -1,6 +1,7 @@
-pub mod align_ast;
 pub mod ast_formatter;
 pub mod config;
+mod expression_layout;
+pub mod help;
 
 pub use ast_formatter::AstFormatter;
 pub use config::Config;
@@ -29,18 +30,34 @@ pub fn format_with_config(source: &str, config: Config) -> String {
     let mut formatter =
         AstFormatter::new(source, &config, &output.ast.span_table).with_comments(&output.comments);
     let formatted = formatter.format_file(&output.ast);
-    let reparsed = formatted.parse_source_full();
-    if reparsed
+    let layout_ast = formatted.parse_source_full();
+    if !valid_output(&output, &layout_ast) {
+        return source.to_string();
+    }
+    let bodies = help::format_value_bodies(&formatted, &layout_ast);
+    let layout_ast = bodies.parse_source_full();
+    if !valid_output(&output, &layout_ast) {
+        return formatted;
+    }
+    let layout = expression_layout::format(&bodies, &layout_ast.ast, &config);
+    let reparsed = layout.parse_source_full();
+    if !valid_output(&output, &reparsed) {
+        return bodies;
+    }
+    layout
+}
+
+fn valid_output(
+    original: &parser::query::ParseOutput,
+    formatted: &parser::query::ParseOutput,
+) -> bool {
+    !formatted
         .symptoms
         .iter()
         .any(|symptom| symptom.category == Category::Flaw)
-        || !output
+        && original
             .comments
             .iter()
             .map(|comment| &comment.text)
-            .eq(reparsed.comments.iter().map(|comment| &comment.text))
-    {
-        return source.to_string();
-    }
-    formatted
+            .eq(formatted.comments.iter().map(|comment| &comment.text))
 }

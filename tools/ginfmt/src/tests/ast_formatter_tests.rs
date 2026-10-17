@@ -1,6 +1,11 @@
 use super::*;
 use parser::query::SourceParseExt;
 
+fn format_ast(src: &str) -> String {
+    let out = src.parse_source_full();
+    AstFormatter::new(src, &Config::default(), &out.ast.span_table).format_file(&out.ast)
+}
+
 #[test]
 fn inclusive_ranges_round_trip_with_to() {
     let source = "Byte is in 0 to 255\nWindow is -10 to 10\nvalues := 1 to 10\n";
@@ -31,30 +36,25 @@ fn unsupported_interpolation_round_trips_with_its_diagnostic() {
 #[test]
 fn test_basic_declare() {
     let source = "Maybe is Some or None\nResult is Ok or Error\n";
-    let out = source.parse_source_full();
-    let cfg = Config::default();
-    let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
-    let r = f.format_file(&out.ast);
-    assert_eq!(r, "Maybe is Some or None\nResult is Ok or Error\n");
+    assert_eq!(
+        format_ast(source),
+        "Maybe is Some or None\nResult is Ok or Error\n"
+    );
 }
 
 #[test]
 fn test_has_members_use_canonical_no_paren_syntax() {
     let source = "Range(x) has start x, contains(self, value x) Bool\n";
-    let out = source.parse_source_full();
-    let cfg = Config::default();
-    let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
-    let r = f.format_file(&out.ast);
-    assert_eq!(r, "Range(x) has start x, contains(self, value x) Bool\n");
+    assert_eq!(
+        format_ast(source),
+        "Range(x) has start x, contains(self, value x) Bool\n"
+    );
 }
 
 #[test]
 fn composed_interface_preserves_qualified_methods() {
-    let source = "TraitA has run(self ref) Int\nTraitB has run(self ref) Int\nCombined has TraitA and TraitB\n    TraitA.run(self ref) Int := 1\n    TraitB.run(self ref) Int := 2\n";
-    let out = source.parse_source_full();
-    let cfg = Config::default();
-    let mut formatter = AstFormatter::new(source, &cfg, &out.ast.span_table);
-    let formatted = formatter.format_file(&out.ast);
+    let source = "TraitA has run(self ref) Int\nTraitB has run(self ref) Int\nCombined has TraitA and TraitB\n    TraitA.run(self ref) Int := return 1\n    TraitB.run(self ref) Int := return 2\n";
+    let formatted = format_ast(source);
     assert!(
         formatted.contains("TraitA has run(self ref) Int"),
         "formatted output: {formatted:?}",
@@ -65,11 +65,8 @@ fn composed_interface_preserves_qualified_methods() {
 
 #[test]
 fn test_simple_bind() {
-    let source = "main:\n    print('hello')\nreturn\n";
-    let out = source.parse_source_full();
-    let cfg = Config::default();
-    let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
-    let r = f.format_file(&out.ast);
+    let source = "main:\n    print('hello')\n    return\n";
+    let r = format_ast(source);
     assert!(r.contains("main:"));
     assert!(r.contains("print('hello')"));
     assert!(r.contains("return"));
@@ -77,7 +74,7 @@ fn test_simple_bind() {
 
 #[test]
 fn formats_named_result_rows() {
-    let source = "add(lhs Int, rhs Int) sum Int, overflow Bit: lhs, rhs\n";
+    let source = "add(lhs Int, rhs Int) sum Int, overflow Bit: return lhs, rhs\n";
     let formatted = crate::format(source);
     assert!(formatted.contains("add(lhs Int, rhs Int) sum Int, overflow Bit:"));
     assert_eq!(crate::format(&formatted), formatted);
@@ -95,63 +92,59 @@ fn formats_multiple_return_values() {
 }
 
 #[test]
+fn preserves_return_postconditions() {
+    for source in [
+        "clear(value mut Int):\n    return thus value = 0\n",
+        "positive(value Int):\n    return True thus value > 0\n",
+        "less(left Int, right Int):\n    when left < right then\n        return True thus left < right\n    return False thus left >= right\n",
+    ] {
+        let formatted = crate::format(source);
+        let parsed = formatted.parse_source_full();
+        assert!(parsed.symptoms.is_empty(), "{:?}", parsed.symptoms);
+        assert_eq!(
+            formatted.matches(" thus ").count(),
+            source.matches(" thus ").count()
+        );
+        assert_eq!(crate::format(&formatted), formatted);
+        assert!(matches!(parsed.ast.defs.values().next().unwrap().value,
+            ast::BindValue::Body { ref ret, .. } if ret.postcondition.is_some()));
+    }
+}
+
+#[test]
 fn test_empty() {
     let source = "";
-    let out = source.parse_source_full();
-    let cfg = Config::default();
-    let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
-    let r = f.format_file(&out.ast);
-    assert_eq!(r, "");
+    assert_eq!(format_ast(source), "");
 }
 
 #[test]
 fn test_import_sort_current_module() {
     let source = "use ToString, Copy\n";
-    let out = source.parse_source_full();
-    let cfg = Config::default();
-    let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
-    let r = f.format_file(&out.ast);
-    assert_eq!(r, "use Copy, ToString\n");
+    assert_eq!(format_ast(source), "use Copy, ToString\n");
 }
 
 #[test]
 fn test_import_sort_package() {
     let source = "use http.web, crypto.hash\n";
-    let out = source.parse_source_full();
-    let cfg = Config::default();
-    let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
-    let r = f.format_file(&out.ast);
-    assert_eq!(r, "use crypto.hash\nuse http.web\n");
+    assert_eq!(format_ast(source), "use crypto.hash\nuse http.web\n");
 }
 
 #[test]
 fn test_import_sort_single() {
     let source = "use http\n";
-    let out = source.parse_source_full();
-    let cfg = Config::default();
-    let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
-    let r = f.format_file(&out.ast);
-    assert_eq!(r, "use http\n");
+    assert_eq!(format_ast(source), "use http\n");
 }
 
 #[test]
 fn test_bundle_member_sort() {
     let source = "use core Int, Byte, Area\n";
-    let out = source.parse_source_full();
-    let cfg = Config::default();
-    let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
-    let r = f.format_file(&out.ast);
-    assert_eq!(r, "use core Area, Byte, Int\n");
+    assert_eq!(format_ast(source), "use core Area, Byte, Int\n");
 }
 
 #[test]
 fn test_import_sort_idempotent() {
     let source = "use Copy, ToString\n";
-    let out = source.parse_source_full();
-    let cfg = Config::default();
-    let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
-    let r = f.format_file(&out.ast);
-    assert_eq!(r, "use Copy, ToString\n");
+    assert_eq!(format_ast(source), "use Copy, ToString\n");
 }
 
 #[test]
@@ -162,31 +155,21 @@ counter:: 0\n\
 result: counter\n\
 pair.0:: counter\n\
 pair.0 +: counter + 1\n\
-buffer.(0):: 1\n\
-buffer.(0) +: 2\n";
-    let out = source.parse_source_full();
-    let cfg = Config::default();
-    let mut formatter = AstFormatter::new(source, &cfg, &out.ast.span_table);
-    let formatted = formatter.format_file(&out.ast);
-    assert!(formatted.contains("counter:: 0"));
+buffer.[0]:: 1\n\
+buffer.[0] +: 2\n";
+    let formatted = format_ast(source);
+    assert!(formatted.contains("counter :: 0"));
     assert!(formatted.contains("result: counter"));
-    assert!(formatted.contains("pair.0:: counter"), "{formatted}");
+    assert!(formatted.contains("pair.0 :: counter"), "{formatted}");
     assert!(formatted.contains("pair.0 +: counter + 1"));
-    assert!(formatted.contains("buffer.(0):: 1"));
-    assert!(formatted.contains("buffer.(0) +: 2"));
+    assert!(formatted.contains("buffer.[0] :: 1"));
+    assert!(formatted.contains("buffer.[0] +: 2"));
 }
 
 #[test]
 fn compiler_attributes_are_comma_separated_when_they_fit() {
     let source = "#infix('+')\n#inline\nadd: 1\n";
-    let out = source.parse_source_full();
-    let cfg = Config::default();
-    let mut formatter = AstFormatter::new(source, &cfg, &out.ast.span_table);
-
-    assert_eq!(
-        formatter.format_file(&out.ast),
-        "#infix('+'), #inline\nadd: 1\n"
-    );
+    assert_eq!(format_ast(source), "#infix('+'), #inline\nadd: 1\n");
 }
 
 #[test]
@@ -207,7 +190,7 @@ fn compiler_attributes_remain_separate_when_they_do_not_fit() {
 
 #[test]
 fn formats_intrinsic_integer_definitions_without_duplicating_type_text() {
-    let source = "Byte is in 0 to 255\nSignedBigInt is in -9223372036854775808 to 9223372036854775807\n\nsigned_big_int_add_bits(lhs own SignedBigInt, rhs own SignedBigInt) SignedBigInt: lhs\n#infix_op('+')\n#inline\nsigned_big_int_add(lhs SignedBigInt, rhs SignedBigInt) SignedBigInt: signed_big_int_add_bits(lhs, rhs)\n";
+    let source = "Byte is in 0 to 255\nSignedBigInt is in -9223372036854775808 to 9223372036854775807\n\nsigned_big_int_add_bits(lhs own SignedBigInt, rhs own SignedBigInt) SignedBigInt: return lhs\n#infix_op('+')\n#inline\nsigned_big_int_add(lhs SignedBigInt, rhs SignedBigInt) SignedBigInt: return signed_big_int_add_bits(lhs, rhs)\n";
 
     let formatted = crate::format(source);
     assert!(formatted.contains("Byte is in 0 to 255"));
@@ -227,35 +210,31 @@ fn separates_top_level_binds_with_one_blank_line() {
 
 #[test]
 fn aligns_types_in_has_properties() {
-    let source = "Vec(element Type, allocator: GlobalAllocator) has\n    storage Allocation(element)\n    length Count(element)\n";
+    let source = "Vec(element, allocator: GlobalAllocator) has\n    storage Allocation(element)\n    length Count(element)\n";
     assert_eq!(
         crate::format(source),
-        "Vec(element Type, allocator: GlobalAllocator) has\n    storage Allocation(element)\n    length  Count(element)\n"
+        "Vec(element, allocator: GlobalAllocator) has\n    storage Allocation(element)\n    length  Count(element)\n"
     );
 }
 
 #[test]
 fn normalizes_parameter_spacing_and_modifier_order() {
-    let source = "f(lhs own Int, rhs ref Int, output mut Int) Int: lhs\n";
+    let source = "f(lhs own Int, rhs ref Int, output mut Int) Int: return lhs\n";
     assert_eq!(
         crate::format(source),
-        "f(lhs own Int, rhs ref Int, output mut Int) Int: lhs\n"
+        "f(lhs own Int, rhs ref Int, output mut Int) Int: return lhs\n"
     );
 }
 
 #[test]
 fn normalizes_single_space_after_parameter_commas() {
-    let source = "Allocator has reserve(self mut, element Type, count Count(element)) AllocAttempt(element)\n";
+    let source = "Allocator has reserve(self mut, x, count Count(x)) Allocation(x) or AllocError\n";
     let formatted = crate::format(source);
     assert!(
         !formatted.contains(",  "),
         "formatted output: {formatted:?}"
     );
-    assert!(
-        formatted.contains(
-            "reserve(self mut, element Type, count Count(element)) AllocAttempt(element)"
-        )
-    );
+    assert!(formatted.contains("reserve(self mut, x, count Count(x)) Allocation(x) or AllocError"));
 }
 
 #[test]
@@ -263,10 +242,10 @@ fn canonicalizes_return_only_constructor_bindings() {
     let source = "Contract has value Int\nmake() Contract:\n    return Contract(value: 1)\n";
     let formatted = crate::format(source);
     assert!(
-        formatted.contains("make: Contract(value: 1)"),
+        formatted.contains("make Contract: return Contract(value: 1)"),
         "{formatted}"
     );
-    assert!(!formatted.contains("return"));
+    assert!(formatted.contains("return"));
     assert_eq!(crate::format(&formatted), formatted);
     assert!(formatted.parse_source_full().symptoms.is_empty());
 }
@@ -274,16 +253,16 @@ fn canonicalizes_return_only_constructor_bindings() {
 #[test]
 fn keeps_contextual_return_types() {
     let source = "value() Int:\n    return 1\n";
-    assert_eq!(crate::format(source), "value Int: 1\n");
+    assert_eq!(crate::format(source), "value Int: return 1\n");
 }
 
 #[test]
-fn terminal_returns_align_with_the_binding() {
+fn terminal_returns_are_indented_inside_the_binding() {
     for result in ["", " value", " value, value"] {
         let source = format!("run():\n    value := 1\n    return{result}\n");
         let formatted = crate::format(&source);
         assert!(
-            formatted.contains(&format!("\nreturn{result}\n")),
+            formatted.contains(&format!("\n    return{result}\n")),
             "{formatted}"
         );
         assert_eq!(crate::format(&formatted), formatted);
@@ -296,7 +275,7 @@ fn return_only_methods_preserve_the_receiver() {
     let source = "Container has value Int\nContainer.build(self) Int:\n    return self.value\n";
     let formatted = crate::format(source);
     assert!(
-        formatted.contains("Container.build(self) Int: self.value"),
+        formatted.contains("Container.build(self) Int: return self.value"),
         "{formatted}"
     );
     assert_eq!(crate::format(&formatted), formatted);
@@ -342,7 +321,7 @@ fn plain_double_quoted_bytes_preserve_their_value_when_formatted() {
 fn multiline_constructor_returns_preserve_generic_annotations() {
     let source = "make() Box(Int):\n    return Box(\n        value: 1\n    )\n";
     let formatted = crate::format(source);
-    assert_eq!(formatted, "make Box(Int): Box(value: 1)\n");
+    assert_eq!(formatted, "make Box(Int): return Box(\n    value: 1\n)\n");
     assert_eq!(crate::format(&formatted), formatted);
 }
 
@@ -356,10 +335,12 @@ Container.with_parameter(self, parameter Slice(ViewByte), register Slice(ViewByt
 "#;
     let formatted = crate::format(source);
     assert!(
-        formatted.contains(r#"(self, parameter Slice(ViewByte), register Slice(ViewByte))"#),
+        formatted.contains(
+            "(\n    self\n    parameter Slice(ViewByte)\n    register Slice(ViewByte)\n)"
+        ),
         "{formatted}"
     );
-    assert!(!formatted.contains("return"), "{formatted}");
+    assert!(formatted.contains("return"), "{formatted}");
     assert!(formatted.parse_source_full().symptoms.is_empty());
     assert_eq!(crate::format(&formatted), formatted);
 }
@@ -368,23 +349,23 @@ Container.with_parameter(self, parameter Slice(ViewByte), register Slice(ViewByt
 fn return_only_bodies_preserve_immutable_bindings() {
     let source = "value() Int :=\n    return 1\n";
     let formatted = crate::format(source);
-    assert_eq!(formatted, "value Int := 1\n");
+    assert_eq!(formatted, "value Int := return 1\n");
     assert_eq!(crate::format(&formatted), formatted);
 }
 
 #[test]
 fn preserves_encoder_bodies_and_array_representation_attributes() {
-    let source = "Encoder has\n    encode(value is in 0 to 255) Bytes(Byte, 1): [value]\n\nmake() Box:\n    return Box(value: 1)\n\n#fixed_array(element, count)\nBytes(element Type, count BigInt) has\n";
+    let source = "Encoder has\n    encode(value is in 0 to 255) Bytes(Byte, 1): return [value]\n\nmake() Box:\n    return Box(value: 1)\n\n#fixed_array(element, count)\nBytes(element, count BigInt) has\n";
     let formatted = crate::format(source);
     assert!(
-        formatted.contains("encode(value is in 0 to 255) Bytes(Byte, 1): [value]"),
+        formatted.contains("encode(value is in 0 to 255) Bytes(Byte, 1): return [value]"),
         "{formatted}"
     );
     assert!(
         formatted.contains("#fixed_array(element, count)"),
         "{formatted}"
     );
-    assert!(!formatted.contains("return"), "{formatted}");
+    assert!(formatted.contains("return"), "{formatted}");
     assert_eq!(crate::format(&formatted), formatted);
 }
 
@@ -409,11 +390,12 @@ fn has_layout_respects_the_configured_width_boundary() {
 
 #[test]
 fn aligns_fields_before_methods_with_default_parameters_and_bodies() {
-    let source = "Reader has\n    a Int\n    longer Int\n\n    read(self, limit: 10) Int: limit\n";
+    let source =
+        "Reader has\n    a Int\n    longer Int\n\n    read(self, limit: 10) Int: return limit\n";
     let formatted = crate::format(source);
     assert_eq!(
         formatted,
-        "Reader has\n    a      Int\n    longer Int\n\n    read(self, limit: 10) Int: limit\n"
+        "Reader has\n    a      Int\n    longer Int\n\n    read(self, limit: 10) Int: return limit\n"
     );
     assert!(formatted.parse_source_full().symptoms.is_empty());
     assert_eq!(crate::format(&formatted), formatted);
@@ -454,7 +436,7 @@ fn alignment_does_not_push_a_type_over_the_width_limit() {
 
 #[test]
 fn generic_has_headers_and_method_signatures_wrap_without_losing_fields() {
-    let source = "Record(element Type, count BigInt) has value element, size BigInt, read(self, limit: 10) element\n";
+    let source = "Record(element, count BigInt) has value element, size BigInt, read(self, limit: 10) element\n";
     let config = Config {
         max_line_width: 60,
         ..Config::default()
@@ -472,7 +454,7 @@ fn generic_has_headers_and_method_signatures_wrap_without_losing_fields() {
 
 #[test]
 fn multiline_generic_headers_use_block_members_even_when_members_fit_inline() {
-    let source = "Region(contract_type Type, item_type Type, count BigInt) has contract contract_type, items item_type\n";
+    let source = "Region(contract_type, item_type, count BigInt) has contract contract_type, items item_type\n";
     let formatted = crate::format(source);
     assert!(
         formatted.contains(") has\n    contract contract_type\n    items    item_type"),
@@ -495,7 +477,7 @@ fn local_bundle_imports_allow_attribute_and_return_normalization() {
             formatted.starts_with(if width >= "use '../arithmetic' add, Word".len() {
                 "use '../arithmetic' add, Word\n"
             } else {
-                "use '../arithmetic'\n    add\n    Word\n"
+                "use '../arithmetic'\n    add, Word\n"
             }),
             "{formatted}"
         );
@@ -506,10 +488,14 @@ fn local_bundle_imports_allow_attribute_and_return_normalization() {
         };
         assert!(formatted.contains(expected_attributes), "{formatted}");
         assert!(
-            formatted.contains("Word: add(lhs, rhs) as Word"),
+            formatted.contains(if width == 80 {
+                "Word: return add(lhs, rhs) as Word"
+            } else {
+                "Word: return add(\n    lhs\n    rhs\n) as Word"
+            }),
             "{formatted}"
         );
-        assert!(!formatted.contains("return "), "{formatted}");
+        assert!(formatted.contains("return "), "{formatted}");
         assert!(formatted.parse_source_full().symptoms.is_empty());
         assert_eq!(crate::format_with_config(&formatted, config), formatted);
     }
@@ -538,7 +524,7 @@ fn import_members_wrap_without_parentheses_and_round_trip() {
     assert!(out.symptoms.is_empty(), "{:?}", out.symptoms);
     let formatted = AstFormatter::new(source, &cfg, &out.ast.span_table).format_file(&out.ast);
     assert!(
-        formatted.starts_with("use '../math'\n    add\n    subtract as difference\n"),
+        formatted.starts_with("use '../math'\n    add,\n    subtract as difference\n"),
         "{formatted}"
     );
     let reparsed = formatted.parse_source_full();
@@ -564,7 +550,7 @@ fn has_method_result_alternatives_round_trip() {
 
 #[test]
 fn self_and_nested_result_alternatives_round_trip() {
-    let source = "Word is in 0 to 255\nOutcome is Word or Failure(Empty or Full)\n\nWord has\n    copy(value ref Self) Self:\n        bits is in 0 to 255: value\n    return bits as Self\n";
+    let source = "Word is in 0 to 255\nOutcome is Word or Failure(Empty or Full)\n\nWord has\n    copy(value ref Self) Self:\n        bits is in 0 to 255: value\n        return bits as Self\n";
     let formatted = crate::format(source);
     assert_eq!(crate::format(&formatted), formatted);
     assert!(
@@ -599,4 +585,125 @@ fn sequence_forms_round_trip_without_adding_result_brackets() {
             parsed.symptoms
         );
     }
+}
+
+#[test]
+fn integer_domain_annotations_round_trip() {
+    let source = "Word is in -128 to 127\nidentity(value is in Word) is in Word: return value\nHolder has\n    raw(self):\n        value is in Self: self\n        return value\n";
+    let formatted = crate::format(source);
+    assert!(formatted.contains("value is in Word"), "{formatted}");
+    assert!(
+        formatted.contains("is in Word: return value"),
+        "{formatted}"
+    );
+    assert!(formatted.contains("value is in Self: self"), "{formatted}");
+    assert!(
+        formatted.parse_source_full().symptoms.is_empty(),
+        "{formatted}"
+    );
+    assert_eq!(crate::format(&formatted), formatted);
+}
+
+#[test]
+fn generic_trait_arguments_round_trip() {
+    let source = "Div(result) has\n    divide(self, rhs Self) result\nExample has Div(Outcome)\n    divide(self, rhs Self) Outcome: return rhs\n";
+    let formatted = crate::format(source);
+    assert!(formatted.contains("Div(Outcome)"), "{formatted}");
+    assert_eq!(crate::format(&formatted), formatted);
+    assert!(formatted.parse_source_full().symptoms.is_empty());
+}
+
+#[test]
+fn trait_chains_wrap_at_the_width_boundary_and_align_with_has() {
+    let header = "Number has Add and Mul(Result) and Copy";
+    for body in [
+        "",
+        "\n    apply(self, rhs Self): return rhs\n    other(self): return self",
+    ] {
+        let source = format!("{header}{body}\n");
+        for (width, expected_header) in [
+            (header.len(), header),
+            (
+                header.len() - 1,
+                "Number has Add and Mul(Result)\n       and Copy",
+            ),
+            (
+                25,
+                "Number has Add\n       and Mul(Result)\n       and Copy",
+            ),
+        ] {
+            let config = Config {
+                max_line_width: width,
+                ..Config::default()
+            };
+            let formatted = crate::format_with_config(&source, config.clone());
+            assert_eq!(formatted, format!("{expected_header}{body}\n"));
+            assert!(
+                formatted.parse_source_full().symptoms.is_empty(),
+                "{formatted}"
+            );
+            assert_eq!(crate::format_with_config(&formatted, config), formatted);
+        }
+    }
+}
+
+#[test]
+fn wrapped_generic_trait_headers_preserve_members() {
+    let source = "Container(element) has Reader(element) and Writer(element) and Copy\n    read(self) element\n";
+    let config = Config {
+        max_line_width: 45,
+        ..Config::default()
+    };
+    let formatted = crate::format_with_config(source, config.clone());
+    assert_eq!(
+        formatted,
+        "Container(element) has Reader(element)\n                   and Writer(element)\n                   and Copy\n    read(self) element\n"
+    );
+    assert!(
+        formatted.parse_source_full().symptoms.is_empty(),
+        "{formatted}"
+    );
+    assert_eq!(crate::format_with_config(&formatted, config), formatted);
+}
+
+#[test]
+fn import_members_fill_continuation_lines_at_configured_width() {
+    let source = "use sample.ops Gamma as G, Delta, Beta, Alpha\n";
+    for (width, expected) in [
+        (48, "use sample.ops Alpha, Beta, Delta, Gamma as G\n"),
+        (45, "use sample.ops Alpha, Beta, Delta, Gamma as G\n"),
+        (44, "use sample.ops\n    Alpha, Beta, Delta, Gamma as G\n"),
+        (
+            23,
+            "use sample.ops\n    Alpha, Beta, Delta,\n    Gamma as G\n",
+        ),
+        (
+            22,
+            "use sample.ops\n    Alpha, Beta,\n    Delta, Gamma as G\n",
+        ),
+    ] {
+        let cfg = Config {
+            max_line_width: width,
+            ..Config::default()
+        };
+        let formatted = crate::format_with_config(source, cfg.clone());
+        assert_eq!(formatted, expected, "width {width}");
+        assert!(formatted.lines().all(|line| line.len() <= width));
+        let parsed = formatted.parse_source_full();
+        assert!(parsed.symptoms.is_empty(), "{:?}", parsed.symptoms);
+        assert_eq!(crate::format_with_config(&formatted, cfg), formatted);
+    }
+}
+
+#[test]
+fn numeric_predicates_round_trip() {
+    let source =
+        "choose(value is in 0 to 255): return when value < 16 and value in 0 to 15 then 1 else 0\n";
+    let formatted = crate::format(source);
+    assert!(
+        formatted.contains("value < 16 and value in 0 to 15"),
+        "{formatted}"
+    );
+    assert!(formatted.parse_source_full().symptoms.is_empty());
+    assert_eq!(crate::format(&formatted), formatted);
 }
