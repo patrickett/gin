@@ -10,13 +10,13 @@ workspace = true
 diagnostic = { workspace = true }
 span = { workspace = true }
 
-internment = "0.8"
 i256 = { workspace = true }
 memchr = "2.7"
 fast-float = "0.2"
 
 [dev-dependencies]
 criterion = "0.5"
+test-fixtures = { workspace = true }
 
 [[bench]]
 name = "lexer_bench"

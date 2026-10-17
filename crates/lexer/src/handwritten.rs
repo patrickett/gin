@@ -1,5 +1,6 @@
 use crate::token::{LexContext, MAX_INDENT_DEPTH, Token};
-use diagnostic::Diagnostic;
+use diagnostic::code::LexCode;
+use diagnostic::{Diagnostic, DiagnosticCode};
 use i256::I256;
 use memchr::{memchr, memchr2};
 use span::{Span, SpanId, SpanTable};
@@ -30,6 +31,7 @@ pub struct Lexer<'src> {
     last_indent_span: SpanId,
     fmt: Option<FormatStringState<'src>>,
     span_table: SpanTable,
+    blank_lines: Vec<usize>,
     /// Byte offset of the next `\n`, or `source.len()` if none remains.
     line_end: usize,
 }
@@ -57,6 +59,7 @@ impl<'src> Lexer<'src> {
             last_indent_span: SpanId::INVALID,
             fmt: None,
             span_table: SpanTable::with_capacity(estimated_spans),
+            blank_lines: Vec::new(),
             line_end,
         }
     }
@@ -69,6 +72,11 @@ impl<'src> Lexer<'src> {
     #[inline]
     fn insert_span(&mut self, range: std::ops::Range<usize>) -> SpanId {
         self.span_table.insert(Span::from_range(range))
+    }
+
+    fn push_error(&mut self, code: DiagnosticCode, message: &str, span: SpanId) {
+        self.errors
+            .push(Diagnostic::new(code, message).at_span_id(span, &self.span_table));
     }
 
     /// Get the span data for a given SpanId.
@@ -84,6 +92,10 @@ impl<'src> Lexer<'src> {
     /// Take the span table, leaving an empty one in its place.
     pub fn take_span_table(&mut self) -> SpanTable {
         std::mem::take(&mut self.span_table)
+    }
+
+    pub fn take_blank_lines(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.blank_lines)
     }
 
     #[inline]
@@ -138,6 +150,7 @@ impl<'src> Lexer<'src> {
                 None => return Some((Token::Newline, span)),
                 Some(b'\n') => {
                     self.pos += 1;
+                    self.blank_lines.push(self.pos);
                     continue;
                 }
                 _ => {}
@@ -147,7 +160,15 @@ impl<'src> Lexer<'src> {
             self.line_end = memchr(b'\n', &bytes[self.pos..]).map_or(bytes.len(), |i| self.pos + i);
 
             let depth = self.indent.indent_depth as usize;
+            assert!(depth > 0 && depth <= MAX_INDENT_DEPTH);
             let current = self.indent.indent_stack[depth - 1];
+
+            if indent > current
+                && bytes[self.pos..].starts_with(b"and")
+                && bytes.get(self.pos + 3).is_some_and(u8::is_ascii_whitespace)
+            {
+                return Some((Token::Newline, span));
+            }
 
             if indent > current {
                 if depth < MAX_INDENT_DEPTH {
@@ -159,7 +180,7 @@ impl<'src> Lexer<'src> {
                 }
             } else if indent < current {
                 let mut d = depth;
-                while self.indent.indent_stack[d - 1] > indent {
+                while d > 1 && self.indent.indent_stack[d - 1] > indent {
                     d -= 1;
                 }
                 self.indent.pending_dedents = (depth - d) as u8;
@@ -174,48 +195,46 @@ impl<'src> Lexer<'src> {
         let bytes = self.bytes;
         let mut indent = 0u16;
         while self.pos < bytes.len() {
-            match bytes[self.pos] {
-                b' ' => {
-                    indent += 1;
-                    self.pos += 1;
-                }
-                b'\t' => {
-                    indent += 4;
-                    self.pos += 1;
-                }
+            let width = match bytes[self.pos] {
+                b' ' => 1,
+                b'\t' => 4,
                 _ => break,
+            };
+            match indent.checked_add(width) {
+                Some(next) => indent = next,
+                None => {
+                    indent = u16::MAX;
+                    self.indent.indent_overflow = true;
+                }
             }
+            self.pos += 1;
         }
         indent
     }
 
-    fn lex_keyword_or_id(&mut self, start: usize) -> (Token<'src>, SpanId) {
-        let bytes = self.bytes;
-        while self.pos < bytes.len() {
-            match bytes[self.pos] {
-                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' => self.pos += 1,
-                _ => break,
+    fn lex_ident(&mut self, start: usize, allow_underscore: bool) -> (&'src str, SpanId) {
+        while self.pos < self.bytes.len() {
+            let byte = self.bytes[self.pos];
+            let continues = matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9')
+                || (allow_underscore && byte == b'_');
+            if !continues {
+                break;
             }
+            self.pos += 1;
         }
         let text = self.slice_from(start);
         let range = self.current_span(start);
         let span = self.insert_span(range);
-        let tok = Token::from_keyword(text).unwrap_or(Token::Id(text));
-        (tok, span)
+        (text, span)
+    }
+
+    fn lex_keyword_or_id(&mut self, start: usize) -> (Token<'src>, SpanId) {
+        let (text, span) = self.lex_ident(start, true);
+        (Token::from_keyword(text).unwrap_or(Token::Id(text)), span)
     }
 
     fn lex_tag(&mut self, start: usize) -> (Token<'src>, SpanId) {
-        let bytes = self.bytes;
-        while self.pos < bytes.len() {
-            match bytes[self.pos] {
-                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' => self.pos += 1,
-                _ => break,
-            }
-        }
-        let text = self.slice_from(start);
-        let range = self.current_span(start);
-        let span = self.insert_span(range);
-
+        let (text, span) = self.lex_ident(start, false);
         (Token::from_keyword(text).unwrap_or(Token::Tag(text)), span)
     }
 
@@ -236,144 +255,41 @@ impl<'src> Lexer<'src> {
     }
 
     fn lex_number(&mut self, start: usize) -> (Token<'src>, SpanId) {
-        if self.bytes[start] == b'0'
-            && let Some(b'x' | b'X') = self.peek()
-            && self.peek_at(1).is_some_and(|b| b.is_ascii_hexdigit())
+        let is_hex = self.bytes[start] == b'0'
+            && matches!(self.peek(), Some(b'x' | b'X'))
+            && self.peek_at(1).is_some_and(|b| b.is_ascii_hexdigit());
+        let (value, had_underscore) = if is_hex {
+            self.pos += 1;
+            self.consume_digits(16, Some(I256::from(0)))
+        } else {
+            let first = I256::from(self.bytes[start] - b'0');
+            self.consume_digits(10, Some(first))
+        };
+
+        if !is_hex
+            && self.peek() == Some(b'.')
+            && self.peek_at(1).is_some_and(|b| b.is_ascii_digit())
         {
             self.pos += 1;
-            let bytes = self.bytes;
-            let mut value = Some(I256::from(0));
-            let mut had_underscore = false;
-            let mut last_char_was_underscore = false;
-            while self.pos < bytes.len() {
-                match bytes[self.pos] {
-                    b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F' => {
-                        let digit = match bytes[self.pos] {
-                            b'0'..=b'9' => I256::from(bytes[self.pos] - b'0'),
-                            b'a'..=b'f' => I256::from(bytes[self.pos] - b'a' + 10),
-                            _ => I256::from(bytes[self.pos] - b'A' + 10),
-                        };
-                        if digit >= I256::from(16) {
-                            value = None;
-                        } else if let Some(v) = value {
-                            value = v
-                                .checked_mul(I256::from(16))
-                                .and_then(|v| v.checked_add(digit));
-                        }
-                        last_char_was_underscore = false;
-                        self.pos += 1;
-                    }
-                    b'_' => {
-                        if last_char_was_underscore {
-                            had_underscore = true;
-                        }
-                        last_char_was_underscore = true;
-                        self.pos += 1;
-                    }
-                    _ => break,
-                }
-            }
+            let (_, fraction_had_underscore) = self.consume_digits(10, None);
             let range = self.current_span(start);
             let span = self.insert_span(range);
-            if last_char_was_underscore {
-                had_underscore = true;
-            }
-            if had_underscore {
-                self.errors.push(
-                    Diagnostic::new(
-                        "lex-invalid-integer",
-                        "integer literal has invalid underscore placement",
-                    )
-                    .at_span_id(span, &self.span_table),
-                );
-            }
-            return match value {
-                Some(v) => (Token::Int(v), span),
-                None => {
-                    self.errors.push(
-                        Diagnostic::new("lex-invalid-integer", "integer literal out of range")
-                            .at_span_id(span, &self.span_table),
-                    );
-                    (Token::Int(I256::from(0)), span)
-                }
-            };
-        }
-
-        let bytes = self.bytes;
-        let mut value = Some(I256::from(bytes[start] - b'0'));
-        let mut had_underscore = false;
-        let mut last_char_was_underscore = false;
-        while self.pos < bytes.len() {
-            match bytes[self.pos] {
-                b'0'..=b'9' => {
-                    let digit = I256::from(bytes[self.pos] - b'0');
-                    if let Some(v) = value {
-                        value = v
-                            .checked_mul(I256::from(10))
-                            .and_then(|v| v.checked_add(digit));
-                    }
-                    last_char_was_underscore = false;
-                    self.pos += 1;
-                }
-                b'_' => {
-                    if last_char_was_underscore {
-                        had_underscore = true;
-                    }
-                    last_char_was_underscore = true;
-                    self.pos += 1;
-                }
-                _ => break,
-            }
-        }
-        if last_char_was_underscore {
-            had_underscore = true;
-        }
-
-        if self.peek() == Some(b'.') && self.peek_at(1).is_some_and(|b| b.is_ascii_digit()) {
-            self.pos += 1;
-            let mut frac_last_char_was_underscore = false;
-            while self.pos < bytes.len() {
-                match bytes[self.pos] {
-                    b'0'..=b'9' => {
-                        let digit = I256::from(bytes[self.pos] - b'0');
-                        if let Some(v) = value {
-                            value = v
-                                .checked_mul(I256::from(10))
-                                .and_then(|v| v.checked_add(digit));
-                        }
-                        frac_last_char_was_underscore = false;
-                        self.pos += 1;
-                    }
-                    b'_' => {
-                        if frac_last_char_was_underscore {
-                            had_underscore = true;
-                        }
-                        frac_last_char_was_underscore = true;
-                        self.pos += 1;
-                    }
-                    _ => break,
-                }
-            }
-            if frac_last_char_was_underscore {
-                had_underscore = true;
-            }
-            let range = self.current_span(start);
-            let span = self.insert_span(range);
-            if had_underscore {
-                self.errors.push(
-                    Diagnostic::new(
-                        "lex-invalid-float",
-                        "float literal has invalid underscore placement",
-                    )
-                    .at_span_id(span, &self.span_table),
+            if had_underscore || fraction_had_underscore {
+                // lex-invalid-float
+                self.push_error(
+                    DiagnosticCode::Lex(LexCode::InvalidFloat),
+                    "float literal has invalid underscore placement",
+                    span,
                 );
             }
             return match Self::parse_float_bytes(&self.bytes[start..self.pos]) {
                 Some(v) => (Token::Float(v), span),
                 None => {
-                    self.errors.push(
-                        Diagnostic::new("lex-invalid-float", "float literal out of range")
-                            .at_span_id(span, &self.span_table),
+                    // lex-invalid-float
+                    self.push_error(
+                        DiagnosticCode::Lex(LexCode::InvalidFloat),
+                        "float literal out of range",
+                        span,
                     );
                     (Token::Float(0.0), span)
                 }
@@ -383,24 +299,66 @@ impl<'src> Lexer<'src> {
         let range = self.current_span(start);
         let span = self.insert_span(range);
         if had_underscore {
-            self.errors.push(
-                Diagnostic::new(
-                    "lex-invalid-integer",
-                    "integer literal has invalid underscore placement",
-                )
-                .at_span_id(span, &self.span_table),
+            // lex-invalid-integer
+            self.push_error(
+                DiagnosticCode::Lex(LexCode::InvalidInteger),
+                "integer literal has invalid underscore placement",
+                span,
             );
         }
         match value {
             Some(v) => (Token::Int(v), span),
             None => {
-                self.errors.push(
-                    Diagnostic::new("lex-invalid-integer", "integer literal out of range")
-                        .at_span_id(span, &self.span_table),
+                // lex-invalid-integer
+                self.push_error(
+                    DiagnosticCode::Lex(LexCode::InvalidInteger),
+                    "integer literal out of range",
+                    span,
                 );
                 (Token::Int(I256::from(0)), span)
             }
         }
+    }
+
+    /// Consumes a digit run of `radix`, continuing from `value`.
+    ///
+    /// Returns the accumulated value (`None` after overflow) and whether an
+    /// underscore violates placement (consecutive or trailing).
+    fn consume_digits(&mut self, radix: u8, mut value: Option<I256>) -> (Option<I256>, bool) {
+        let bytes = self.bytes;
+        let mut had_underscore = false;
+        let mut last_was_underscore = false;
+        while self.pos < bytes.len() {
+            let byte = bytes[self.pos];
+            let digit = match byte {
+                b'0'..=b'9' => u64::from(byte - b'0'),
+                b'a'..=b'f' => u64::from(byte - b'a' + 10),
+                b'A'..=b'F' => u64::from(byte - b'A' + 10),
+                b'_' => {
+                    if last_was_underscore {
+                        had_underscore = true;
+                    }
+                    last_was_underscore = true;
+                    self.pos += 1;
+                    continue;
+                }
+                _ => break,
+            };
+            if digit >= u64::from(radix) {
+                break;
+            }
+            if let Some(current) = value {
+                value = current
+                    .checked_mul(I256::from(radix))
+                    .and_then(|current| current.checked_add(I256::from(digit as u8)));
+            }
+            last_was_underscore = false;
+            self.pos += 1;
+        }
+        if last_was_underscore {
+            had_underscore = true;
+        }
+        (value, had_underscore)
     }
 
     // TODO: Implement raw/multiline string literals with `\\` prefix syntax (Zig-style).
@@ -436,9 +394,11 @@ impl<'src> Lexer<'src> {
         let text = self.slice_from(start);
         let range = self.current_span(start);
         let span = self.insert_span(range);
-        self.errors.push(
-            Diagnostic::new("lex-unclosed-string", "unclosed string literal")
-                .at_span_id(span, &self.span_table),
+        // lex-unclosed-string
+        self.push_error(
+            DiagnosticCode::Lex(LexCode::UnclosedString),
+            "unclosed string literal",
+            span,
         );
         (Token::UnterminatedString(&text[1..]), span)
     }
@@ -493,7 +453,8 @@ impl<'src> Lexer<'src> {
                         let span = self.insert_span(esc_start..self.pos);
                         tokens.push((Token::FormatInterpStart, span));
                         self.lex_format_interp(&mut tokens);
-                    } else if self.advance().is_some() {
+                    } else if let Some(character) = self.source[self.pos..].chars().next() {
+                        self.pos += character.len_utf8();
                         let span = self.insert_span(esc_start..self.pos);
                         tokens.push((Token::FormatStringText(self.slice_from(esc_start)), span));
                     }
@@ -512,9 +473,11 @@ impl<'src> Lexer<'src> {
                     }
                     let span = self.insert_span(unterm_start..self.pos);
                     tokens.push((Token::UnterminatedFormatString, span));
-                    self.errors.push(
-                        Diagnostic::new("lex-unclosed-string", "unclosed string literal")
-                            .at_span_id(open_span, &self.span_table),
+                    // lex-unclosed-string
+                    self.push_error(
+                        DiagnosticCode::Lex(LexCode::UnclosedString),
+                        "unclosed string literal",
+                        open_span,
                     );
                     break;
                 }
@@ -532,9 +495,11 @@ impl<'src> Lexer<'src> {
                 None => {
                     let eof_span = self.insert_span(self.pos..self.pos);
                     tokens.push((Token::UnterminatedFormatString, eof_span));
-                    self.errors.push(
-                        Diagnostic::new("lex-unclosed-string", "unclosed string literal")
-                            .at_span_id(eof_span, &self.span_table),
+                    // lex-unclosed-string
+                    self.push_error(
+                        DiagnosticCode::Lex(LexCode::UnclosedString),
+                        "unclosed string literal",
+                        eof_span,
                     );
                     return;
                 }
@@ -548,9 +513,11 @@ impl<'src> Lexer<'src> {
                 }
                 Some((Token::FormatStringDelim, span)) => {
                     tokens.push((Token::UnterminatedFormatString, span));
-                    self.errors.push(
-                        Diagnostic::new("lex-unclosed-string", "unclosed string literal")
-                            .at_span_id(span, &self.span_table),
+                    // lex-unclosed-string
+                    self.push_error(
+                        DiagnosticCode::Lex(LexCode::UnclosedString),
+                        "unclosed string literal",
+                        span,
                     );
                     return;
                 }
@@ -720,15 +687,17 @@ impl<'src> Lexer<'src> {
                 }
 
                 _ => {
-                    let range = self.current_span(start);
-                    let span = self.insert_span(range);
-                    self.errors.push(
-                        Diagnostic::new("lex-unexpected-character", "unexpected character")
-                            .at_span_id(span, &self.span_table),
-                    );
                     while self.peek().is_some_and(|b| b & 0xC0 == 0x80) {
                         self.pos += 1;
                     }
+                    let range = self.current_span(start);
+                    let span = self.insert_span(range);
+                    // lex-unexpected-character
+                    self.push_error(
+                        DiagnosticCode::Lex(LexCode::UnexpectedCharacter),
+                        "unexpected character",
+                        span,
+                    );
                     continue;
                 }
             }
@@ -764,9 +733,11 @@ impl<'src> Lexer<'src> {
         let item = self.lex_single_token()?;
         if self.indent.indent_overflow {
             self.indent.indent_overflow = false;
-            self.errors.push(
-                Diagnostic::new("lex-overflow-indent", "indentation overflow")
-                    .at_span_id(item.1, &self.span_table),
+            // lex-overflow-indent
+            self.push_error(
+                DiagnosticCode::Lex(LexCode::OverflowIndent),
+                "indentation overflow",
+                item.1,
             );
         }
         Some(item)
@@ -803,10 +774,5 @@ impl<'src> Iterator for Lexer<'src> {
                 return Some(item);
             }
         }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.source.len() - self.pos;
-        (remaining / 8, Some(remaining / 2))
     }
 }

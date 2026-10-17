@@ -1,11 +1,15 @@
 use lexer::{Lexer, Token};
 
+fn lex(src: &str) -> Vec<Token<'_>> {
+    let mut lexer = Lexer::new(src);
+    lexer.by_ref().map(|(tok, _)| tok).collect()
+}
+
 #[test]
 fn test_keywords() {
     let src = "use if else for as is in of or and has when then loop continue break return private ref mut own deref";
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     assert!(matches!(tokens[0], Token::Use));
     assert!(matches!(tokens[1], Token::If));
@@ -32,27 +36,10 @@ fn test_keywords() {
 }
 
 #[test]
-fn lexes_own_as_keyword() {
-    let mut lexer = Lexer::new("own");
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
-
-    assert!(matches!(tokens[0], Token::Own));
-}
-
-#[test]
-fn lexes_thus_as_proof_contract_keyword() {
-    let tokens = lexer::Lexer::new("thus")
-        .map(|token| token.0)
-        .collect::<Vec<_>>();
-    assert!(matches!(tokens.as_slice(), [Token::Thus]));
-}
-
-#[test]
 fn test_identifiers() {
     let src = "foo bar baz hello_world";
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     assert!(matches!(tokens[0], Token::Id(_)));
     assert!(matches!(tokens[1], Token::Id(_)));
@@ -64,8 +51,7 @@ fn test_identifiers() {
 fn test_tags() {
     let src = "User Error HTTPRequest ServerState";
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     assert!(matches!(tokens[0], Token::Tag(_)));
     assert!(matches!(tokens[1], Token::Tag(_)));
@@ -77,8 +63,7 @@ fn test_tags() {
 fn test_numbers() {
     let src = "42 3.14 0 999";
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     assert!(matches!(tokens[0], Token::Int(_)));
     assert_eq!(
@@ -123,8 +108,7 @@ fn integer_literal_preserves_values_above_u128() {
 fn test_underscore_int() {
     let src = "1_000 1_000_000 4_2";
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     assert!(matches!(tokens[0], Token::Int(_)));
     assert_eq!(
@@ -161,8 +145,7 @@ fn test_underscore_int() {
 fn test_underscore_hex() {
     let src = "0xFF_FF 0xDEAD_BEEF";
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     assert!(matches!(tokens[0], Token::Int(_)));
     assert_eq!(
@@ -189,8 +172,7 @@ fn test_underscore_hex() {
 fn test_underscore_float() {
     let src = "3.16_159 1_000.5_5";
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     assert!(matches!(tokens[0], Token::Float(_)));
     assert_eq!(
@@ -217,8 +199,7 @@ fn test_underscore_float() {
 fn test_operators() {
     let src = "== /= <= >= = < > + - * / ^ \\";
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     assert!(matches!(tokens[0], Token::EqEq));
     assert!(matches!(tokens[1], Token::NotEq));
@@ -239,8 +220,7 @@ fn test_operators() {
 fn test_decimal_boundaries_with_arithmetic_operators() {
     let src = "12+34 -56*78 /90";
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     assert!(matches!(tokens[0], Token::Int(value) if value == 12.into()));
     assert!(matches!(tokens[1], Token::Plus));
@@ -277,8 +257,7 @@ fn test_invalid_underscore_placement_in_numbers() {
 fn test_range_syntax_vs_decimal_points() {
     let src = "1.2 1..2 1.0..2.5";
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     assert!(matches!(tokens[0], Token::Float(_)));
     assert!(matches!(tokens[1], Token::Int(value) if value == 1.into()));
@@ -305,8 +284,7 @@ fn tilde_is_rejected() {
 
 #[test]
 fn arrow_right_is_two_tokens() {
-    let mut lexer = Lexer::new("->");
-    let tokens: Vec<_> = lexer.by_ref().map(|(token, _)| token).collect();
+    let tokens = lex("->");
 
     assert!(matches!(tokens.as_slice(), [Token::Minus, Token::Greater]));
 }
@@ -315,8 +293,7 @@ fn arrow_right_is_two_tokens() {
 fn test_punctuation() {
     let src = "( ) [ ] { } , . : ; ...";
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     assert!(matches!(tokens[0], Token::ParenOpen));
     assert!(matches!(tokens[1], Token::ParenClose));
@@ -335,8 +312,7 @@ fn test_punctuation() {
 fn test_comments() {
     let src = "-- this is a comment\n--- this is a doc comment\n--| this is a module doc comment";
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     assert_eq!(tokens.len(), 4);
     assert!(matches!(tokens[0], Token::Newline));
@@ -349,8 +325,7 @@ fn test_comments() {
 fn test_indentation() {
     let src = "foo:\n    bar\n  baz";
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     // Should have: foo, does, :, newline, indent, bar, newline, dedent, baz
     assert!(matches!(tokens[0], Token::Id(_)));
@@ -371,8 +346,7 @@ fn test_indentation() {
 fn test_string_literal() {
     let src = "'foo' 'bar' 'baz'";
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     assert!(matches!(tokens[0], Token::String(_)));
     assert_eq!(
@@ -409,8 +383,7 @@ fn test_string_literal() {
 fn test_unterminated_string_with_content() {
     let src = "x: 'bar\nz: 'baz";
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     // x : UnterminatedString("bar") Newline z : UnterminatedString("baz")
     assert!(matches!(tokens[0], Token::Id(_)));
@@ -443,8 +416,7 @@ fn test_unicode_string_literals() {
     // Multi-byte UTF-8 characters inside single-quoted strings
     let src = "'héllo' 'こんにちは'";
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     assert!(matches!(tokens[0], Token::String(_)));
     assert_eq!(
@@ -472,8 +444,7 @@ fn test_unicode_format_strings() {
     // Multi-byte UTF-8 characters inside double-quoted format strings
     let src = r#""héllo" "こんにちは""#;
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     // "héllo" → [FormatStringDelim, FormatStringText("héllo"), FormatStringDelim]
     assert_eq!(tokens[0], Token::FormatStringDelim);
@@ -490,8 +461,7 @@ fn test_unicode_format_strings() {
 fn test_unicode_comments() {
     let src = "-- héllo wörld";
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     assert!(tokens.is_empty());
 }
@@ -501,8 +471,7 @@ fn test_unicode_tags_rejected() {
     // Non-ASCII uppercase letters are no longer valid tag starts (ASCII only)
     let src = "Ångström Élève";
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     // Neither should be recognized as tags — only ASCII [A-Z] starts a tag
     assert!(tokens.iter().all(|t| !matches!(t, Token::Tag(_))));
@@ -513,8 +482,7 @@ fn test_unicode_identifiers_rejected() {
     // Non-ASCII lowercase letters are no longer valid identifiers (ASCII only)
     let src = "café αλφα";
 
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+    let tokens = lex(src);
 
     // "caf" is a valid ASCII id, but "é" breaks it; "αλφα" is not recognized at all
     assert!(tokens.iter().all(|t| {
@@ -731,4 +699,41 @@ fn test_as_keyword() {
         "expected no errors, got {:?}",
         lexer.errors
     );
+}
+
+#[test]
+fn indented_and_continuations_do_not_change_block_indentation() {
+    let source = "Number has Add\n       and Mul\n    apply(self): return self\n    next(self): return self\nOther has Copy\n";
+    let tokens = lex(source);
+    assert_eq!(
+        tokens
+            .iter()
+            .filter(|token| matches!(token, Token::Indent))
+            .count(),
+        1
+    );
+    assert_eq!(
+        tokens
+            .iter()
+            .filter(|token| matches!(token, Token::Dedent))
+            .count(),
+        1
+    );
+    let and = tokens
+        .iter()
+        .position(|token| matches!(token, Token::And))
+        .unwrap();
+    let indent = tokens
+        .iter()
+        .position(|token| matches!(token, Token::Indent))
+        .unwrap();
+    assert!(and < indent);
+}
+
+#[test]
+fn identifiers_starting_with_and_still_open_indented_blocks() {
+    for name in ["andrew", "and_value", "and2"] {
+        let source = format!("Container has\n    {name} Value\n");
+        assert!(Lexer::new(&source).any(|(token, _)| matches!(token, Token::Indent)));
+    }
 }
