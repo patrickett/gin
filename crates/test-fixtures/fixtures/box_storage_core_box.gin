@@ -1,0 +1,93 @@
+use core.alloc Box, BoxResult, BoxFailure, GlobalAllocator, Allocator, Allocation, AllocError, AllocationResult, Count
+use core.slice Byte
+Resource has
+    value Byte
+    release(self):
+        return
+read(value ref Resource) Byte: return value.value
+replace(previous Byte, next Byte) Byte: return next
+write(value mut Resource, next Byte):
+    value.value:: replace(value.value, next)
+    return
+unwrap(attempt BoxResult(Resource, GlobalAllocator)) Box(Resource):
+    return when attempt is
+        Box(value) then value
+        BoxFailure(failure) then failed(failure)
+failed(failure BoxFailure(Resource, GlobalAllocator)) Box(Resource): return failed(failure)
+move_box(value own Box(Resource)) Box(Resource): return value
+FailingAllocator has Allocator
+    reserve(self mut, capacity Count(x)) AllocationResult(x):
+        error AllocError: AllocError.OutOfMemory
+        return error
+    reclaim(self mut, storage Allocation(x) and storage.initialized_count = 0):
+        global: GlobalAllocator()
+        global.reclaim(storage)
+        global.release
+        return
+    release(self):
+        return
+read_and_release(value Resource) Byte:
+    result: read(value)
+    value.release
+    return result
+recover(failure BoxFailure(Resource, FailingAllocator)) Byte:
+    parts: failure.into_parts
+    result: read_and_release(parts.value)
+    parts.allocator.release
+    return result
+failed_allocation Byte:
+    attempt: Box.new(Resource, Resource(value: 31), FailingAllocator())
+    return when attempt is
+        Box(value) then read_and_release(value.take)
+        BoxFailure(failure) then recover(failure)
+TrackingAllocator has Allocator
+    inner GlobalAllocator
+    reclaimed @Byte
+    released @Byte
+    reserve(self mut, capacity Count(x)) AllocationResult(x): return self.inner.reserve(capacity)
+    reclaim(self mut, storage Allocation(x) and storage.initialized_count = 0):
+        self.inner.reclaim(storage)
+        pointer: self.reclaimed
+        pointer.[0]:: Byte.replace(pointer.[0], 1)
+        return
+    release(self):
+        TrackingAllocator(inner, reclaimed, released) := self
+        inner.release
+        released.[0]:: Byte.replace(released.[0], 1)
+        return
+unwrap_tracked(attempt BoxResult(Resource, TrackingAllocator)) Box(Resource, TrackingAllocator):
+    return when attempt is
+        Box(value) then value
+        BoxFailure(failure) then failed_tracked(failure)
+failed_tracked(failure BoxFailure(Resource, TrackingAllocator)) Box(Resource, TrackingAllocator): return failed_tracked(failure)
+Marker has
+    release(self):
+        return
+unwrap_marker(attempt BoxResult(Marker, GlobalAllocator)) Box(Marker):
+    return when attempt is
+        Box(value) then value
+        BoxFailure(failure) then failed_marker(failure)
+failed_marker(failure BoxFailure(Marker, GlobalAllocator)) Box(Marker): return failed_marker(failure)
+#entry
+main:
+    original: unwrap(Box.new(Resource, Resource(value: 7)))
+    first is in Byte: read(original.borrow)
+    write(original.borrow_mut, 19)
+    second is in Byte: read(original.borrow)
+    moved: move_box(original)
+    third is in Byte: read(moved.borrow)
+    value: moved.take
+    fourth is in Byte: read(value)
+    value.release
+    other: unwrap(Box.new(Resource, Resource(value: 23)))
+    other.release
+    recovered is in Byte: failed_allocation
+    reclaimed Byte: 0
+    released Byte: 0
+    tracked: unwrap_tracked(Box.new(Resource, Resource(value: 37), TrackingAllocator(inner: GlobalAllocator(), reclaimed: @reclaimed, released: @released)))
+    tracked.release
+    reclaimed_value is in Byte: reclaimed
+    released_value is in Byte: released
+    marker: unwrap_marker(Box.new(Marker, Marker()))
+    marker.take.release
+    return when first = 7 and second = 19 and third = 19 and fourth = 19 and recovered = 31 and reclaimed_value = 1 and released_value = 1 then 0 else 1

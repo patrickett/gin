@@ -1,0 +1,6 @@
+Count is in 0 to 255
+Count has finish(self): return
+
+grow(value mut Count) True or False:
+    value :: 255
+    return True

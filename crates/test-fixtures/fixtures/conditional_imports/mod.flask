@@ -1,0 +1,6 @@
+#settings
+module: "conditional_imports"
+version: 0.0.0
+
+#dependencies
+dev: "./dev"

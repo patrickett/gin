@@ -1,0 +1,58 @@
+use core.string.utf8 validate_utf8, Utf8Validation, Utf8Error
+use core.collection List
+use core.slice Byte, Length
+use core.io.platform as platform
+use core.alloc.system BytePointer, MemorySize, SystemResult
+Check is Matched or Mismatched
+read_record(record mut [Byte; 12]) Check:
+    base: (@record) as BytePointer
+    address is in MemorySize: base as MemorySize
+    offset is in MemorySize: 0
+    while offset < 12 do
+        pointer: (address + offset) as BytePointer
+        received is in SystemResult: platform.read(0, pointer, (12 - offset) as MemorySize)
+        when received > 12 - offset or received < 1 then
+            return Mismatched
+        offset:: (offset + received) as MemorySize
+    return Matched
+matches_error(error Utf8Error, expected_offset is in Byte, expected_length is in Byte) Check:
+    parts: error.into_parts
+    actual_offset is in Length: parts.valid_up_to
+    actual_length is in Length: when parts.error_len is
+        InvalidUtf8Length(length) then length
+        Incomplete then 0
+    return when actual_offset = expected_offset and actual_length = expected_length then Matched else Mismatched
+matches_validation(checked Utf8Validation, record ref [Byte; 12]) Check:
+    expected_length is in Byte: record.[2]
+    return when checked is
+        ValidUtf8 then when expected_length = 255 then Matched else Mismatched
+        Utf8Error(error) then matches_error(error, record.[1], record.[2])
+#entry
+main:
+    attempt: List.with_capacity(Byte, 8)
+    return when attempt is
+        List(bytes) then validate_records(bytes)
+        AllocFailure(failure) then
+            failure.release
+            return 3
+validate_records(bytes own List(Byte) and bytes.capacity >= 8):
+    record [Byte; 12]: [0; 12]
+    for case_index in 0 to {last}
+        when read_record(record) is Mismatched then
+            bytes.release
+            return 2
+        bytes.clear
+        length is in Length: record.[0]
+        when length > 8 then
+            bytes.release
+            return 3
+        while bytes.length < length do
+            position is in Length: bytes.length
+            bytes.push_reserved(Byte.as_num(record.[4 + position]) as Byte)
+        view: bytes.view
+        checked: validate_utf8(view)
+        when matches_validation(checked, record) is Mismatched then
+            bytes.release
+            return 1
+    bytes.release
+    return 0

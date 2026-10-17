@@ -1,0 +1,93 @@
+Numeric has
+    as_num(self ref) is in Self: return (number is in Self: self)
+Count is in 0 to 65535
+Count has Numeric
+    release(self): return
+Byte is in 0 to 255
+Byte has Numeric
+    release(self): return
+Score is in 0 to 18446744073709551615
+Score has Numeric
+    replace(previous Self, next Self) Self: return next
+    release(self): return
+#phantom(capacity)
+View(element, capacity BigInt) has
+    storage ref [element; length]
+    length Count
+    release(self): return
+#phantom(capacity)
+MutView(element, capacity BigInt) has
+    storage mut [element; length]
+    length Count
+    release(self): return
+ValidatedIndex has
+    extent Count
+    position Count and < extent
+    release(self): return
+RawIndex has
+    extent Count
+    position Count
+    release(self): return
+
+replace_index(previous ValidatedIndex, next ValidatedIndex) ValidatedIndex:
+    previous.release
+    return next
+
+read_prepared(index ref ValidatedIndex, values ref View(Byte, 65535)) Byte:
+    data: ref values.storage.[0; index.extent.as_num as Count]
+    view View(Byte, 65535): View(storage: data, length: index.extent.as_num as Count)
+    when view.length.as_num = index.extent.as_num then
+        value: proven_at(index, view)
+        view.release
+        return value
+    view.release
+    return 0
+
+read_witness(index ref RawIndex, values ref View(Byte, 65535)) Byte:
+    data: ref values.storage.[0; index.extent.as_num as Count]
+    view View(Byte, 65535): View(storage: data, length: index.extent.as_num as Count)
+    value: checked_at(view, index.position.as_num as Count)
+    view.release
+    return value
+
+proven_at(index ref ValidatedIndex, view ref View(Byte, 65535) and view.length = index.extent) Byte: return view.storage.[index.position]
+checked_at(view ref View(Byte, 65535), index Count) Byte: return view.storage.[index]
+prepare_indices(source ref View(Count, 10000), target mut MutView(ValidatedIndex, 10000) and target.length = source.length, extent Count) Byte:
+    when source.length.as_num = 0 then
+        return 1
+    for cursor in 0 to source.length.as_num - 1
+        accepted: prepare_one(source, target, cursor as Count, extent)
+        when accepted.as_num = 0 then
+            return 0
+    return 1
+
+prepare_one(source ref View(Count, 10000), target mut MutView(ValidatedIndex, 10000), slot Count, extent ref Count) Byte:
+    item: source.storage.[slot.as_num as Count]
+    position is in Count: item.as_num
+    when position >= extent.as_num then
+        return 0
+    selected: ValidatedIndex(extent: extent.as_num as Count, position: position as Count)
+    target.storage.[slot.as_num as Count] :: replace_index(target.storage.[slot.as_num as Count], selected)
+    return 1
+
+gather_prepared(indices ref View(ValidatedIndex, 10000), values ref View(Byte, 65535)) Score:
+    total Score: 0
+    for index in indices.storage
+        previous is in Score: total.as_num
+        value is in Score: read_prepared(index, values) as Score
+        total :: Score.replace(total, (previous + value) as Score)
+    return total
+gather_checked(indices ref View(Count, 10000), values ref View(Byte, 65535)) Score:
+    total Score: 0
+    for index in indices.storage
+        previous is in Score: total.as_num
+        value is in Score: checked_at(values, index.as_num as Count) as Score
+        total :: Score.replace(total, (previous + value) as Score)
+    return total
+gather_checked_witness(indices ref View(RawIndex, 10000), values ref View(Byte, 65535)) Score:
+    total Score: 0
+    for index in indices.storage
+        previous is in Score: total.as_num
+        value is in Score: read_witness(index, values) as Score
+        total :: Score.replace(total, (previous + value) as Score)
+    return total

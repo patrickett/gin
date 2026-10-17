@@ -1,0 +1,143 @@
+use core.string String
+use core.alloc GlobalAllocator, max_count
+use core.slice Byte, Length
+use core.collection List
+use core.ops CopyResult
+pass: return
+#entry
+main:
+    empty: when String.new is
+        String(value) then value
+        AllocFailure(failure) then
+            failure.release
+            return 2
+    empty_length is in Length: empty.length
+    empty_bytes: empty.as_bytes
+    empty_bounds is in 0 to 1: when empty_bytes.get(0) is OutOfBounds then 0 else 1
+    empty.release
+    text: when String.from_utf8('hé🙂') is
+        String(value) then value
+        FromUtf8Error(failure) then
+            failure.release
+            return 2
+        AllocFailure(failure) then
+            failure.release
+            return 2
+    copy_attempt: text.copy
+    duplicate: when copy_attempt is
+        Copied(value) then value.take
+        AllocError(_) then
+            failed CopyResult(String): copy_attempt
+            failed.release
+            text.release
+            return 2
+    migrated: when text.copy_into(GlobalAllocator, GlobalAllocator()) is
+        String(value) then value
+        AllocFailure(failure) then
+            failure.release
+            text.release
+            duplicate.release
+            return 2
+    migrated.release
+    suffix: when String.from_utf8('€') is
+        String(value) then value
+        FromUtf8Error(failure) then
+            failure.release
+            text.release
+            duplicate.release
+            return 2
+        AllocFailure(failure) then
+            failure.release
+            text.release
+            duplicate.release
+            return 2
+    when suffix.length > max_count - text.length.as_num then
+        suffix.release
+        text.release
+        duplicate.release
+        return 2
+    appended: text.append(suffix)
+    when appended is
+        Appended then pass
+        AllocFailure(failure) then
+            failure.release
+            text.release
+            duplicate.release
+            return 2
+    when duplicate.length > max_count - text.length.as_num then
+        text.release
+        duplicate.release
+        return 2
+    concat_attempt: text.concat(duplicate)
+    combined: when concat_attempt is
+        Copied(value) then value.take
+        AllocError(_) then
+            failed CopyResult(String): concat_attempt
+            failed.release
+            text.release
+            duplicate.release
+            return 2
+    combined_length is in Length: combined.length
+    combined.release
+    first_length is in Length: text.length
+    capacity is in Length: text.capacity
+    text.clear
+    cleared is in Length: text.length
+    retained is in Length: text.capacity
+    duplicate_length is in Length: duplicate.length
+    duplicate.release
+    ending: when String.from_utf8('ok') is
+        String(value) then value
+        FromUtf8Error(failure) then
+            failure.release
+            text.release
+            return 2
+        AllocFailure(failure) then
+            failure.release
+            text.release
+            return 2
+    when ending.length > max_count - text.length.as_num then
+        ending.release
+        text.release
+        return 2
+    finished: text.append(ending)
+    when finished is
+        Appended then pass
+        AllocFailure(failure) then
+            failure.release
+            text.release
+            return 2
+    observed: text.as_bytes
+    leading is in Byte: when observed.get(0) is Byte(value) then value else 0
+    end_bounds is in 0 to 1: when observed.get(2) is OutOfBounds then 0 else 1
+    bytes: text.into_bytes
+    roundtrip: when String.from_utf8_bytes(bytes) is
+        String(value) then value
+        FromUtf8Error(failure) then
+            failure.release
+            return 2
+        AllocFailure(failure) then
+            failure.release
+            return 2
+    roundtrip_length is in Length: roundtrip.length
+    roundtrip.release
+    invalid: when List.with_capacity(Byte, 1) is
+        List(value) then value
+        AllocFailure(failure) then
+            failure.release
+            return 2
+    invalid.push_reserved(255 as Byte)
+    attempt: String.from_utf8_bytes(invalid)
+    recovered: when attempt is
+        String(unexpected) then unexpected.into_bytes
+        FromUtf8Error(error) then error.into_bytes
+        AllocFailure(failure) then
+            failure.release
+            return 2
+    recovered_length is in Length: recovered.length
+    when recovered_length < 1 then
+        recovered.release
+        return 1
+    recovered_value is in Byte: (Byte.as_num(recovered.borrow(0)) as Byte)
+    recovered.release
+    return when empty_bounds = 0 and end_bounds = 0 and empty_length = 0 and first_length = 10 and duplicate_length = 7 and combined_length = 17 and cleared = 0 and retained = capacity and leading = 111 and roundtrip_length = 2 and recovered_length = 1 and recovered_value = 255 then 0 else 1

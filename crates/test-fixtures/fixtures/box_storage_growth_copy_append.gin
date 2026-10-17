@@ -1,0 +1,129 @@
+use core.collection List
+use core.alloc max_count
+use core.string String
+use core.slice Byte, Length, SliceView
+byte_at(view ref SliceView(Byte), index Length) Byte:
+    length is in Length: view.length
+    position is in Length: index
+    when position >= length then return 0
+    return Byte.as_num(view.borrow(position as Length)) as Byte
+Marker has release(self): return
+Status is in 0 to 2
+Status has release(self): return
+markers Status:
+    attempt: List.with_capacity(Marker, 5)
+    return when attempt is
+        List(values) then
+            for index in 0 to 4
+                when values.length < values.capacity then values.push_reserved(Marker())
+            values.release
+            return 0
+        AllocFailure(failure) then
+            failure.release
+            return 2
+empty_append Status:
+    attempt: List.new(Byte)
+    return when attempt is
+        List(empty) then append_empty(empty)
+        AllocFailure(failure) then
+            failure.release
+            return 2
+append_empty(empty own List(Byte) and empty.length = 0) Status:
+    attempt: List.with_capacity(Byte, 1)
+    destination: when attempt is
+        List(value) then value
+        AllocFailure(failure) then
+            failure.release
+            empty.release
+            return 2
+    result: destination.append(empty)
+    result.release
+    destination.release
+    return 0
+list_growth(values own List(Byte) and values.length = 0) Status:
+    for index in 0 to 39
+        when values.length >= max_count then
+            values.release
+            return 2
+        pushed: values.push(index as Byte)
+        when pushed is
+            Pushed then pass
+            AllocFailure(failure) then
+                failure.release
+                values.release
+                return 2
+    source_view: values.view
+    source_last is in Byte: byte_at(source_view, 39)
+    copied: when values.copy is
+        Copied(copy) then copy.take
+        AllocError(error) then
+            values.release
+            return 2
+    copy_view: copied.view
+    copy_last is in Byte: byte_at(copy_view, 39)
+    when copied.length > max_count - values.length.as_num then
+        copied.release
+        values.release
+        return 2
+    appended: values.append(copied)
+    when appended is
+        Appended then pass
+        AllocFailure(failure) then
+            failure.release
+            values.release
+            return 2
+    observed: values.view
+    first is in Byte: byte_at(observed, 0)
+    last is in Byte: byte_at(observed, 79)
+    for index in 0 to 79
+        Byte.release(byte_at(observed, index as Length))
+    values.clear
+    cleared is in Length: values.length
+    pushed_again: values.push(7 as Byte)
+    when pushed_again is
+        Pushed then pass
+        AllocFailure(failure) then
+            failure.release
+            values.release
+            return 2
+    reused_view: values.view
+    reused is in Byte: byte_at(reused_view, 0)
+    values.release
+    return when source_last = 39 and copy_last = 39 and first = 0 and last = 39 and cleared = 0 and reused = 7 then 0 else 1
+string_append Status:
+    text: when String.from_utf8('hello') is
+        String(value) then value
+        FromUtf8Error(error) then
+            error.release
+            return 2
+        AllocFailure(failure) then
+            failure.release
+            return 2
+    duplicate: when text.copy is
+        Copied(copy) then copy.take
+        AllocError(error) then
+            text.release
+            return 2
+    when duplicate.length > max_count - text.length.as_num then
+        duplicate.release
+        text.release
+        return 2
+    appended: text.append(duplicate)
+    appended.release
+    bytes: text.as_bytes
+    ending is in Byte: when bytes.get(9) is Byte(value) then value else 0
+    text.release
+    return when ending = 111 then 0 else 1
+pass: return
+#entry
+main:
+    markers_status is in 0 to 2: markers
+    empty_status is in 0 to 2: empty_append
+    attempt: List.with_capacity(Byte, 1)
+    growth_status is in Status: when attempt is
+        List(values) then list_growth(values)
+        AllocFailure(failure) then
+            failure.release
+            return 2
+    string_status is in 0 to 2: string_append
+    return when markers_status = 0 and empty_status = 0 and growth_status = 0 and string_status = 0 then 0 else 1

@@ -1,0 +1,79 @@
+Byte is in 0 to 255
+SignedByte is in -128 to 127
+Word is in 0 to 65535
+
+add(a Byte, b Byte) Byte:
+    left is in 0 to 255: a
+    right is in 0 to 255: b
+    return ((left + right) & 255) as Byte
+subtract(a Byte, b Byte) Byte:
+    left is in 0 to 255: a
+    right is in 0 to 255: b
+    return ((left - right) & 255) as Byte
+multiply(a Byte, b Byte) Byte:
+    left is in 0 to 255: a
+    right is in 0 to 255: b
+    return ((left * right) & 255) as Byte
+signed_divide(a Byte, b Byte) Byte:
+    left is in -128 to 127: a as SignedByte
+    right is in -128 to 127: b as SignedByte
+    return (left / right) as Byte
+unsigned_divide(a Byte, b Byte) Byte:
+    left is in 0 to 255: a
+    right is in 0 to 255: b
+    return (left / right) as Byte
+signed_remainder(a Byte, b Byte) Byte:
+    left is in -128 to 127: a as SignedByte
+    right is in -128 to 127: b as SignedByte
+    return (left % right) as Byte
+unsigned_remainder(a Byte, b Byte) Byte:
+    left is in 0 to 255: a
+    right is in 0 to 255: b
+    return (left % right) as Byte
+and_bits(a Byte, b Byte) Byte:
+    left is in 0 to 255: a
+    right is in 0 to 255: b
+    return (left & right) as Byte
+or_bits(a Byte, b Byte) Byte:
+    left is in 0 to 255: a
+    right is in 0 to 255: b
+    return (left | right) as Byte
+xor_bits(a Byte, b Byte) Byte:
+    left is in 0 to 255: a
+    right is in 0 to 255: b
+    return (left ^ right) as Byte
+shift_left(a Byte, b Byte) Byte:
+    left is in 0 to 255: a
+    right is in 0 to 255: b
+    return (left << right) as Byte
+shift_right_logical(a Byte, b Byte) Byte:
+    left is in 0 to 255: a
+    right is in 0 to 255: b
+    return (left >> right) as Byte
+shift_right_arithmetic(a Byte, b Byte) Byte:
+    left is in -128 to 127: a as SignedByte
+    right is in -128 to 127: b as SignedByte
+    return (left >> right) as Byte
+extend_signed(a Byte) Word:
+    return (a as SignedByte) as Word
+extend_unsigned(a Byte) Word:
+    return a as Word
+truncate(a Word) Byte:
+    return a as Byte
+
+use_add(a Byte, b Byte) Byte: return add(a, b)
+use_subtract(a Byte, b Byte) Byte: return subtract(a, b)
+use_multiply(a Byte, b Byte) Byte: return multiply(a, b)
+use_signed_divide(a Byte, b Byte) Byte: return signed_divide(a, b)
+use_unsigned_divide(a Byte, b Byte) Byte: return unsigned_divide(a, b)
+use_signed_remainder(a Byte, b Byte) Byte: return signed_remainder(a, b)
+use_unsigned_remainder(a Byte, b Byte) Byte: return unsigned_remainder(a, b)
+use_and(a Byte, b Byte) Byte: return and_bits(a, b)
+use_or(a Byte, b Byte) Byte: return or_bits(a, b)
+use_xor(a Byte, b Byte) Byte: return xor_bits(a, b)
+use_shift_left(a Byte, b Byte) Byte: return shift_left(a, b)
+use_shift_right_logical(a Byte, b Byte) Byte: return shift_right_logical(a, b)
+use_shift_right_arithmetic(a Byte, b Byte) Byte: return shift_right_arithmetic(a, b)
+use_extend_signed(a Byte) Word: return extend_signed(a)
+use_extend_unsigned(a Byte) Word: return extend_unsigned(a)
+use_truncate(a Word) Byte: return truncate(a)

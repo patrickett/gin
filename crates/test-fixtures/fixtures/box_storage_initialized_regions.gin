@@ -1,0 +1,42 @@
+use core.alloc Allocation, AllocError, AllocationResult, Count, GlobalAllocator
+use core.slice Byte
+Resource has
+    value Byte
+    releases @Byte
+    release(self):
+        Resource(value, releases) := self
+        count is in Byte: releases.[0]
+        releases.[0]:: Byte.replace(releases.[0], (count + 1) as Byte)
+        return
+unwrap(attempt AllocationResult(Resource)) Allocation(Resource):
+    return when attempt is
+        Allocation(storage) then storage
+        AllocError(error) then failed(error)
+failed(error AllocError) Allocation(Resource): return failed(error)
+#entry
+main:
+    releases Byte: 0
+    global: GlobalAllocator()
+    source: unwrap(global.reserve(2 as Count(Resource)))
+    destination: unwrap(global.reserve(4 as Count(Resource)))
+    when source.initialized_count.as_num > 0 or source.capacity_count.as_num < 2 or destination.initialized_count.as_num > 0 or destination.capacity_count.as_num < 4 then
+        source.release(global)
+        destination.release(global)
+        global.release
+        return 1
+    source.initialize(0 as Count(Resource), Resource(value: 7, releases: @releases))
+    source.initialize(1 as Count(Resource), Resource(value: 11, releases: @releases))
+    previous: source.replace(0 as Count(Resource), Resource(value: 13, releases: @releases))
+    source.move_into(destination)
+    source.reclaim(global)
+    first is in Byte: destination.borrow(0 as Count(Resource)).value
+    last: destination.take_last
+    last_value is in Byte: last.value
+    destination.initialize(1 as Count(Resource), Resource(value: 17, releases: @releases))
+    destination.release_values
+    destination.reclaim(global)
+    global.release
+    previous.release
+    last.release
+    count is in Byte: releases
+    return when first = 13 and last_value = 11 and count = 4 then 0 else 1

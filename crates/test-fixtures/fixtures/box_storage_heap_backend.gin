@@ -1,0 +1,72 @@
+use core.slice Byte
+BytePointer is @Byte
+BytePointer has
+    release(self):
+        return
+MemorySize is in 0 to 18446744073709551615
+SystemResult is in -9223372036854775808 to 9223372036854775807
+MemorySize has
+    release(self):
+        return
+SystemResult has
+    release(self):
+        return
+ExitInputs has
+    status SystemResult
+    release(self):
+        return
+ReserveInputs has
+    size MemorySize
+    release(self):
+        return
+MemoryInputs has
+    pointer BytePointer
+    size MemorySize
+    release(self):
+        MemoryInputs(pointer, size) := self
+        pointer.release
+        size.release
+        return
+#phantom(inputs, outputs)
+Signature(inputs, outputs) has
+    version MemorySize
+    release(self):
+        return
+#phantom(inputs, value)
+Input(inputs, value) has
+    index MemorySize
+    release(self):
+        return
+MemoryAccess(inputs, p, l) has
+    pointer Input(inputs, p)
+    length Input(inputs, l)
+    release(self):
+        MemoryAccess(pointer, length) := self
+        pointer.release
+        length.release
+        return
+exit_signature Signature(ExitInputs, ()): Signature(version: 1)
+MappedAddress is in 0 to 18446744073709551615 and self % 4096 = 0
+MappedAddress has
+    release(self): return
+reserve_signature Signature(ReserveInputs, MappedAddress): Signature(version: 1)
+release_signature Signature(MemoryInputs, SystemResult): Signature(version: 1)
+memory_access MemoryAccess(MemoryInputs, BytePointer, MemorySize): MemoryAccess(pointer: Input(index: 0), length: Input(index: 1))
+exit_instruction MachineBytes(MachineByte, {exit_count}): {exit_bytes}
+reserve_instruction MachineBytes(MachineByte, {reserve_count}): {reserve_bytes}
+release_instruction MachineBytes(MachineByte, {release_count}): {release_bytes}
+exit_code := [signature: exit_signature, target: #target.triple, bytes: exit_instruction, inputs: [status: {exit_register}], outputs: [], clobbers: [{exit_clobbers}], reads: [], writes: []]
+reserve_code := [signature: reserve_signature, target: #target.triple, bytes: reserve_instruction, inputs: [size: {size}], outputs: [value: {output}], clobbers: [{reserve_clobbers}], reads: [], writes: []]
+release_code := [signature: release_signature, target: #target.triple, bytes: release_instruction, inputs: [pointer: {pointer}, size: {length}], outputs: [value: {output}], clobbers: [{release_clobbers}], reads: [], writes: [memory_access]]
+exit_process(status SystemResult): return #emit(exit_code, ExitInputs(status: status))
+reserve_address(size MemorySize) MappedAddress: return #emit(reserve_code, ReserveInputs(size: size))
+reserve_bytes(size MemorySize) BytePointer: return reserve_address(size) as BytePointer
+release_bytes(pointer BytePointer, size MemorySize) SystemResult: return #emit(release_code, MemoryInputs(pointer: pointer, size: size))
+MachineByte is in 0 to 255
+MachineByte has
+    release(self):
+        return
+#fixed_array(element, count)
+MachineBytes(element, count BigInt) has
+    release(self):
+        return

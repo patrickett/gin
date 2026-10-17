@@ -1,0 +1,87 @@
+use core.string String
+use core.collection List
+use core.slice Byte, Length
+use core.alloc Allocator, Allocation, AllocationResult, Count, GlobalAllocator
+use core.alloc.system MemorySize, exit_process
+
+increment(counter mut @Byte):
+    previous is in Byte: counter.[0]
+    when previous = 255 then
+        exit_process(3)
+        return
+    counter.[0]:: Byte.replace(counter.[0], (previous + 1) as Byte)
+    return
+
+AccountingAllocator has Allocator
+    inner GlobalAllocator
+    reclaimed @Byte
+    released @Byte
+
+    reserve(self mut, count Count(x)) AllocationResult(x): return self.inner.reserve(count)
+
+    reclaim(self mut, block Allocation(x) and block.initialized_count = 0):
+        self.inner.reclaim(block)
+        pointer: self.reclaimed
+        increment(pointer)
+        return
+
+    release(self):
+        AccountingAllocator(inner, reclaimed, released) := self
+        inner.release
+        increment(released)
+        return
+#entry
+main:
+    reclaimed Byte: 0
+    released Byte: 0
+    source: when List.with_capacity(Byte, 8, AccountingAllocator(inner: GlobalAllocator(), reclaimed: @reclaimed, released: @released)) is
+        List(value) then value
+        AllocFailure(failure) then
+            failure.release
+            return 2
+    source.push_reserved(195 as Byte)
+    source.push_reserved(169 as Byte)
+    original: source.view
+    original_address is in MemorySize: original.pointer as MemorySize
+    text: when String.from_utf8_bytes(source) is
+        String(value) then value
+        FromUtf8Error(error) then
+            error.release
+            return 2
+        AllocFailure(failure) then
+            failure.release
+            return 2
+    returned: text.into_bytes
+    returned_view: returned.view
+    returned_address is in MemorySize: returned_view.pointer as MemorySize
+    before_reclaim is in Byte: reclaimed
+    before_release is in Byte: released
+    returned.release
+    after_reclaim is in Byte: reclaimed
+    after_release is in Byte: released
+    invalid: when List.with_capacity(Byte, 1, AccountingAllocator(inner: GlobalAllocator(), reclaimed: @reclaimed, released: @released)) is
+        List(value) then value
+        AllocFailure(failure) then
+            failure.release
+            return 2
+    invalid.push_reserved(255 as Byte)
+    attempt: String.from_utf8_bytes(invalid)
+    recovered: when attempt is
+        String(unexpected) then unexpected.into_bytes
+        FromUtf8Error(error) then error.into_bytes
+        AllocFailure(failure) then
+            failure.release
+            return 2
+    recovered_length is in Length: recovered.length
+    when recovered_length < 1 then
+        recovered.release
+        return 1
+    recovered_byte is in Byte: (Byte.as_num(recovered.borrow(0)) as Byte)
+    while_recovered is in Byte: released
+    recovered.release
+    invalid_bytes [Byte; 1]: [255; 1]
+    String.from_utf8(invalid_bytes, AccountingAllocator(inner: GlobalAllocator(), reclaimed: @reclaimed, released: @released)).release
+    String.from_utf8('ok', AccountingAllocator(inner: GlobalAllocator(), reclaimed: @reclaimed, released: @released)).release
+    final_reclaims is in Byte: reclaimed
+    final_releases is in Byte: released
+    return when original_address = returned_address and before_reclaim = 0 and before_release = 0 and after_reclaim = 1 and after_release = 1 and while_recovered = 1 and recovered_length = 1 and recovered_byte = 255 and final_reclaims = 4 and final_releases = 4 then 0 else 1

@@ -1,0 +1,57 @@
+Score is in 0 to 18446744073709551615
+Score has
+    release(self):
+        return
+
+RawPlan has
+    length Count
+    first Count
+    second Count
+    third Count
+    fourth Count
+
+    release(self):
+        return
+
+sum_prepared(plan ref GatherPlan, view ref View(Byte) and view.length = plan.length) Score:
+    first is in Score: read_first(plan, view) as Score
+    second is in Score: read_second(plan, view) as Score
+    third is in Score: read_third(plan, view) as Score
+    fourth is in Score: read_fourth(plan, view) as Score
+    return (first + second + third + fourth) as Score
+
+sum_checked(plan ref RawPlan, view ref View(Byte)) Score:
+    first is in Score: view.storage.[plan.first] as Score
+    second is in Score: view.storage.[plan.second] as Score
+    third is in Score: view.storage.[plan.third] as Score
+    fourth is in Score: view.storage.[plan.fourth] as Score
+    return (first + second + third + fourth) as Score
+
+Preparation has
+    accepted Byte
+    plan GatherPlan
+
+    release(self): return self.plan.release
+
+PlanResult has
+    unpack(self) Preparation: return when self is Ready(selected) then Preparation(accepted: 1, plan: selected) else Preparation(accepted: 0, plan: GatherPlan(length: 1, first: 0, second: 0, third: 0, fourth: 0))
+
+export_prepare(length Count, first Count, second Count, third Count, fourth Count) Preparation:
+    selection: prepare(length, first, second, third, fourth)
+    return selection.unpack
+
+run_prepared(values ref [Byte; 1024], length Count, first Count, second Count, third Count, fourth Count) Score:
+    data: ref values.[0; length.as_num as Count]
+    view: View(storage: data, length: length)
+    selection: prepare(view.length.as_num as Count, first, second, third, fourth)
+    when selection is Ready(plan) then
+        when view.length.as_num = plan.length.as_num then
+            score: sum_prepared(plan, view)
+            view.release
+            plan.release
+            return score
+        view.release
+        plan.release
+        return 0
+    view.release
+    return 0

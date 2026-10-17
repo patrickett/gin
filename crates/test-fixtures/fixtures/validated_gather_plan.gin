@@ -1,0 +1,54 @@
+Numeric has
+    as_num(self ref) is in Self: return (number is in Self: self)
+
+Byte is in 0 to 255
+Byte has Numeric
+    release(self):
+        return
+
+Count is in 0 to 65535
+Count has Numeric
+    replace(previous Self, next Self) Self: return next
+
+    release(self):
+        return
+
+View(element) has
+    storage ref [element; length]
+    length Count
+
+    release(self):
+        return
+
+GatherPlan has
+    length Count
+    first Count and < length
+    second Count and < length
+    third Count and < length
+    fourth Count and < length
+
+    release(self):
+        return
+
+PlanResult is Ready(plan GatherPlan) or Rejected
+PlanResult has
+    release(self): return when self is Ready(plan) then plan.release else rejected_release
+
+rejected_release:
+    return
+
+prepare(length Count, first Count, second Count, third Count, fourth Count) PlanResult:
+    when first.as_num >= length.as_num then
+        return Rejected
+    when second.as_num >= length.as_num then
+        return Rejected
+    when third.as_num >= length.as_num then
+        return Rejected
+    when fourth.as_num >= length.as_num then
+        return Rejected
+    return Ready(plan: GatherPlan(length: length, first: first, second: second, third: third, fourth: fourth))
+
+read_first(plan ref GatherPlan, view ref View(Byte) and view.length = plan.length) Byte: return view.storage.[plan.first]
+read_second(plan ref GatherPlan, view ref View(Byte) and view.length = plan.length) Byte: return view.storage.[plan.second]
+read_third(plan ref GatherPlan, view ref View(Byte) and view.length = plan.length) Byte: return view.storage.[plan.third]
+read_fourth(plan ref GatherPlan, view ref View(Byte) and view.length = plan.length) Byte: return view.storage.[plan.fourth]

@@ -1,0 +1,3 @@
+developer := 0
+
+enabled(feature): return developer = 1

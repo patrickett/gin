@@ -1,0 +1,11 @@
+Nibble is in 0 to 15
+Nibble has finish(self): return
+
+small(value ref is in 0 to 255) True thus value >= 0 and value <= 15 or False:
+    when value >= 0 and value <= 15 then
+        return True
+    return False
+
+grow(value mut is in 0 to 255) True or False:
+    value :: 255
+    return True

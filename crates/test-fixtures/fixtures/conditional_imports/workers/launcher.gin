@@ -1,0 +1,4 @@
+use './runner.gin' as runner
+
+launch(developer, release_code) ExitCode:
+    return runner.run(release_code: release_code, developer: developer)

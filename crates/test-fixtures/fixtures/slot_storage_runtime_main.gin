@@ -1,0 +1,49 @@
+use slot_storage.slot empty, full, swap, take
+use slot_storage.value Byte, Resource, make
+read_and_release(value own Resource) Byte:
+    result: value.read
+    value.release
+    return result
+#entry
+main Byte:
+    slot: empty(Resource)
+    initial: take(Resource, slot)
+    empty_value is in Byte: when initial.unpack is
+        Empty then 1
+        Resource(value) then read_and_release(value)
+    previous: swap(Resource, slot, full(Resource, make(7)))
+    old_value is in Byte: when previous.unpack is
+        Empty then 2
+        Resource(value) then read_and_release(value)
+    replaced: swap(Resource, slot, full(Resource, make(11)))
+    replaced_value is in Byte: when replaced.unpack is
+        Empty then 0
+        Resource(value) then read_and_release(value)
+    first: take(Resource, slot)
+    first_value is in Byte: when first.unpack is
+        Empty then 0
+        Resource(value) then read_and_release(value)
+    previous_again: swap(Resource, slot, full(Resource, make(19)))
+    second_old_value is in Byte: when previous_again.unpack is
+        Empty then 3
+        Resource(value) then read_and_release(value)
+    second: take(Resource, slot)
+    second_value is in Byte: when second.unpack is
+        Empty then 0
+        Resource(value) then read_and_release(value)
+    when slot.unpack is
+        Empty then 0
+        Resource(value) then read_and_release(value)
+    when not (empty_value = 1) then
+        return 11 as Byte
+    when not (old_value = 2) then
+        return 12 as Byte
+    when not (replaced_value = 7) then
+        return 13 as Byte
+    when not (first_value = 11) then
+        return 14 as Byte
+    when not (second_old_value = 3) then
+        return 15 as Byte
+    when not (second_value = 19) then
+        return 16 as Byte
+    return 0 as Byte

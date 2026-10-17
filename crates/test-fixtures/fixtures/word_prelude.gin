@@ -1,0 +1,4 @@
+Word is in 0 to 255
+Word has
+    finish(self):
+        return

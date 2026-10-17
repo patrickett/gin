@@ -1,0 +1,126 @@
+use core.alloc Box, BoxResult, BoxFailure, GlobalAllocator, Allocator, Allocation, AllocationResult, Count
+use core.collection List
+use core.string String
+use core.slice Byte
+TrackingAllocator has Allocator
+    inner GlobalAllocator
+    drops @Byte
+    expected Byte
+    reclaimed @Byte
+    released @Byte
+    fault @Byte
+    reserve(self mut, capacity Count(x)) AllocationResult(x): return self.inner.reserve(capacity)
+    reclaim(self mut, storage Allocation(x) and storage.initialized_count = 0):
+        observed is in Byte: self.drops.[0]
+        self.inner.reclaim(storage)
+        TrackingAllocator.check_count(observed, self.expected, self.fault)
+        previous is in Byte: self.reclaimed.[0]
+        self.reclaimed.[0]:: Byte.replace(self.reclaimed.[0], (previous + 1) as Byte)
+        return
+    release(self):
+        TrackingAllocator(inner, drops, expected, reclaimed, released, fault) := self
+        observed is in Byte: drops.[0]
+        reclaimed_count is in Byte: reclaimed.[0]
+        TrackingAllocator.check_count(observed, expected, fault)
+        one Byte: 1
+        TrackingAllocator.check_count(reclaimed_count, one, fault)
+        inner.release
+        previous is in Byte: released.[0]
+        released.[0]:: Byte.replace(released.[0], (previous + 1) as Byte)
+        return
+    check_count(observed ref Byte, expected ref Byte, fault mut @Byte):
+        actual is in Byte: observed
+        required is in Byte: expected
+        when not (actual = required) then
+            fault.[0]:: Byte.replace(fault.[0], 1)
+            return
+        return
+Resource has
+    id Byte
+    drops @Byte
+    order @Byte
+    release(self):
+        Resource(id, drops, order) := self
+        count is in Byte: drops.[0]
+        drops.[0]:: Byte.replace(drops.[0], (count + 1) as Byte)
+        trace is in Byte: order.[0]
+        identity is in Byte: id
+        order.[0]:: Byte.replace(order.[0], (trace * 10 + identity) as Byte)
+        return
+unwrap(attempt BoxResult(Resource, TrackingAllocator)) Box(Resource, TrackingAllocator):
+    return when attempt is
+        Box(value) then value
+        BoxFailure(failure) then failed(failure)
+failed(failure BoxFailure(Resource, TrackingAllocator)) Box(Resource, TrackingAllocator): return failed(failure)
+#entry
+main:
+    drops Byte: 0
+    order Byte: 0
+    reclaimed Byte: 0
+    released Byte: 0
+    fault Byte: 0
+    boxed: unwrap(Box.new(Resource, Resource(id: 1, drops: @drops, order: @order), TrackingAllocator(inner: GlobalAllocator(), drops: @drops, expected: 1, reclaimed: @reclaimed, released: @released, fault: @fault)))
+    boxed.release
+    box_drops is in Byte: drops
+    box_reclaimed is in Byte: reclaimed
+    box_released is in Byte: released
+    box_fault is in Byte: fault
+    taken_drops Byte: 0
+    taken_order Byte: 0
+    taken_reclaimed Byte: 0
+    taken_released Byte: 0
+    taken_fault Byte: 0
+    transferable: unwrap(Box.new(Resource, Resource(id: 7, drops: @taken_drops, order: @taken_order), TrackingAllocator(inner: GlobalAllocator(), drops: @taken_drops, expected: 0, reclaimed: @taken_reclaimed, released: @taken_released, fault: @taken_fault)))
+    value: transferable.take
+    before_take_release is in Byte: taken_drops
+    transferred_id is in Byte: value.id
+    value.release
+    after_take_release is in Byte: taken_drops
+    take_fault is in Byte: taken_fault
+    vector_drops Byte: 0
+    vector_order Byte: 0
+    vector_reclaimed Byte: 0
+    vector_released Byte: 0
+    vector_fault Byte: 0
+    values: when List.with_capacity(Resource, 4, TrackingAllocator(inner: GlobalAllocator(), drops: @vector_drops, expected: 2, reclaimed: @vector_reclaimed, released: @vector_released, fault: @vector_fault)) is
+        List(items) then items
+        AllocFailure(failure) then
+            failure.release
+            return 2
+    values.push_reserved(Resource(id: 1, drops: @vector_drops, order: @vector_order))
+    values.push_reserved(Resource(id: 2, drops: @vector_drops, order: @vector_order))
+    values.release
+    vector_count is in Byte: vector_drops
+    vector_trace is in Byte: vector_order
+    vector_fault_value is in Byte: vector_fault
+    string_drops Byte: 0
+    string_reclaimed Byte: 0
+    string_released Byte: 0
+    string_fault Byte: 0
+    text: when String.from_utf8('hi', TrackingAllocator(inner: GlobalAllocator(), drops: @string_drops, expected: 0, reclaimed: @string_reclaimed, released: @string_released, fault: @string_fault)) is
+        String(content) then content
+        FromUtf8Error(error) then
+            error.release
+            return 2
+        AllocFailure(failure) then
+            failure.release
+            return 2
+    text.release
+    string_reclaim_count is in Byte: string_reclaimed
+    string_release_count is in Byte: string_released
+    string_fault_value is in Byte: string_fault
+    cancel_drops Byte: 0
+    cancel_reclaimed Byte: 0
+    cancel_released Byte: 0
+    cancel_fault Byte: 0
+    cancel_allocator: TrackingAllocator(inner: GlobalAllocator(), drops: @cancel_drops, expected: 0, reclaimed: @cancel_reclaimed, released: @cancel_released, fault: @cancel_fault)
+    unused: cancel_allocator.reserve(1 as Count(Byte))
+    unused.reclaim(cancel_allocator)
+    allocation_error AllocError: AllocError.OutOfMemory
+    failed_attempt AllocationResult(Byte): allocation_error
+    failed_attempt.reclaim(cancel_allocator)
+    cancel_allocator.release
+    cancel_count is in Byte: cancel_reclaimed
+    cancel_release_count is in Byte: cancel_released
+    cancel_fault_value is in Byte: cancel_fault
+    return when box_drops = 1 and box_reclaimed = 1 and box_released = 1 and box_fault = 0 and before_take_release = 0 and transferred_id = 7 and after_take_release = 1 and take_fault = 0 and vector_count = 2 and vector_trace = 21 and vector_fault_value = 0 and string_reclaim_count = 1 and string_release_count = 1 and string_fault_value = 0 and cancel_count = 1 and cancel_release_count = 1 and cancel_fault_value = 0 then 0 else 1

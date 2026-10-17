@@ -1,0 +1,4 @@
+Byte is in 0 to 255
+Byte has
+    finish(self):
+        return

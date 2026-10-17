@@ -1,0 +1,5 @@
+#settings
+module: "dev"
+version: 0.0.0
+
+#dependencies

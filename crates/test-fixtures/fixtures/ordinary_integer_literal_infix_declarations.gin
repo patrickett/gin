@@ -1,0 +1,75 @@
+Word is in 0 to 4294967295
+
+add_bits(a Word, b Word) Word:
+    left is in 0 to 4294967295: a
+    right is in 0 to 4294967295: b
+    return ((left + right) & 4294967295) as Word
+subtract_bits(a Word, b Word) Word:
+    left is in 0 to 4294967295: a
+    right is in 0 to 4294967295: b
+    return ((left - right) & 4294967295) as Word
+multiply_bits(a Word, b Word) Word:
+    left is in 0 to 4294967295: a
+    right is in 0 to 4294967295: b
+    return ((left * right) & 4294967295) as Word
+divide_bits(a Word, b Word) Word:
+    left is in 0 to 4294967295: a
+    right is in 0 to 4294967295: b
+    return (left / right) as Word
+modulo_bits(a Word, b Word) Word:
+    left is in 0 to 4294967295: a
+    right is in 0 to 4294967295: b
+    return (left % right) as Word
+and_bits(a Word, b Word) Word:
+    left is in 0 to 4294967295: a
+    right is in 0 to 4294967295: b
+    return (left & right) as Word
+or_bits(a Word, b Word) Word:
+    left is in 0 to 4294967295: a
+    right is in 0 to 4294967295: b
+    return (left | right) as Word
+xor_bits(a Word, b Word) Word:
+    left is in 0 to 4294967295: a
+    right is in 0 to 4294967295: b
+    return (left ^ right) as Word
+shift_left_bits(a Word, b Word) Word:
+    left is in 0 to 4294967295: a
+    right is in 0 to 4294967295: b
+    return (left << right) as Word
+shift_right_bits(a Word, b Word) Word:
+    left is in 0 to 4294967295: a
+    right is in 0 to 4294967295: b
+    return (left >> right) as Word
+
+#infix('+')
+renamed_plus(a Word, b Word) Word: return add_bits(a, b)
+#infix('-')
+word_subtract(a Word, b Word) Word: return subtract_bits(a, b)
+#infix('*')
+word_multiply(a Word, b Word) Word: return multiply_bits(a, b)
+#infix('/')
+word_divide(a Word, b Word) Word: return divide_bits(a, b)
+#infix('%')
+word_modulo(a Word, b Word) Word: return modulo_bits(a, b)
+#infix('&')
+word_and(a Word, b Word) Word: return and_bits(a, b)
+#infix('|')
+word_or(a Word, b Word) Word: return or_bits(a, b)
+#infix('^')
+word_xor(a Word, b Word) Word: return xor_bits(a, b)
+#infix('<<')
+word_shift_left(a Word, b Word) Word: return shift_left_bits(a, b)
+#infix('>>')
+word_shift_right(a Word, b Word) Word: return shift_right_bits(a, b)
+
+add(a Word, b Word) Word: return b
+use_add(a Word, b Word) Word: return a + b
+use_subtract(a Word, b Word) Word: return a - b
+use_multiply(a Word, b Word) Word: return a * b
+use_divide(a Word, b Word) Word: return a / b
+use_modulo(a Word, b Word) Word: return a % b
+use_and(a Word, b Word) Word: return a & b
+use_or(a Word, b Word) Word: return a | b
+use_xor(a Word, b Word) Word: return a ^ b
+use_shift_left(a Word, b Word) Word: return a << b
+use_shift_right(a Word, b Word) Word: return a >> b

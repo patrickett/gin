@@ -1,0 +1,23 @@
+Numeric has
+    as_num(self ref) is in Self: return (number is in Self: self)
+
+Byte is in 0 to 255
+Byte has Numeric
+    release(self):
+        return
+
+Count is in 0 to 255
+Count has Numeric
+    replace(previous Self, next Self) Self: return next
+
+    release(self):
+        return
+
+View(element) has
+    storage ref [element; length]
+    length Count
+
+    release(self):
+        return
+
+at(view ref View(Byte), index Count and < view.length) Byte: return view.storage.[index]

@@ -1,0 +1,63 @@
+Byte is in 0 to 255
+Byte has
+    finish(self):
+        return
+Word is in 0 to 65535
+Word has
+    finish(self):
+        return
+Status is in 0 to 255
+Status has
+    finish(self):
+        return
+#phantom(unit)
+Count(unit) is in 0 to 65535
+Count(unit) has
+    finish(self):
+        return
+Block(element) has
+    value element, count Count(element)
+    finish(self):
+        return
+Error is Empty or Full
+Attempt(element) is Block(element) or Failed(Error)
+Attempt(element) has
+    finish(self):
+        return
+Holder has
+    reserve(self mut, element, value element, c Count(element)) Attempt(element):
+        count is in Count(element): c
+        when count = 0 then
+            return Failed(Empty)
+        block Block(element): Block(value: value, count: count as Count(element))
+        return block
+
+inspect_byte(a Attempt(Byte)) Status:
+    return when a is
+        Failed(error) then when error is Empty then 2 else 3
+        Block(block) then check_byte(block)
+
+check_byte(b Block(Byte)) Status:
+    Block(value: value, count: count) := b
+    bits is in Byte: value
+    length is in Count(Byte): count
+    return when bits = 7 and length = 4 then 0 else 1
+
+inspect_word(a Attempt(Word)) Status:
+    return when a is
+        Failed(error) then 1
+        Block(block) then check_word(block)
+
+check_word(b Block(Word)) Status:
+    Block(value: value, count: count) := b
+    bits is in Word: value
+    length is in Count(Word): count
+    return when bits = 513 and length = 2 then 0 else 1
+
+#entry
+main:
+    holder: Holder()
+    first is in 0 to 255: inspect_byte(Holder.reserve(holder, Byte, 7 as Byte, 4 as Count(Byte)))
+    second is in 0 to 255: inspect_word(Holder.reserve(holder, Word, 513 as Word, 2 as Count(Word)))
+    failed is in 0 to 255: inspect_byte(Holder.reserve(holder, Byte, 7 as Byte, 0 as Count(Byte)))
+    return when first = 0 and second = 0 and failed = 2 then 0 else 1

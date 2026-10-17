@@ -2,6 +2,9 @@
 
 #![allow(dead_code)]
 
+pub mod bench_sources;
+pub mod emission;
+pub mod preludes;
 pub mod semantic_fixtures;
 
 use std::fs;
@@ -12,18 +15,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 static FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub fn host_target_triple() -> String {
-    let arch = match std::env::consts::ARCH {
-        "aarch64" => "aarch64",
-        "x86_64" => "x86_64",
-        arch => panic!("unsupported test host architecture: {arch}"),
-    };
-    let suffix = match std::env::consts::OS {
-        "linux" => "unknown-linux-gnu",
-        "macos" => "apple-darwin",
-        "windows" => "pc-windows-msvc",
-        os => panic!("unsupported test host operating system: {os}"),
-    };
-    format!("{arch}-{suffix}")
+    flask::TargetTriple::host()
+        .expect("test host must have a supported target triple")
+        .raw
+}
+
+/// The host triple as a concrete compile target, for native codegen tests.
+pub fn host_compile_target() -> flask::CompileTarget {
+    flask::CompileTarget::Concrete(flask::TargetTriple::parse(&host_target_triple()).unwrap())
 }
 
 /// Unique directory under the system temp dir (parallel-safe).
@@ -77,42 +76,51 @@ impl TempPackage {
     }
 
     pub fn write_flask(&self, name: &str) {
-        self.write(
-            "flask.jsonc",
-            &format!(r#"{{"name":"{name}","version":"0.0.0","authors":[]}}"#),
-        );
+        self.write_flask_with_deps(name, "");
     }
 
-    pub fn write_flask_with_deps(&self, name: &str, deps_json: &str) {
-        self.write(
-            "flask.jsonc",
-            &format!(
-                r#"{{"name":"{name}","version":"0.0.0","authors":[],"dependencies":{deps_json}}}"#
-            ),
-        );
+    pub fn write_flask_with_deps(&self, name: &str, dependencies: &str) {
+        let manifest =
+            format!("#settings\nmodule: '{name}'\nversion: 0.0.0\n\n#dependencies\n{dependencies}");
+        flask::FlaskConfig::parse_manifest(&manifest).unwrap();
+        self.write(flask::MANIFEST_NAME, &manifest);
     }
 
     pub fn write_nested_flask(&self, relative_dir: &str, name: &str) {
-        let d = self.root.join(relative_dir);
-        fs::create_dir_all(&d).unwrap();
-        write_file(
-            &d.join("flask.jsonc"),
-            &format!(r#"{{"name":"{name}","version":"0.0.0","authors":[]}}"#),
+        let manifest = format!("#settings\nmodule: '{name}'\nversion: 0.0.0\n");
+        flask::FlaskConfig::parse_manifest(&manifest).unwrap();
+        self.write(
+            &format!("{relative_dir}/{}", flask::MANIFEST_NAME),
+            &manifest,
         );
+    }
+
+    /// Copy `.gin` and `mod.flask` files from `src_root` under `prefix`,
+    /// mirroring the subdirectory layout.
+    pub fn copy_tree(&self, src_root: &Path, prefix: &str) {
+        let mut pending = vec![src_root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(&directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.extension().is_some_and(|extension| extension == "gin")
+                    || path.file_name().is_some_and(|file| file == "mod.flask")
+                {
+                    let relative = Path::new(prefix).join(path.strip_prefix(src_root).unwrap());
+                    self.write(
+                        relative.to_str().unwrap(),
+                        &fs::read_to_string(path).unwrap(),
+                    );
+                }
+            }
+        }
     }
 }
 
 impl Drop for TempPackage {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
-    }
-}
-
-pub fn machine_backend_source(target: &str) -> &'static str {
-    if target.starts_with("x86_64") {
-        semantic_fixtures::MACHINE_X86
-    } else {
-        semantic_fixtures::MACHINE_ARM
     }
 }
 

@@ -1,0 +1,8 @@
+use '../game/game.gin' as game
+
+run(developer, release_code) ExitCode:
+    when developer then
+        use dev.tools as tools
+        return tools.show_wireframe
+    else
+        return when release_code = 7 then game.run else 9

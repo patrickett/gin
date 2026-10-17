@@ -1,0 +1,57 @@
+use core.collection List, ListResult
+use core.alloc Allocator, Allocation, AllocationResult, Count, GlobalAllocator, AllocFailure, AllocError
+use core.slice Byte, Length
+ResultCode is in 0 to 4
+ResultCode has release(self): return
+Resource has
+    dropped @Byte
+    release(self):
+        Resource(dropped) := self
+        previous is in Byte: dropped.[0]
+        dropped.[0] :: Byte.replace(dropped.[0], (previous + 1) as Byte)
+        return
+FailGrowth has Allocator
+    inner GlobalAllocator
+    attempts Byte
+    released @Byte
+    reserve(self mut, count Count(x)) AllocationResult(x):
+        when self.attempts.as_num = 0 then
+            self.attempts :: Byte.replace(self.attempts, 1)
+            return self.inner.reserve(count)
+        error AllocError: AllocError.OutOfMemory
+        return error
+    reclaim(self mut, storage Allocation(x) and storage.initialized_count = 0):
+        self.inner.reclaim(storage)
+        return
+    release(self):
+        FailGrowth(inner, attempts, released) := self
+        inner.release
+        attempts.release
+        released.[0] :: Byte.replace(released.[0], 1)
+        return
+exercise(values own List(Resource, FailGrowth) and values.length = 0 and values.capacity >= 1, value own Resource, existing own Resource) ResultCode:
+    values.push_reserved(existing)
+    attempt: values.push(value)
+    return when attempt is
+        Pushed then
+            values.release
+            return 1
+        AllocFailure(failure) then
+            unchanged is in Length: values.length
+            failure.release
+            values.release
+            return when unchanged = 1 then 0 else 2
+discard_failure(failure AllocFailure(FailGrowth)) ResultCode:
+    failure.release
+    return 3
+#entry
+main:
+    dropped Byte: 0
+    released Byte: 0
+    attempt: List.with_capacity(Resource, 1, FailGrowth(inner: GlobalAllocator(), attempts: 0, released: @released))
+    status: when attempt is
+        List(values) then exercise(values, Resource(dropped: @dropped), Resource(dropped: @dropped))
+        AllocFailure(failure) then discard_failure(failure)
+    was_dropped is in Byte: dropped
+    was_released is in Byte: released
+    return when status = 0 and was_dropped = 2 and was_released = 1 then 0 else 4
