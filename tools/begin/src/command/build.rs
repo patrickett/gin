@@ -4,14 +4,14 @@ use ginc::compile::GinCompiler;
 use std::path::PathBuf;
 
 pub fn begin_build(
-    config: FlaskConfig,
+    _config: FlaskConfig,
     input: Option<PathBuf>,
     timings: bool,
     release: bool,
     quiet: bool,
 ) -> bool {
-    let (path, emit) = match input {
-        Some(p) => (p, Emit::Exe),
+    let path = match input {
+        Some(path) => path,
         None => {
             let cwd = match std::env::current_dir() {
                 Ok(d) => d,
@@ -21,12 +21,9 @@ pub fn begin_build(
                 }
             };
 
-            let main_gin = cwd.join(super::DEFAULT_ENTRY);
-            if main_gin.is_file() {
-                (main_gin, Emit::Exe)
-            } else {
-                (cwd, Emit::Obj)
-            }
+            FlaskConfig::find_package_config(&cwd)
+                .map(|(_, root)| root)
+                .unwrap_or(cwd)
         }
     };
 
@@ -35,20 +32,9 @@ pub fn begin_build(
         return false;
     }
 
-    // Resolve path dependencies relative to cwd (where mod.flask lives).
-    let config_dir = match std::env::current_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("error: cannot get current directory: {e}");
-            return false;
-        }
-    };
-    let dependencies = config.resolve_path_dependencies(&config_dir);
-
     let mut args = Args {
         input: path,
-        dependencies,
-        emit,
+        emit: Emit::Auto,
         timings,
         profile: if release {
             Profile::Release

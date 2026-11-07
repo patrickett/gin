@@ -1,0 +1,25 @@
+use core.collection List, ListFailure
+use core.alloc GlobalAllocator
+use core.ops Release
+
+Token has Release
+    id in 0 to 9
+    release(self):
+        Token(id) := self
+        return
+
+fill():
+    attempt: List.with_capacity(Token, GlobalAllocator, 2, GlobalAllocator())
+    when attempt is Allocated(items) then
+        items.push(Token(id: 1))
+        items.push(Token(id: 2))
+        last: items.pop
+        last.release
+        items.release
+        return
+    Failed(failure) := attempt
+    failure.release
+    return
+
+#entry
+main: return

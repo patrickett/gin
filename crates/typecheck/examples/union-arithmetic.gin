@@ -1,0 +1,22 @@
+shifted(value in 0 to 10):
+    return when value is
+        1 or 3 then value + 1
+        else 0
+
+difference(value in 0 to 10):
+    return when value is
+        1 or 3 then 10 - value
+        else 0
+
+signed_product(value in -10 to 10):
+    return when value is
+        in -3 to -2 or in 2 to 3 then value * -2
+        else 0
+
+combinations(left in 0 to 10, right in 0 to 10):
+    return when left is
+        1 or 3 then
+            when right is
+                2 or 5 then left * right
+                else 0
+        else 0

@@ -1,0 +1,73 @@
+-- Two logical slots. No raw allocation, array layout, or extraction through mut.
+use example.slots Slot, take_slot
+
+Buffer(element) has
+    #private
+    zero Slot(element)
+    #private
+    one Slot(element)
+
+InsertResult(element) is Inserted(buffer Buffer(element)) or Occupied(buffer Buffer(element), value element)
+
+TakeResult(element) is Removed(buffer Buffer(element), value element) or Vacant(buffer Buffer(element))
+
+CloseResult(element) is Closed or StillFull(buffer Buffer(element))
+
+empty_buffer(element Type) Buffer(element):
+    return Buffer(zero: Empty, one: Empty)
+
+insert_at(element Type, buffer Buffer(element),
+          index in 0 to 1, value element) InsertResult(element):
+    return when index is
+        0 then insert_zero(element, buffer, value)
+        1 then insert_one(element, buffer, value)
+
+take_at(element Type, buffer Buffer(element), index in 0 to 1) TakeResult(element):
+    return when index is
+        0 then take_zero(element, buffer)
+        1 then take_one(element, buffer)
+
+insert_zero(element Type, buffer Buffer(element), value element) InsertResult(element):
+    Buffer(zero, one) := buffer
+    attempt: take_slot(element, zero)
+    return when attempt is
+        Empty then Inserted(buffer: Buffer(zero: Full(value), one))
+        Taken(previous) then Occupied(
+            buffer: Buffer(zero: Full(previous), one), value)
+
+insert_one(element Type, buffer Buffer(element), value element) InsertResult(element):
+    Buffer(zero, one) := buffer
+    attempt: take_slot(element, one)
+    return when attempt is
+        Empty then Inserted(buffer: Buffer(zero, one: Full(value)))
+        Taken(previous) then Occupied(
+            buffer: Buffer(zero, one: Full(previous)), value)
+
+take_zero(element Type, buffer Buffer(element)) TakeResult(element):
+    Buffer(zero, one) := buffer
+    attempt: take_slot(element, zero)
+    return when attempt is
+        Empty then Vacant(buffer: Buffer(zero: Empty, one))
+        Taken(value) then Removed(buffer: Buffer(zero: Empty, one), value)
+
+take_one(element Type, buffer Buffer(element)) TakeResult(element):
+    Buffer(zero, one) := buffer
+    attempt: take_slot(element, one)
+    return when attempt is
+        Empty then Vacant(buffer: Buffer(zero, one: Empty))
+        Taken(value) then Removed(buffer: Buffer(zero, one: Empty), value)
+
+close_buffer(element Type, buffer Buffer(element)) CloseResult(element):
+    Buffer(zero, one) := buffer
+    attempt: take_slot(element, zero)
+    return when attempt is
+        Empty then close_one(element, one)
+        Taken(value) then StillFull(
+            buffer: Buffer(zero: Full(value), one))
+
+close_one(element Type, one Slot(element)) CloseResult(element):
+    attempt: take_slot(element, one)
+    return when attempt is
+        Empty then Closed
+        Taken(value) then StillFull(
+            buffer: Buffer(zero: Empty, one: Full(value)))

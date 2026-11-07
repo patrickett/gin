@@ -1,0 +1,16 @@
+Small is in 0 to 255
+
+Small has
+    finish(self): return
+
+quotient(dividend in 0 to 255, divisor in 1 to 10):
+    return dividend / divisor
+
+remainder(dividend in 0 to 255, divisor in 1 to 10):
+    return dividend % divisor
+
+negative_quotient: -7 / 2
+negative_remainder(value in -255 to 0): value % 2
+
+answer Small: quotient(255, 10)
+digit Small: remainder(255, 10)

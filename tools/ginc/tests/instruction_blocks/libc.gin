@@ -1,0 +1,48 @@
+use app.modes Mode, callback
+use app.arm64 Word, CallerSaved, Nothing, One, Two, branch_link, write_hello, printf_two, sort_two
+
+-- The C functions this library reaches, and the Gin function C calls back, each named once.
+#unrestricted
+Symbol is Write
+       or Printf
+       or Qsort
+       or Putchar
+       or Tick
+       or Back
+
+Symbol has
+    to_string(self): when self is
+        Write then 'write'
+        Printf then 'printf'
+        Qsort then 'qsort'
+        Putchar then 'putchar'
+        Tick then 'app.libc.tick'
+        Back then 'app.modes.callback'
+
+put(character Word) Word:
+    after := branch_link(Symbol.Putchar.to_string, One, CallerSaved, One(value: character))
+    return after.result
+
+hello() Word:
+    after := write_hello(Symbol.Write.to_string, Nothing, CallerSaved, Nothing)
+    return after.result
+
+numbers(first Word, second Word) Word:
+    after := printf_two(Symbol.Printf.to_string, Two, CallerSaved, Two(first: first, second: second))
+    return after.result
+
+-- C calls this with pointers to two elements; it only reports that it was called.
+tick(left Word, right Word) in 0 to 0:
+    put(46)
+    return 0
+
+sorted() Word:
+    after := sort_two(Symbol.Qsort.to_string, Symbol.Tick.to_string, Nothing, CallerSaved, Nothing)
+    return after.result
+
+-- Calls another module's function with a value only known at run time, and also hands that
+-- function's address to C: both must name the one declaration.
+both(mode Mode) Word:
+    called := callback(mode)
+    after := sort_two(Symbol.Qsort.to_string, Symbol.Back.to_string, Nothing, CallerSaved, Nothing)
+    return after.result

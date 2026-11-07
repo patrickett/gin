@@ -1,0 +1,19 @@
+[package]
+name = "machine-model"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Instructions as data, one execute, and encodings written in Gin and evaluated at compile time"
+
+[lints]
+workspace = true
+
+[dependencies]
+i256 = { workspace = true }
+num-traits = { workspace = true }
+parser = { workspace = true }
+thiserror = { workspace = true }
+typecheck = { path = "../typecheck" }
+
+[dev-dependencies]
+tempfile = "3"

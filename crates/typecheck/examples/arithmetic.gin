@@ -1,0 +1,9 @@
+Small is in 0 to 255
+
+Small has
+    finish(self): return
+
+sum(left in 0 to 100, right in 0 to 100):
+    return left + right
+
+answer Small: sum(20, 22)

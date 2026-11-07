@@ -39,6 +39,21 @@ impl SpanId {
         self.0
     }
 
+    /// Bits of an id that index spans inside one file's table.
+    pub const SPAN_BITS_PER_FILE: u32 = 22;
+    /// Spans one file table may hold before its ids would name the next file.
+    pub const SPANS_PER_FILE: u32 = 1 << Self::SPAN_BITS_PER_FILE;
+    /// File indices below this keep every file id clear of [`SpanId::INVALID`].
+    pub const FILES_MAX: u32 = (1 << (32 - Self::SPAN_BITS_PER_FILE)) - 1;
+
+    /// The file whose table issued this id; meaningful only for ids from
+    /// [`SpanTable::for_file`] tables, which are unique across a module's files.
+    #[inline]
+    #[must_use]
+    pub const fn file(self) -> u32 {
+        self.0 >> Self::SPAN_BITS_PER_FILE
+    }
+
     /// Check if this SpanId is valid (not INVALID).
     #[inline]
     #[must_use]
@@ -181,9 +196,26 @@ impl SubSpan {
 /// This enables interned span storage - each unique span is stored once and
 /// referenced by ID throughout the AST. This dramatically reduces memory usage
 /// compared to storing full span data in every node.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SpanTable {
     spans: Vec<Span>,
+    /// Id of the first span; ids below it belong to another file's table.
+    base: u32,
+    /// First id this table may not issue.
+    limit: u32,
+    /// Set once an insert found the table full; see [`SpanTable::insert`].
+    overflowed: bool,
+}
+
+impl Default for SpanTable {
+    fn default() -> Self {
+        Self {
+            spans: Vec::new(),
+            base: 0,
+            limit: u32::MAX,
+            overflowed: false,
+        }
+    }
 }
 
 impl SpanTable {
@@ -200,14 +232,44 @@ impl SpanTable {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             spans: Vec::with_capacity(capacity),
+            ..Self::default()
+        }
+    }
+
+    /// Create the table for file `file` of a multi-file module. Its ids are unique
+    /// across the module and name their file, so one checker resolves any of them.
+    pub fn for_file(file: u32) -> Self {
+        assert!(file < SpanId::FILES_MAX);
+        let base = file << SpanId::SPAN_BITS_PER_FILE;
+        Self {
+            spans: Vec::new(),
+            base,
+            limit: base + SpanId::SPANS_PER_FILE,
+            overflowed: false,
         }
     }
 
     /// Insert a new span and return its SpanId.
+    ///
+    /// A full table never issues an id of another file's range. It records the
+    /// overflow and returns its last id, so callers keep a valid, in-file id while
+    /// the producer checks [`SpanTable::overflowed`] and discards the result.
     pub fn insert(&mut self, span: Span) -> SpanId {
-        let id = self.spans.len() as u32;
+        let id = self.base + self.spans.len() as u32;
+        if id >= self.limit {
+            assert!(!self.spans.is_empty());
+            self.overflowed = true;
+            return SpanId(self.limit - 1);
+        }
         self.spans.push(span);
         SpanId(id)
+    }
+
+    /// Whether any insert found the table full; ids it returned then are unreliable.
+    #[inline]
+    #[must_use]
+    pub fn overflowed(&self) -> bool {
+        self.overflowed
     }
 
     /// Insert a span from a byte range and return its SpanId.
@@ -218,10 +280,12 @@ impl SpanTable {
     /// Get the span data for a given SpanId.
     /// Returns a zero-length span at position 0 for invalid IDs.
     pub fn get(&self, id: SpanId) -> Span {
-        if id.is_valid() && (id.into_inner() as usize) < self.spans.len() {
-            self.spans[id.into_inner() as usize]
-        } else {
-            Span { start: 0, end: 0 }
+        let index = id.into_inner().checked_sub(self.base);
+        match index {
+            Some(index) if id.is_valid() && (index as usize) < self.spans.len() => {
+                self.spans[index as usize]
+            }
+            _ => Span { start: 0, end: 0 },
         }
     }
 

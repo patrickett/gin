@@ -1,0 +1,16 @@
+Small is in 0 to 255
+
+Small has
+    finish(self): return
+
+inspect(value ref Small):
+    return
+
+forward(value ref Small): inspect(value)
+
+run:
+    value Small: 42
+    forward(value)
+    inspect(value)
+    value.finish
+    return

@@ -1,0 +1,9 @@
+use example.buffers empty_buffer, insert_at, take_at, close_buffer
+
+roundtrip(element Type, value element) element:
+    buffer: empty_buffer(element)
+    Inserted(after_insert) := insert_at(element, buffer, 1, value)
+    Vacant(after_empty_take) := take_at(element, after_insert, 0)
+    Removed(after_take, returned) := take_at(element, after_empty_take, 1)
+    Closed := close_buffer(element, after_take)
+    return returned

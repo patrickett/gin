@@ -1,0 +1,20 @@
+-- Ordinary owned-field composition; no physical storage effect is implemented.
+use storage.boundary Extent, acquire, relinquish
+
+Buffer has
+    #private
+    storage Extent
+
+reserve(bytes in 1 to 64) Buffer:
+    return Buffer(storage: acquire(bytes))
+
+wrap(storage Extent) Buffer:
+    return Buffer(storage: storage)
+
+take(buffer Buffer) Extent:
+    Buffer(storage) := buffer
+    return storage
+
+release(buffer Buffer):
+    relinquish(take(buffer))
+    return

@@ -2,22 +2,11 @@
 name = "lexer"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [lints]
 workspace = true
 
 [dependencies]
-diagnostic = { workspace = true }
 span = { workspace = true }
-
-i256 = { workspace = true }
 memchr = "2.7"
-fast-float = "0.2"
-
-[dev-dependencies]
-criterion = "0.5"
-test-fixtures = { workspace = true }
-
-[[bench]]
-name = "lexer_bench"
-harness = false

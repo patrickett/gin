@@ -22,6 +22,8 @@ mod protocol;
 pub use protocol::ProtocolCode;
 mod representation;
 pub use representation::RepresentationCode;
+mod source_check;
+pub use source_check::SourceCheckCode;
 mod typecheck;
 pub use typecheck::{
     AddressCode, ArrayCode, BindingCode, CallCode, DomainCode, EmissionCode, GenericCode,
@@ -49,6 +51,7 @@ pub enum DiagnosticCode {
     Parse(#[from] ParseCode),
     Protocol(#[from] ProtocolCode),
     Representation(#[from] RepresentationCode),
+    SourceCheck(#[from] SourceCheckCode),
     Type(#[from] TypeCode),
     UnfilledHole,
 }
@@ -68,6 +71,7 @@ impl Prefix for DiagnosticCode {
             Self::Parse(code) => code.prefix(),
             Self::Protocol(code) => code.prefix(),
             Self::Representation(code) => code.prefix(),
+            Self::SourceCheck(code) => code.prefix(),
             Self::Type(code) => code.prefix(),
             Self::UnfilledHole => "",
         }
@@ -75,6 +79,14 @@ impl Prefix for DiagnosticCode {
 }
 
 impl Code for DiagnosticCode {
+    /// A warning only where the code's own stage says so.
+    fn category(&self) -> crate::Category {
+        match self {
+            Self::SourceCheck(code) => code.category(),
+            _ => crate::Category::Flaw,
+        }
+    }
+
     fn name(&self) -> &'static str {
         match self {
             Self::Codegen(code) => code.name(),
@@ -89,6 +101,7 @@ impl Code for DiagnosticCode {
             Self::Parse(code) => code.name(),
             Self::Protocol(code) => code.name(),
             Self::Representation(code) => code.name(),
+            Self::SourceCheck(code) => code.name(),
             Self::Type(code) => code.name(),
             Self::UnfilledHole => "unfilled-hole",
         }
@@ -115,8 +128,9 @@ impl DiagnosticCode {
             .chain(ParseCode::all().map(Self::Parse))
             .chain(ProtocolCode::all().map(Self::Protocol))
             .chain(RepresentationCode::all().map(Self::Representation))
+            .chain(SourceCheckCode::all().map(Self::SourceCheck))
             .chain(TypeCode::all().map(Self::Type))
-            .chain([Self::UnfilledHole].into_iter())
+            .chain([Self::UnfilledHole])
     }
 }
 

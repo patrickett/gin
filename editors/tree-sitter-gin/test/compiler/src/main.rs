@@ -1,9 +1,17 @@
-use lexer::Lexer;
-use parser::query::SourceParseExt;
 use serde_json::{Value, json};
+use lexer::{Lexer, TokenKind};
+use parser::parse_strict;
 use std::io;
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--keywords") {
+        let keywords: Vec<_> = TokenKind::KEYWORDS
+            .iter()
+            .filter_map(|kind| kind.keyword())
+            .collect();
+        serde_json::to_writer(io::stdout(), &keywords).unwrap();
+        return;
+    }
     let cases: Vec<Value> = serde_json::from_reader(io::stdin()).unwrap();
     let results: Vec<_> = cases
         .iter()
@@ -11,26 +19,21 @@ fn main() {
             let source = case["source"].as_str().unwrap();
             let mut lexer = Lexer::new(source);
             let mut tokens = Vec::new();
-            while let Some((token, id)) = lexer.next_raw() {
-                let span = lexer.get_span(id);
-                let name = format!("{token:?}");
+            while let Some(token) = lexer.next_raw() {
+                let start = token.span.start() as usize;
+                let end = token.span.end() as usize;
                 tokens.push(json!({
-                    "kind": name.split('(').next().unwrap(),
-                    "start": source[..span.start()].encode_utf16().count(),
-                    "end": source[..span.end()].encode_utf16().count(),
+                    "kind": format!("{:?}", token.kind),
+                    "start": source[..start].encode_utf16().count(),
+                    "end": source[..end].encode_utf16().count(),
                 }));
             }
-            let diagnostics = if case.get("valid").is_some() {
-                source
-                    .parse_source_full()
-                    .symptoms
-                    .iter()
-                    .filter(|d| d.category.as_str() == "flaw")
-                    .map(|d| format!("{}: {}", d.code.slug(), d.message))
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
+            let diagnostics = parse_strict(source)
+                .err()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|diagnostic| format!("{}: {}", diagnostic.code.slug(), diagnostic.message))
+                .collect::<Vec<_>>();
             json!({ "tokens": tokens, "diagnostics": diagnostics })
         })
         .collect();

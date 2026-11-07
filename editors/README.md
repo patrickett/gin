@@ -22,7 +22,9 @@ This writes **local build artifacts** (not committed to git):
 
 Run this after clone and before building the `tree-sitter-gin` crate, Zed, or the VS Code extension.
 
-The compiler (`crates/parser`) remains the authority for diagnostics and navigation via `ginlsp`.
+The source frontend (`lexer`, `parser`, `ast`) and direct checker supply
+the language server's diagnostics and source queries. Tree-sitter supplies editor syntax
+and highlighting, including recovery while a document is incomplete.
 
 ## VS Code / VSIX setup
 

@@ -1,0 +1,27 @@
+Marker has
+
+Region has
+    #private
+    address @Marker
+
+make_region(address @Marker) Region:
+    return Region(address: address)
+
+reconstruct_region(address @Region) Region:
+    return #unchecked(address as Region)
+
+Account has
+    #private
+    balance in 0 to 16
+
+make_account(balance in 0 to 16) Account:
+    return Account(balance: balance)
+
+reconstruct_account(address @Account) Account:
+    return #unchecked(address as Account)
+
+Public has
+    address @Marker
+
+reconstruct_public(address @Public) Public:
+    return #unchecked(address as Public)

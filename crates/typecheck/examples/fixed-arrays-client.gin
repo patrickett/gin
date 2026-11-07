@@ -1,0 +1,12 @@
+use library.arrays Pair, from_values, swap, take_both, pack, unpack
+
+Scalar has number in 0 to 16
+
+observe(first in 0 to 16, second in 0 to 16) in 0 to 16 and = second:
+    values: from_values(Scalar, Scalar(number: first), Scalar(number: second))
+    held: pack(Scalar, values)
+    exchanged: swap(Scalar, unpack(Scalar, held))
+    Pair(left, right) := take_both(Scalar, exchanged)
+    Scalar(left_number) := left
+    Scalar(right_number) := right
+    return left_number

@@ -2,14 +2,16 @@
 default-members = [
     "crates/flask",
     "crates/ast",
-    "crates/span",
-    "crates/diagnostic",
     "crates/lexer",
     "crates/parser",
+    "crates/package",
+    "crates/machine-model",
+    "crates/interpreter",
+    "crates/span",
+    "crates/diagnostic",
     "crates/typecheck",
-    "crates/resolve",
-    "crates/codegen",
-    "crates/analysis",
+    "crates/interface-codec",
+    "crates/backend",
     "editors/tree-sitter-gin",
     "tools/ginc",
     "tools/ginfmt",
@@ -23,20 +25,21 @@ members = [
     "tools/begin",
     "crates/flask",
     "crates/ast",
+    "crates/lexer",
+    "crates/parser",
+    "crates/package",
+    "crates/machine-model",
+    "crates/interpreter",
     "crates/span",
     "crates/diagnostic",
-    "crates/lexer",
-    "crates/codegen",
-    "crates/analysis",
-    "crates/parser",
-    "crates/resolve",
+    "crates/backend",
     "tools/ginc",
     "tools/ginfmt",
     "tools/ginlsp",
     "tools/ginterpreter",
     "crates/typecheck",
-    "crates/ast/format",
     "crates/interface",
+    "crates/interface-codec",
 ]
 resolver = "3"
 
@@ -59,19 +62,17 @@ lsp-types = "0.94.1"
 flask = { path = "crates/flask" }
 ginc = { path = "tools/ginc" }
 ast = { path = "crates/ast" }
-ast-format = { path = "crates/ast/format" }
+lexer = { path = "crates/lexer" }
+parser = { path = "crates/parser" }
+package = { path = "crates/package" }
 dashmap = "6.1.0"
 span = { path = "crates/span" }
 diagnostic = { path = "crates/diagnostic" }
-lexer = { path = "crates/lexer" }
-codegen = { path = "crates/codegen" }
-analysis = { path = "crates/analysis" }
-parser = { path = "crates/parser" }
+backend = { path = "crates/backend" }
 ginfmt = { path = "tools/ginfmt" }
-resolve = { path = "crates/resolve" }
 interface = { path = "crates/interface" }
+interface-codec = { path = "crates/interface-codec" }
 test-fixtures = { path = "crates/test-fixtures" }
-typecheck = { path = "crates/typecheck" }
 indexmap = "2"
 log = "0.4"
 thiserror = "2.0.11"
@@ -86,7 +87,8 @@ strum = { version = "0.27", features = ["derive"] }
 derive_more = { version = "2.1", features = ["from", "deref", "deref_mut", "display"] }
 itertools = "0.14"
 kinded = "0.5"
-i256 = "0.2"
+i256 = { version = "0.2", features = ["num-traits"] }
+num-traits = "0.2"
 target-lexicon = "0.13"
 semver = "1"
 criterion = "0.5"

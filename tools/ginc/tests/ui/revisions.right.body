@@ -1,0 +1,49 @@
+fn right
+Some(
+    CheckedSourceBody {
+        effects: false,
+        expressions: [
+            CheckedSourceBodyExpr {
+                span: SpanId(
+                    14,
+                ),
+                ty: Integer {
+                    lower: 2,
+                    upper: 2,
+                },
+                kind: Integer(
+                    2,
+                ),
+            },
+            CheckedSourceBodyExpr {
+                span: SpanId(
+                    21,
+                ),
+                ty: Integer {
+                    lower: 2,
+                    upper: 2,
+                },
+                kind: Return {
+                    value: 0,
+                },
+            },
+            CheckedSourceBodyExpr {
+                span: SpanId(
+                    21,
+                ),
+                ty: Integer {
+                    lower: 2,
+                    upper: 2,
+                },
+                kind: Block {
+                    statements: [
+                        1,
+                    ],
+                    result: 1,
+                },
+            },
+        ],
+        root: 2,
+        outputs: [],
+    },
+)

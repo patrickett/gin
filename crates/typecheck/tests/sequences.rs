@@ -1,198 +1,396 @@
-mod support;
-use ast::Ty;
-use support::{body, check, flaw_codes};
+//! Parenthesized sequence syntax and both positional projections share owned places.
+use ast::{Expr, Expression, Item, SourceFile, Statement};
+use typecheck::{
+    CheckedSourceInstanceHead, CheckedSourceModule, Limits, SourceCheckError, SourceType,
+    check_file, check_module,
+};
+
+const LIBRARY: &str = include_str!("../examples/sequences.gin");
+const CLIENT: &str = include_str!("../examples/sequences-client.gin");
+
+fn check(
+    name: &str,
+    text: &str,
+    dependencies: &[&CheckedSourceModule],
+) -> Result<CheckedSourceModule, SourceCheckError> {
+    let source = parser::parse_strict(text).expect("valid sequence source");
+    let before = source.clone();
+    let result = check_module(name, &source, dependencies, Limits::default());
+    assert_eq!(source, before);
+    result
+}
+
+fn library() -> CheckedSourceModule {
+    check("library.sequences", LIBRARY, &[]).expect("body-checked sequence library")
+}
 
 #[test]
-fn sequence_shapes_preserve_optional_names_and_element_types() {
-    for source in [
-        "values: 10, 20\n",
-        "values: [10, 20]\n",
-        "values: [x: 10, y: 20]\n",
-        "values: x: 10, 20\n",
-        "Flag is On or Off\nvalues: [10, On]\n",
-        "values: [10, 20], [30, 40]\n",
-    ] {
-        let typed = check(source);
-        assert!(
-            flaw_codes(&typed).is_empty(),
-            "{source}: {:?}",
-            typed.all_flaws()
+fn parenthesized_values_types_and_both_projections_preserve_payload_identity() {
+    let library = library();
+    check("app.client", CLIENT, &[&library]).unwrap();
+    let client = CLIENT
+        .replace("and = second", "and = first")
+        .replace("return left_number", "return right_number");
+    check("app.other", &client, &[&library]).unwrap();
+    let bare = CLIENT
+        .replace("from_values, swap,", "from_values, swap_bare,")
+        .replace("swap(Scalar,", "swap_bare(Scalar,");
+    check("app.bare", &bare, &[&library]).unwrap();
+}
+
+#[test]
+fn heterogeneous_sequences_keep_each_position_type_and_origin() {
+    let library = library();
+    for (returned, expected) in [("left_number", "second"), ("right_number", "first")] {
+        let client = format!(
+            "use library.sequences swap_mixed
+Left has number in 0 to 16
+Right has number in 0 to 16
+observe(first in 0 to 16, second in 0 to 16) in 0 to 16 and = {expected}:
+    pair: swap_mixed(Left, Right, (Left(number: first), Right(number: second)))
+    left: pair.0
+    right: pair.[1]
+    Right(left_number) := left
+    Left(right_number) := right
+    return {returned}
+"
         );
-        let ty = &typed.exprs.ty[body(&typed, "values").as_usize()];
-        assert!(
-            matches!(ty, Ty::Array { .. } | Ty::Sequence(_)),
-            "{source}: {ty:?}"
-        );
-        assert!(
-            typecheck::representation::Repr::derive(ty, Some(&typed.type_registry)).is_ok(),
-            "{source}: {ty:?}"
-        );
+        check("app.mixed", &client, &[&library]).unwrap();
     }
 }
 
 #[test]
-fn named_single_result_retains_its_projection() {
-    let typed = check(&format!(
-        "{}get() value Byte: return 42\nmain: get().value\n",
-        test_fixtures::preludes::BYTE_PRELUDE
-    ));
-    assert!(flaw_codes(&typed).is_empty(), "{:?}", typed.all_flaws());
-    let ty = &typed.defs[&typecheck::DefId::named(internment::Intern::from_ref("get"))].return_type;
-    assert!(
-        matches!(ty, Ty::Sequence(fields) if fields.len() == 1 && fields[0].name.unwrap().as_str() == "value"),
-        "{ty:?}"
+fn wrong_order_is_not_hidden_by_conserving_both_owners() {
+    let target = "    return (second, first)\n\nswap_bare";
+    assert_eq!(LIBRARY.matches(target).count(), 1);
+    // Restrict to the homogeneous swap; reversing the heterogeneous result has
+    // an immediate type error rather than an origin-only mismatch.
+    let wrong = LIBRARY.replace(target, "    return (first, second)\n\nswap_bare");
+    assert_ne!(wrong, LIBRARY);
+    let wrong = check("library.sequences", &wrong, &[]).unwrap();
+    assert_eq!(
+        check("app.client", CLIENT, &[&wrong]).unwrap_err(),
+        SourceCheckError::Unproved
     );
 }
 
 #[test]
-fn return_sequences_support_named_unnamed_mixed_and_nested_results() {
-    for source in [
-        format!(
-            "{}Factory has\n    get() value Byte: return 42\nmain: Factory.get().value\n",
-            test_fixtures::preludes::BYTE_PRELUDE
+fn sequence_metadata_is_structural_not_an_array_or_nominal_schema() {
+    let library = library();
+    let checked = library.checked();
+    let mixed = checked
+        .functions
+        .iter()
+        .find(|function| function.name == "swap_mixed")
+        .unwrap();
+    let SourceType::Sequence { id } = mixed.result else {
+        panic!("sequence result");
+    };
+    let instance = &checked.instances[id as usize];
+    assert_eq!(instance.head, CheckedSourceInstanceHead::Sequence);
+    assert_eq!(
+        instance.arguments,
+        [
+            SourceType::Generic { index: 1 },
+            SourceType::Generic { index: 0 }
+        ]
+    );
+    let unit = checked
+        .functions
+        .iter()
+        .find(|function| function.name == "unit")
+        .unwrap();
+    assert_eq!(unit.result, SourceType::Unit);
+    let singleton = checked
+        .functions
+        .iter()
+        .find(|function| function.name == "singleton")
+        .unwrap();
+    let SourceType::Sequence { id } = singleton.result else {
+        panic!("singleton sequence result");
+    };
+    assert_eq!(
+        checked.instances[id as usize].arguments,
+        [SourceType::Generic { index: 0 }]
+    );
+}
+
+#[test]
+fn singleton_sequence_is_not_ordinary_parenthesis_grouping() {
+    let library = library();
+    let client = "
+use library.sequences singleton, take_one
+Marker has
+roundtrip(value Marker) Marker:
+    one: singleton(Marker, value)
+    return take_one(Marker, one)
+";
+    check("app.singleton", client, &[&library]).unwrap();
+    for text in [
+        "bad(element Type, value element) (element,): return (value)\n",
+        "bad(element Type, value element) element: return (value,)\n",
+    ] {
+        assert_eq!(
+            check("bad.group", text, &[]).unwrap_err(),
+            SourceCheckError::Type
+        );
+    }
+}
+
+#[test]
+fn dot_and_bracket_access_cannot_consume_the_same_position_twice() {
+    for (first, second) in [(".0", ".[0]"), (".[0]", ".0"), (".1", ".[1]")] {
+        let text = format!(
+            "bad(element Type, values (element, element)) (element, element):
+    first: values{first}
+    second: values{second}
+    return (first, second)
+"
+        );
+        assert_eq!(
+            check("bad.repeat", &text, &[]).unwrap_err(),
+            SourceCheckError::UseAfterMove
+        );
+    }
+}
+
+#[test]
+fn a_partial_sequence_cannot_be_used_whole_and_unmoved_children_cannot_disappear() {
+    let partial = "
+bad(element Type, values (element, element)) (element, element):
+    first: values.0
+    return values
+";
+    assert_eq!(
+        check("bad.partial", partial, &[]).unwrap_err(),
+        SourceCheckError::UseAfterMove
+    );
+    let lost = "bad(element Type, values (element, element)) element: return values.[0]\n";
+    assert_eq!(
+        check("bad.lost", lost, &[]).unwrap_err(),
+        SourceCheckError::Unconsumed
+    );
+}
+
+#[test]
+fn positional_bounds_and_call_arity_are_not_inferred_by_flattening() {
+    for text in [
+        "bad(element Type, values (element, element)) element: return values.2\n",
+        "bad(element Type, values (element, element)) element: return values.[2]\n",
+    ] {
+        assert_eq!(
+            check("bad.bounds", text, &[]).unwrap_err(),
+            SourceCheckError::Type
+        );
+    }
+    let library = library();
+    let wrong_call = "
+use library.sequences swap
+Marker has
+bad(first Marker, second Marker) (Marker, Marker):
+    return swap(Marker, first, second)
+";
+    assert_eq!(
+        check("bad.call", wrong_call, &[&library]).unwrap_err(),
+        SourceCheckError::Type
+    );
+}
+
+#[test]
+fn empty_sequence_is_unit_but_a_singleton_unit_sequence_is_not() {
+    let text = "
+accept(value ()) (): return value
+run: return accept(())
+";
+    check("app.unit", text, &[]).unwrap();
+    for text in [
+        "accept(value ()) (): return value\nbad: return accept()\n",
+        "bad (): return ((),)\n",
+    ] {
+        assert_eq!(
+            check("bad.unit", text, &[]).unwrap_err(),
+            SourceCheckError::Type
+        );
+    }
+}
+
+#[test]
+fn the_two_projection_forms_also_agree_on_existing_fixed_arrays() {
+    let text = "
+swap(element Type, values [element; 2]) [element; 2]:
+    first: values.0
+    second: values.[1]
+    return [second, first]
+";
+    check("app.arrays", text, &[]).unwrap();
+    let repeat = text.replace("values.[1]", "values.[0]");
+    assert_eq!(
+        check("bad.arrays", &repeat, &[]).unwrap_err(),
+        SourceCheckError::UseAfterMove
+    );
+}
+
+#[test]
+fn nested_owned_sequences_use_explicit_local_intermediates() {
+    let text = "
+rebuild(element Type, values ((element, element), element)) ((element, element), element):
+    pair: values.0
+    other: values.[1]
+    first: pair.0
+    second: pair.[1]
+    return ((first, second), other)
+";
+    check("app.nested", text, &[]).unwrap();
+    let chain = "
+bad(element Type, values ((element,),)) element:
+    return values.0.0
+";
+    assert_eq!(
+        check("bad.nested_base", chain, &[]).unwrap_err(),
+        SourceCheckError::Unsupported
+    );
+}
+
+#[test]
+fn an_unknown_owned_position_is_not_guessed_from_a_bounded_interval() {
+    let text = "
+bad(element Type, values (element, element), index in 0 to 1) element:
+    return values.[index]
+";
+    assert_eq!(
+        check("bad.unknown", text, &[]).unwrap_err(),
+        SourceCheckError::Unsupported
+    );
+}
+
+#[test]
+fn bracket_arrays_and_parenthesized_sequences_are_distinct_types() {
+    for text in [
+        concat!(
+            "bad(element Type, first element, second element) (element, element):\n",
+            "    return [first, second]\n",
         ),
-        format!(
-            "{}Factory has\n    get() first Byte, Byte: return 1, 2\nmain: Factory.get().1\n",
-            test_fixtures::preludes::BYTE_PRELUDE
-        ),
-        format!(
-            "{}get() [Byte; 2]: return 1, 2\nmain: get().0\n",
-            test_fixtures::preludes::BYTE_PRELUDE
-        ),
-        format!(
-            "{}get() first Byte, second Byte: return 1, 2\nmain: get().second\n",
-            test_fixtures::preludes::BYTE_PRELUDE
-        ),
-        format!(
-            "{}get() Byte, Byte: return 1, 2\nmain: get().0\n",
-            test_fixtures::preludes::BYTE_PRELUDE
-        ),
-        format!(
-            "{}get() first Byte, Byte: return 1, 2\nmain: get().1\n",
-            test_fixtures::preludes::BYTE_PRELUDE
-        ),
-        format!(
-            "{}get() first Byte, second Byte: return [first: 1, second: 2]\nmain: get().first\n",
-            test_fixtures::preludes::BYTE_PRELUDE
-        ),
-        format!(
-            "{}get() values [Byte; 2], count Byte: return [1, 2], 2\nmain: get().values.0\n",
-            test_fixtures::preludes::BYTE_PRELUDE
+        concat!(
+            "bad(element Type, first element, second element) [element; 2]:\n",
+            "    return (first, second)\n",
         ),
     ] {
-        let typed = check(&source);
-        assert!(
-            flaw_codes(&typed).is_empty(),
-            "{source}: {:?}",
-            typed.all_flaws()
+        assert_eq!(
+            check("bad.distinct", text, &[]).unwrap_err(),
+            SourceCheckError::Type
         );
     }
 }
 
 #[test]
-fn sequence_context_checks_names_types_arity_and_indices() {
-    for (source, code) in [
-        (
-            format!(
-                "{}get() first Byte, second Byte: return [second: 1, first: 2]\n",
-                test_fixtures::preludes::BYTE_PRELUDE
-            ),
-            "type-sequence-name-mismatch",
+fn unit_does_not_dispose_of_owned_or_scalar_containers() {
+    for text in [
+        "Marker has\nbad:\n    value: (Marker,)\n    return ()\n",
+        "bad:\n    pair: (1, 2)\n    first: pair.0\n    again: pair.[0]\n    return ()\n",
+    ] {
+        assert_eq!(
+            check("bad.ending", text, &[]).unwrap_err(),
+            SourceCheckError::Unconsumed
+        );
+    }
+}
+
+#[test]
+fn generic_unpacking_explicitly_consumes_the_whole_container() {
+    let library = library();
+    let text = "
+use library.sequences take_one
+run: return take_one((), ((),))
+";
+    check("app.explicit_unpack", text, &[&library]).unwrap();
+}
+
+#[test]
+fn private_grouped_sequence_fields_follow_the_same_checked_boundary() {
+    let text = "
+Secret(element) has
+    #private
+    value (element, element)
+make(element Type, first element, second element) Secret(element):
+    return Secret(value: (first, second))
+take(element Type, secret Secret(element)) (element, element):
+    Secret(value) := secret
+    return value
+";
+    let library = check("library.private_sequences", text, &[]).unwrap();
+    let imports = "use library.private_sequences Secret, make, take\nMarker has\n";
+    let allowed = format!(
+        "{imports}
+roundtrip(first Marker, second Marker) (Marker, Marker):
+    secret: make(Marker, first, second)
+    return take(Marker, secret)
+"
+    );
+    check("app.allowed", &allowed, &[&library]).unwrap();
+    for body in [
+        concat!(
+            "bad(first Marker, second Marker) Secret(Marker):\n",
+            "    return Secret(value: (first, second))\n",
         ),
-        (
-            format!(
-                "{}get() first Byte, second Byte: return [1]\n",
-                test_fixtures::preludes::BYTE_PRELUDE
-            ),
-            "type-sequence-arity",
-        ),
-        (
-            format!(
-                "{}Flag is On or Off\nget() first Byte, second Byte: return [1, On]\n",
-                test_fixtures::preludes::BYTE_PRELUDE
-            ),
-            "type-sequence-element-mismatch",
-        ),
-        (
-            "values: x: 1, y: 2\nmain: values.2\n".to_string(),
-            "type-sequence-index-out-of-bounds",
-        ),
-        (
-            "values: x: 1, y: 2\nmain: values.missing\n".to_string(),
-            "type-unknown-field",
-        ),
-        (
-            "Index is in 0 to 1\nFlag is On or Off\nmain(index Index): return [1, On].[index]\n"
-                .to_string(),
-            "type-sequence-dynamic-index",
+        concat!(
+            "bad(first Marker, second Marker) (Marker, Marker):\n",
+            "    secret: make(Marker, first, second)\n",
+            "    Secret(value) := secret\n",
+            "    return value\n",
         ),
     ] {
-        let typed = check(&source);
-        assert!(
-            flaw_codes(&typed).iter().any(|found| found == code),
-            "{source}: {:?}",
-            typed.all_flaws()
+        assert_eq!(
+            check("app.private", &format!("{imports}{body}"), &[&library]).unwrap_err(),
+            SourceCheckError::Privacy
         );
     }
 }
 
-#[test]
-fn named_sequences_can_be_passed_stored_and_forwarded() {
-    let typed = check(&format!(
-        "{}get() first Byte, second Byte: return 1, 2\nidentity(value [first Byte, second Byte]) [first Byte, second Byte]: return value\nforward() first Byte, second Byte: return identity(get())\nmain:\n    saved: forward()\n    return saved.second\n",
-        test_fixtures::preludes::BYTE_PRELUDE
-    ));
-    assert!(flaw_codes(&typed).is_empty(), "{:?}", typed.all_flaws());
+fn returned_expression(source: &mut SourceFile) -> &mut Expression {
+    let Item::Binding(binding) = &mut source.items.last_mut().unwrap().value else {
+        panic!("function binding");
+    };
+    let Expr::Block(block) = &mut binding.value.as_mut().unwrap().expression.value else {
+        panic!("return block");
+    };
+    let Statement::Return(returned) = &mut block.statements[0].value else {
+        panic!("return statement");
+    };
+    returned.value.as_mut().expect("return value")
 }
 
 #[test]
-fn explicit_singleton_and_empty_sequences_remain_sequences() {
-    for (source, length) in [("values: [1]\n", 1), ("values: []\n", 0)] {
-        let typed = check(source);
-        assert!(
-            flaw_codes(&typed).is_empty(),
-            "{source}: {:?}",
-            typed.all_flaws()
-        );
-        match &typed.exprs.ty[body(&typed, "values").as_usize()] {
-            Ty::Sequence(fields) => assert_eq!(fields.len(), length),
-            Ty::Array { size, .. } => assert_eq!(size.as_const_int(), Some(length as i128)),
-            other => panic!("{other:?}"),
-        }
-    }
-}
+fn manual_asts_cannot_erase_or_reclassify_written_sequence_elements() {
+    let mut erased = parser::parse_strict("f: return (1, 2)\n").unwrap();
+    let Expr::Sequence(sequence) = &mut returned_expression(&mut erased).value else {
+        panic!("sequence");
+    };
+    sequence.elements.clear();
+    sequence.separators.clear();
+    assert_eq!(
+        check_file(&erased, Limits::default()),
+        Err(SourceCheckError::Malformed)
+    );
 
-#[test]
-fn constant_sequence_projection_preserves_names_positions_and_nesting() {
-    for (source, expected) in [
-        ("main: [x: 10, y: 20].x\n", 10),
-        ("main: [x: 10, y: 20].1\n", 20),
-        ("main: [[x: 10, y: 20], [x: 30, y: 40]].1.y\n", 40),
-        ("main: [10, 20].0\n", 10),
-    ] {
-        let typed = check(source);
-        assert!(
-            flaw_codes(&typed).is_empty(),
-            "{source}: {:?}",
-            typed.all_flaws()
-        );
-        let value = typecheck::staging::normalize(
-            &typed,
-            body(&typed, "main"),
-            &typecheck::subst::DepSubst::new(),
-        );
-        assert!(
-            matches!(value, typecheck::staging::NormalizeResult::Value(ast::ConstValue::Int(value)) if value == i256::I256::from(expected)),
-            "{source}: {value:?}"
-        );
-    }
-}
+    let mut grouped =
+        parser::parse_strict("Marker has\nf Marker: return (Marker,)\n").unwrap();
+    let returned = returned_expression(&mut grouped);
+    let Expr::Sequence(sequence) = &returned.value else {
+        panic!("singleton sequence");
+    };
+    returned.value = Expr::Group(Box::new(sequence.elements[0].clone()));
+    assert_eq!(
+        check_file(&grouped, Limits::default()),
+        Err(SourceCheckError::Malformed)
+    );
 
-#[test]
-fn named_single_reference_results_preserve_their_target_group() {
-    let typed = check(&format!(
-        "{}get(value ref{{a}} Byte) selected ref{{a}} Byte: return value\nforward(value ref{{a}} Byte) selected ref{{a}} Byte: return get(value)\n",
-        test_fixtures::preludes::BYTE_PRELUDE
-    ));
-    assert!(flaw_codes(&typed).is_empty(), "{:?}", typed.all_flaws());
+    let mut reordered = parser::parse_strict("f() ((), ()): return ((), ())\n").unwrap();
+    let Expr::Sequence(sequence) = &mut returned_expression(&mut reordered).value else {
+        panic!("sequence");
+    };
+    sequence.elements.swap(0, 1);
+    assert_eq!(
+        check_file(&reordered, Limits::default()),
+        Err(SourceCheckError::Malformed)
+    );
 }

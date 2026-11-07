@@ -1,0 +1,13 @@
+noop: return
+
+divide(value in 0 to 100, divisor in 0 to 10):
+    when divisor = 0 then return 0 else noop
+    return value / divisor
+
+signed(value in -100 to 100, divisor in -10 to 10):
+    when divisor = 0 then return 0 else noop
+    return value % divisor
+
+select(value in -10 to 10):
+    when value <= 0 then return 0 else noop
+    return value

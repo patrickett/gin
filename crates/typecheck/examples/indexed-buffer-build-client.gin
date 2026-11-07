@@ -1,0 +1,12 @@
+use example.build BuildResult, FinishResult, build, finish
+use example.lifecycle Token, Ended
+
+failed(first in 1 to 16, second in 1 to 16) FinishResult:
+    Failed(partial, proposal) := build(Token(number: first), Token(number: second), 0)
+    Aborted(ended, proposal_number) := finish(Failed(buffer: partial, proposal))
+    return Aborted(ended, proposal_number)
+
+succeeded(first in 1 to 16, second in 1 to 16) Ended:
+    Built(complete) := build(Token(number: first), Token(number: second), 1)
+    Finished(ended) := finish(Built(buffer: complete))
+    return ended

@@ -1,0 +1,22 @@
+#unrestricted
+Small is in 0 to 9
+#unrestricted
+Stack has
+    n in 0 to 100
+    top in 0 to 9
+    count(self ref) in 0 to 100: return self.n
+    pop(self mut and self.n > 0) in 0 to 9 where self.n :: self.n - 1:
+        self.n :: self.n - 1
+        return self.top
+drain(s Stack) in 0 to 100:
+    rest: s
+    total in 0 to 100: 0
+    while rest.count > 0 do
+        got: rest.pop
+        when total < 99 then
+            total :: total + 1
+    return total
+#entry
+start() in 0 to 100:
+    s: Stack(n: 5, top: 2)
+    return drain(s)

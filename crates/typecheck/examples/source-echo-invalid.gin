@@ -1,0 +1,2 @@
+echo(value in 0 to 16) out in 0 to 16 where out >= value:
+    return 0

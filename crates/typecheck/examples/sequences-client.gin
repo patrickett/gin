@@ -1,0 +1,13 @@
+use library.sequences from_values, swap, pack, unpack
+
+Scalar has number in 0 to 16
+
+observe(first in 0 to 16, second in 0 to 16) in 0 to 16 and = second:
+    values: from_values(Scalar, Scalar(number: first), Scalar(number: second))
+    held: pack(Scalar, values)
+    exchanged: swap(Scalar, unpack(Scalar, held))
+    left: exchanged.0
+    right: exchanged.[1]
+    Scalar(left_number) := left
+    Scalar(right_number) := right
+    return left_number

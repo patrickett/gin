@@ -1,0 +1,5 @@
+-- ui: compile-fail
+Box has n in 0 to 9
+f(b mut Box):
+  b +: 1
+  return

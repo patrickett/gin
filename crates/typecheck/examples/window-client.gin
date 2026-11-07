@@ -1,0 +1,6 @@
+use demo.window Window, make_window, rebuild_window, take_window
+
+roundtrip(item Type, value item, lo in 0 to 16, hi in 0 to 16 and >= lo) item:
+    window: make_window(item, value, lo, hi)
+    rebuilt: rebuild_window(item, window)
+    return take_window(item, rebuilt)

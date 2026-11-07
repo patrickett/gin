@@ -1,0 +1,20 @@
+[package]
+name = "interpreter"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Runs the new checker's recorded bodies directly: a fast feedback loop that needs no MLIR or lli"
+
+[lints]
+workspace = true
+
+[dependencies]
+i256 = { workspace = true }
+package = { path = "../package" }
+parser = { workspace = true }
+thiserror = { workspace = true }
+typecheck = { package = "typecheck", path = "../typecheck" }
+
+[dev-dependencies]
+ast = { workspace = true }
+tempfile = "3"

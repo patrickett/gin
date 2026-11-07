@@ -1,376 +1,196 @@
-use std::collections::{HashMap, HashSet};
+//! Reading a source text as the declarations it is made of, so a session can replace one by
+//! name, and finding which declaration (and which parameters) a byte offset belongs to.
 
-use crate::runtime::{GenerationId, runtime_symbol_name};
-use ast::ParamConvention;
-use derive_more::From;
+use ast::{Binding, Expr, Item, SourceFile, Statement, TypeBody, TypeMember};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, From)]
-pub struct SymbolSlot(u64);
-
-#[derive(Default)]
-pub struct SessionSource {
-    declarations: Vec<SessionDeclaration>,
-    declarations_text: String,
-    runtime_declarations: HashMap<String, RuntimeDeclaration>,
-    next_slot: u64,
-    symbol_slots: HashMap<String, SymbolSlot>,
+/// One parameter as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParamInfo {
+    pub name: String,
+    pub convention: Option<String>,
+    /// The annotation text as written (`in 0 to 9`, `Point`), or `None` for an unannotated one.
+    pub ty: Option<String>,
 }
 
-#[derive(Clone)]
-struct SessionDeclaration {
-    source: String,
-    names: Vec<String>,
-    parts: Vec<parser::SourceDeclaration>,
+/// A local bound before some point of a function body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalInfo {
+    pub name: String,
+    pub ty: Option<String>,
 }
 
-impl SessionDeclaration {
-    fn new(source: String, names: Vec<String>) -> Self {
-        let parts = parser::source_declarations(&source);
-        Self {
-            source,
-            names,
-            parts,
-        }
-    }
+/// One top-level declaration: its leading `#entry`/`#unrestricted`/... marker lines included.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decl {
+    /// `function`, `binding`, `type`, `import`.
+    pub kind: &'static str,
+    pub name: String,
+    /// What a later declaration must equal to replace this one.
+    pub key: String,
+    pub start: usize,
+    pub end: usize,
+    pub params: Vec<ParamInfo>,
+    /// The result annotation as written.
+    pub result: Option<String>,
+    /// The `where` clause as written, and further result alternatives.
+    pub contract: Option<String>,
+    pub alternatives: Vec<String>,
+    /// Methods of a `has` block, by byte range.
+    pub members: Vec<Member>,
+    /// The statements of the body, for locals.
+    pub locals: Vec<(usize, LocalInfo)>,
+}
 
-    fn append_without_shadowed(&self, output: &mut String, shadowed: &HashSet<&str>) {
-        let mut cursor = 0;
-        for part in &self.parts {
-            if !can_replace(part, shadowed) {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Member {
+    pub name: String,
+    pub start: usize,
+    pub end: usize,
+    pub params: Vec<ParamInfo>,
+    pub result: Option<String>,
+    pub contract: Option<String>,
+    pub alternatives: Vec<String>,
+    pub locals: Vec<(usize, LocalInfo)>,
+}
+
+/// A parsed submission.
+pub enum Split {
+    Empty,
+    Declarations(Vec<(Decl, String)>),
+    /// A single expression, as written.
+    Expression(String),
+}
+
+fn text<'a>(file: &'a SourceFile, id: ast::SpanId) -> &'a str {
+    let span = file.span_table.get(id);
+    file.text.get(span.start()..span.end()).unwrap_or("")
+}
+
+fn params(file: &SourceFile, binding: &Binding) -> Vec<ParamInfo> {
+    let Some(list) = &binding.parameters else { return Vec::new() };
+    list.value
+        .iter()
+        .map(|p| ParamInfo {
+            name: p.value.name.value.clone(),
+            convention: p.value.convention.as_ref().map(|c| text(file, c.span_id).trim().to_owned()),
+            ty: p.value.annotation.as_ref().map(|a| text(file, a.span_id).trim().to_owned()),
+        })
+        .collect()
+}
+
+fn locals(file: &SourceFile, binding: &Binding) -> Vec<(usize, LocalInfo)> {
+    let Some(value) = &binding.value else { return Vec::new() };
+    let Expr::Block(block) = &value.expression.value else { return Vec::new() };
+    block
+        .statements
+        .iter()
+        .filter_map(|statement| match &statement.value {
+            Statement::Binding(local) if local.parameters.is_none() => {
+                let end = file.span_table.get(statement.span_id).end();
+                Some((
+                    end,
+                    LocalInfo {
+                        name: local.name.value.clone(),
+                        ty: local.annotation.as_ref().map(|a| text(file, a.span_id).trim().to_owned()),
+                    },
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The declarations of `file`, in order, each with the markers that precede it.
+pub fn declarations(file: &SourceFile) -> Vec<Decl> {
+    let mut out = Vec::new();
+    let mut marker: Option<usize> = None;
+    for item in &file.items {
+        let span = file.span_table.get(item.span_id);
+        let (start, end) = (span.start(), span.end());
+        let decl = |kind, name: String, key: String, binding: Option<&Binding>| Decl {
+            kind,
+            name,
+            key,
+            start: marker.unwrap_or(start),
+            end,
+            params: binding.map(|b| params(file, b)).unwrap_or_default(),
+            result: binding.and_then(|b| b.annotation.as_ref().map(|a| text(file, a.span_id).trim().to_owned())),
+            contract: binding.and_then(|b| b.contract.as_ref().map(|c| text(file, c.span_id).trim().to_owned())),
+            alternatives: binding.map(|b| b.alternatives.iter().map(|a| text(file, a.span_id).trim().to_owned()).collect()).unwrap_or_default(),
+            members: Vec::new(),
+            locals: binding.map(|b| locals(file, b)).unwrap_or_default(),
+        };
+        match &item.value {
+            Item::Private | Item::Entry | Item::Load | Item::Store | Item::Wrap | Item::Unrestricted | Item::Instruction { .. } => {
+                marker.get_or_insert(start);
                 continue;
             }
-            assert!(cursor <= part.range.start && part.range.end <= self.source.len());
-            output.push_str(&self.source[cursor..part.range.start]);
-            cursor = part.range.end;
-        }
-        output.push_str(&self.source[cursor..]);
-    }
-
-    fn remove_shadowed(&mut self, shadowed: &HashSet<&str>) {
-        let removed: HashSet<_> = self
-            .parts
-            .iter()
-            .filter(|part| can_replace(part, shadowed))
-            .flat_map(|part| part.names.iter().map(String::as_str))
-            .collect();
-        if removed.is_empty() {
-            return;
-        }
-        let mut retained = String::with_capacity(self.source.len());
-        self.append_without_shadowed(&mut retained, shadowed);
-        self.names.retain(|name| !removed.contains(name.as_str()));
-        self.parts = parser::source_declarations(&retained);
-        self.source = retained;
-    }
-}
-
-fn can_replace(part: &parser::SourceDeclaration, shadowed: &HashSet<&str>) -> bool {
-    part.owner
-        .as_ref()
-        .is_some_and(|owner| shadowed.contains(owner.as_str()))
-        || (!part.names.is_empty()
-            && part
-                .names
-                .iter()
-                .all(|name| shadowed.contains(name.as_str())))
-}
-
-#[derive(Debug)]
-pub struct GeneratedEvaluation {
-    source: String,
-    symbol: String,
-    expression: String,
-    expression_range: std::ops::Range<usize>,
-}
-
-#[derive(Debug, Clone)]
-pub struct RuntimeDeclaration {
-    pub(crate) name: String,
-    signature: String,
-    param_names: Vec<String>,
-    param_conventions: Vec<ParamConvention>,
-    is_constant: bool,
-}
-
-impl RuntimeDeclaration {
-    pub fn new(
-        name: String,
-        signature: String,
-        param_names: Vec<String>,
-        param_conventions: Vec<ParamConvention>,
-        is_constant: bool,
-    ) -> Self {
-        Self {
-            name,
-            signature,
-            param_names,
-            param_conventions,
-            is_constant,
-        }
-    }
-
-    fn declaration_source(&self, generation_symbol: &str, forward_to: &str) -> String {
-        let suffix = self
-            .signature
-            .strip_prefix(self.name.as_str())
-            .unwrap_or("")
-            .to_string();
-        let mut declaration = String::new();
-        declaration.push_str(generation_symbol);
-        declaration.push_str(&suffix);
-
-        if self.is_constant {
-            declaration.push_str(" := ");
-            declaration.push_str(forward_to);
-            declaration.push('\n');
-            return declaration;
-        }
-
-        let locals = String::new();
-        let mut args = Vec::new();
-        for (index, name) in self.param_names.iter().enumerate() {
-            let convention = self
-                .param_conventions
-                .get(index)
-                .copied()
-                .unwrap_or(ParamConvention::Terminal);
-            match convention {
-                ParamConvention::Own
-                | ParamConvention::Terminal
-                | ParamConvention::Observe
-                | ParamConvention::Mutate => {
-                    args.push(name.to_string());
-                }
-            }
-        }
-
-        declaration.push_str(": ");
-        if locals.is_empty() {
-            declaration.push_str(forward_to);
-            if args.is_empty() {
-                declaration.push('\n');
-            } else {
-                declaration.push('(');
-                declaration.push_str(&args.join(", "));
-                declaration.push_str(")\n");
-            }
-            return declaration;
-        }
-
-        declaration.push('\n');
-        declaration.push_str(&locals);
-        declaration.push_str("    ");
-        declaration.push_str("return ");
-        declaration.push_str(forward_to);
-        declaration.push('(');
-        declaration.push_str(&args.join(", "));
-        declaration.push_str(")\n");
-        declaration
-    }
-}
-
-impl SessionSource {
-    pub fn declarations(&self) -> &str {
-        &self.declarations_text
-    }
-
-    pub fn symbol_slot(&self, symbol: &str) -> Option<SymbolSlot> {
-        self.symbol_slots.get(symbol).copied()
-    }
-
-    pub fn candidate(&self, submission: &str) -> String {
-        let mut candidate =
-            String::with_capacity(self.declarations_text.len() + submission.len() + 1);
-        candidate.push_str(&self.declarations_text);
-        candidate.push_str(submission);
-        candidate.push('\n');
-        candidate
-    }
-
-    pub fn candidate_without_shadowed(
-        &self,
-        submission: &str,
-        declaration_names: &[String],
-    ) -> String {
-        if declaration_names.is_empty() {
-            return self.candidate(submission);
-        }
-
-        let shadowed: HashSet<&str> = declaration_names.iter().map(|name| name.as_str()).collect();
-        let mut candidate =
-            String::with_capacity(self.declarations_text.len() + submission.len() + 1);
-        for declaration in &self.declarations {
-            declaration.append_without_shadowed(&mut candidate, &shadowed);
-        }
-        candidate.push_str(submission);
-        candidate.push('\n');
-        candidate
-    }
-
-    pub(crate) fn replacement_conflict(&self, declaration_names: &[String]) -> Option<String> {
-        let shadowed: HashSet<&str> = declaration_names.iter().map(String::as_str).collect();
-        self.declarations.iter().flat_map(|declaration| &declaration.parts).find_map(|part| {
-            let replaced = part.names.iter().find(|name| shadowed.contains(name.as_str()))?;
-            if can_replace(part, &shadowed) {
-                return None;
-            }
-            Some(match &part.owner {
-                Some(owner) => format!(
-                    "`{replaced}` belongs to `{owner}`; resubmit the type and its methods together"
-                ),
-                None => format!(
-                    "`{replaced}` shares an import with {}; resubmit the complete import",
-                    part.names.join(", ")
-                ),
-            })
-        })
-    }
-
-    pub fn accept_declaration(&mut self, submission: &str, declaration_names: Vec<String>) {
-        self.accept_declaration_with_dispatches(submission, declaration_names, Vec::new())
-    }
-
-    pub fn accept_declaration_with_dispatches(
-        &mut self,
-        submission: &str,
-        declaration_names: Vec<String>,
-        runtime_declarations: Vec<RuntimeDeclaration>,
-    ) {
-        let declaration_names = dedupe_names(declaration_names);
-        let shadowed: HashSet<&str> = declaration_names.iter().map(|name| name.as_str()).collect();
-        for name in &declaration_names {
-            self.symbol_slots.entry(name.clone()).or_insert_with(|| {
-                let slot = SymbolSlot(self.next_slot);
-                self.next_slot += 1;
-                slot
-            });
-        }
-
-        for declaration in &mut self.declarations {
-            declaration.remove_shadowed(&shadowed);
-        }
-        self.declarations
-            .retain(|declaration| !declaration.source.is_empty());
-        for name in &declaration_names {
-            self.runtime_declarations.remove(name);
-        }
-
-        self.declarations.push(SessionDeclaration::new(
-            format!("{submission}\n"),
-            declaration_names,
-        ));
-
-        for declaration in runtime_declarations {
-            self.runtime_declarations
-                .insert(declaration.name.clone(), declaration);
-        }
-
-        let mut declarations = String::new();
-        for declaration in &self.declarations {
-            declarations.push_str(&declaration.source);
-        }
-        self.declarations_text = declarations;
-    }
-
-    pub fn clear(&mut self) {
-        self.declarations.clear();
-        self.declarations_text.clear();
-        self.runtime_declarations.clear();
-        self.symbol_slots.clear();
-        self.next_slot = 0;
-    }
-
-    pub fn evaluation_candidate_with_dispatches(
-        &self,
-        submission: &str,
-        generation: u64,
-        generations: &HashMap<String, GenerationId>,
-    ) -> GeneratedEvaluation {
-        let symbol = format!("__gin_interpreter_eval_{generation}");
-        let runtime_dispatches = self.runtime_dispatch_source(generations);
-        let prefix = format!("{symbol}: ");
-        let expression_start =
-            self.declarations_text.len() + runtime_dispatches.len() + prefix.len();
-        let mut source = String::with_capacity(expression_start + submission.len() + 1);
-        source.push_str(&self.declarations_text);
-        source.push_str(&runtime_dispatches);
-        source.push_str(&prefix);
-        source.push_str(submission);
-        source.push('\n');
-        GeneratedEvaluation::new(
-            source,
-            symbol,
-            submission.to_string(),
-            expression_start..expression_start + submission.len(),
-        )
-    }
-
-    pub(crate) fn runtime_dispatch_source(
-        &self,
-        generations: &HashMap<String, GenerationId>,
-    ) -> String {
-        let mut source = String::new();
-        let mut emitted = HashSet::new();
-
-        for declaration in &self.declarations {
-            for name in &declaration.names {
-                if !emitted.insert(name.clone()) {
-                    continue;
-                }
-
-                let Some(generation) = generations.get(name) else {
-                    continue;
+            Item::Binding(binding) => {
+                let name = binding.name.value.clone();
+                let (kind, key) = match &binding.parameters {
+                    Some(list) => ("function", format!("fn {name}/{}", list.value.len())),
+                    None => ("binding", format!("let {name}")),
                 };
-                let Some(declaration) = self.runtime_declarations.get(name) else {
-                    continue;
-                };
-                let runtime_symbol = runtime_symbol_name(name, *generation);
-
-                source.push_str(&declaration.declaration_source(&runtime_symbol, name));
+                out.push(decl(kind, name, key, Some(binding)));
             }
+            Item::Type(declaration) => {
+                let name = declaration.name.value.clone();
+                let key = match &declaration.body.value {
+                    TypeBody::Has(_) => {
+                        let header = file.text[start..end].lines().next().unwrap_or("").trim();
+                        format!("has {header}")
+                    }
+                    _ => format!("type {name}"),
+                };
+                let mut d = decl("type", name.clone(), key, None);
+                if let TypeBody::Has(members) = &declaration.body.value {
+                    for member in members {
+                        if let TypeMember::Binding(b) = &member.value {
+                            let span = file.span_table.get(member.span_id);
+                            d.members.push(Member {
+                                name: format!("{name}.{}", b.name.value),
+                                start: span.start(),
+                                end: span.end(),
+                                params: params(file, b),
+                                result: b.annotation.as_ref().map(|a| text(file, a.span_id).trim().to_owned()),
+                                contract: b.contract.as_ref().map(|c| text(file, c.span_id).trim().to_owned()),
+                                alternatives: b.alternatives.iter().map(|a| text(file, a.span_id).trim().to_owned()).collect(),
+                                locals: locals(file, b),
+                            });
+                        }
+                    }
+                }
+                out.push(d);
+            }
+            Item::Import(_) => {
+                let key = format!("import {}", file.text[start..end].trim());
+                out.push(decl("import", key.clone(), key, None));
+            }
+            Item::Expression(_) | Item::Error => {}
         }
-
-        source
+        marker = None;
     }
+    out
 }
 
-impl GeneratedEvaluation {
-    pub(crate) fn new(
-        source: String,
-        symbol: String,
-        expression: String,
-        expression_range: std::ops::Range<usize>,
-    ) -> Self {
-        Self {
-            source,
-            symbol,
-            expression,
-            expression_range,
+/// Split a submission into declarations, or recognise one expression.
+pub fn split(source: &str) -> Result<Split, Vec<diagnostic::Diagnostic>> {
+    if source.trim().is_empty() {
+        return Ok(Split::Empty);
+    }
+    let file = parser::parse_strict(source)?;
+    let expressions = file.items.iter().filter(|i| matches!(i.value, Item::Expression(_))).count();
+    if expressions > 0 {
+        if file.items.len() == 1 {
+            return Ok(Split::Expression(source.trim().to_owned()));
         }
+        return Err(vec![diagnostic::Diagnostic::new(
+            diagnostic::code::SourceCheckCode::Unsupported,
+            "a submission is either declarations or one expression, not both",
+        )]);
     }
-
-    pub fn source(&self) -> &str {
-        &self.source
-    }
-
-    pub fn symbol(&self) -> &str {
-        &self.symbol
-    }
-
-    pub fn expression(&self) -> &str {
-        &self.expression
-    }
-
-    pub fn expression_range(&self) -> std::ops::Range<usize> {
-        self.expression_range.clone()
-    }
+    let decls = declarations(&file);
+    Ok(Split::Declarations(
+        decls.into_iter().map(|d| { let t = source[d.start..d.end].to_owned(); (d, t) }).collect(),
+    ))
 }
-
-fn dedupe_names(mut declaration_names: Vec<String>) -> Vec<String> {
-    declaration_names.sort();
-    declaration_names.dedup();
-    declaration_names
-}
-#[cfg(test)]
-#[path = "tests/source_tests.rs"]
-mod tests;

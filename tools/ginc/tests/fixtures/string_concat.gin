@@ -1,0 +1,35 @@
+use core.io write
+use core.string String
+use core.collection ListFailure
+use core.alloc GlobalAllocator
+use core.slice Byte
+use core.span max_slots
+use core.ops Release
+
+emit(text ref String(GlobalAllocator)):
+    write(text.as_bytes)
+    return
+
+join(a ref String(GlobalAllocator), b ref String(GlobalAllocator) and a.length + b.length <= max_slots):
+    both: a.concat(b, GlobalAllocator())
+    when both is Made(held) then
+        emit(held)
+        held.release
+        return
+    Failed(failure) := both
+    failure.release
+    return
+
+#entry
+main:
+    attempt: String.with_capacity(GlobalAllocator, 4, GlobalAllocator())
+    when attempt is Made(held) then
+        held.push(104 as Byte)
+        held.push(105 as Byte)
+        held.push(10 as Byte)
+        join(held, held)
+        held.release
+        return
+    Failed(failure) := attempt
+    failure.release
+    return

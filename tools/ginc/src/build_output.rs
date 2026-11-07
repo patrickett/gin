@@ -1,8 +1,97 @@
 use crate::cli::Args;
-use crate::compile::{CompileFailure, CompileResult};
+use crate::compile::CompileResult;
 use flask::FlaskConfig;
 use std::io::{IsTerminal, Write};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+pub(crate) struct CompilationTimings {
+    enabled: bool,
+    total_start: std::time::Instant,
+    phases: Vec<(&'static str, std::time::Duration)>,
+    json_path: Option<PathBuf>,
+    pub(crate) object_cache_hit: Option<bool>,
+}
+
+impl CompilationTimings {
+    pub(crate) fn new(enabled: bool, json_path: Option<PathBuf>) -> Self {
+        Self {
+            enabled,
+            total_start: std::time::Instant::now(),
+            phases: Vec::new(),
+            json_path,
+            object_cache_hit: None,
+        }
+    }
+
+    pub(crate) fn enabled() -> bool {
+        crate::compile::env_flag_enabled("GINC_TIMINGS")
+    }
+
+    pub(crate) fn run<T>(&mut self, name: &'static str, action: impl FnOnce() -> T) -> T {
+        let phase = match name {
+            "discover-sources" => compiler_profile::Phase::Discover,
+            "read-sources" => compiler_profile::Phase::Read,
+            "parse" => compiler_profile::Phase::Parse,
+            "front-end" => compiler_profile::Phase::FrontEnd,
+            "typecheck-diagnostics" => compiler_profile::Phase::Diagnostics,
+            "mlir-lowering" => compiler_profile::Phase::Mlir,
+            "artifact-key" | "toolchain-identity" => compiler_profile::Phase::ArtifactKey,
+            "object-cache-lookup" => compiler_profile::Phase::ObjectCache,
+            "linking" | "link" => compiler_profile::Phase::Linking,
+            "load" => compiler_profile::Phase::Read,
+            "check" => compiler_profile::Phase::FrontEnd,
+            "lower" => compiler_profile::Phase::Mlir,
+            "object" => compiler_profile::Phase::NativeEmission,
+            _ => compiler_profile::Phase::Other,
+        };
+        let _profile = compiler_profile::span(phase);
+        if !self.enabled && self.json_path.is_none() {
+            return action();
+        }
+        let start = std::time::Instant::now();
+        let value = action();
+        if self.enabled || self.json_path.is_some() {
+            self.phases.push((name, start.elapsed()));
+        }
+        value
+    }
+
+    fn report(&self) {
+        let elapsed = self.total_start.elapsed();
+        if let Some(path) = &self.json_path {
+            let phases: Vec<_> = self.phases.iter().map(|(name, duration)| {
+                serde_json::json!({"name": name, "seconds": duration.as_secs_f64()})
+            }).collect();
+            let report = serde_json::json!({
+                "schema_version": 1,
+                "total_seconds": elapsed.as_secs_f64(),
+                "object_cache_hit": self.object_cache_hit,
+                "phases": phases,
+            });
+            if let Err(error) = std::fs::write(path, report.to_string()) {
+                eprintln!("could not write timings to {}: {error}", path.display());
+            }
+        }
+        if !self.enabled {
+            return;
+        }
+
+        crate::build_output::timings(&self.phases, elapsed, self.object_cache_hit);
+    }
+
+    pub(crate) fn record(&mut self, name: &'static str, duration: std::time::Duration) {
+        if self.enabled || self.json_path.is_some() {
+            self.phases.push((name, duration));
+        }
+    }
+}
+
+impl Drop for CompilationTimings {
+    fn drop(&mut self) {
+        self.report();
+    }
+}
 
 pub(crate) struct BuildOutput {
     start: Instant,
@@ -27,13 +116,7 @@ impl BuildOutput {
     }
 
     pub(crate) fn finish(self, result: &CompileResult, args: &Args) {
-        if let CompileResult::Failed(error) = result {
-            eprintln!("error: {error}");
-            if let CompileFailure::EmissionFailed { diagnostics, .. } = error
-                && diagnostics.is_empty()
-            {
-                eprintln!("error: no diagnostics were produced");
-            }
+        if let CompileResult::Failed(_) = result {
             if !self.quiet {
                 status(
                     "Failed",

@@ -2,29 +2,31 @@
 name = "ginlsp"
 version = "0.1.0"
 edition = "2024"
+publish = false
+description = "Language server for Gin on the new frontend: parser, the source checker, package and the ginterpreter session layer"
 
 [lints]
 workspace = true
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "ginlsp"
+
+[[bin]]
+name = "ginlsp"
+path = "src/main.rs"
 
 [dependencies]
-tower-lsp = "0.20"
-serde_json = { workspace = true }
-tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "io-std", "sync", "time"] }
-dashmap = { workspace = true }
-flask = { workspace = true }
-ginfmt = { workspace = true }
-analysis = { workspace = true }
-ast = { workspace = true }
 diagnostic = { workspace = true }
-typecheck = { workspace = true }
+flask = { workspace = true }
+ginterpreter = { path = "../ginterpreter" }
+ginfmt = { workspace = true }
+interpreter = { path = "../../crates/interpreter" }
+lsp-types = { workspace = true }
+package = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ast = { workspace = true }
 parser = { workspace = true }
-resolve = { workspace = true }
-crossbeam-channel = { workspace = true }
-futures = "0.3"
 
 [dev-dependencies]
-span = { workspace = true }
-internment = "0.8"
-test-fixtures = { workspace = true }
+tempfile = "3"

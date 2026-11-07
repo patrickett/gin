@@ -13,4 +13,4 @@ path = "editors/tree-sitter-gin"
 
 [language_servers.ginlsp]
 name = "Gin Language Server"
-languages = ["Gin", "JSON"]
+languages = ["Gin"]

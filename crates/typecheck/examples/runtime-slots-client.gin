@@ -1,0 +1,10 @@
+use example.slots TakeResult, Slot
+use example.slots take_slot, fill_slot, pack_slot, unpack_slot
+
+roundtrip(element Type, slot Slot(element)) Slot(element):
+    holder: pack_slot(element, slot)
+    restored: unpack_slot(element, holder)
+    attempt: take_slot(element, restored)
+    return when attempt is
+        Empty then Empty
+        Taken(value) then fill_slot(element, value)

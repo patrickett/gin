@@ -9,10 +9,11 @@ static ALLOCATOR: compiler_profile::TrackingAllocator<std::alloc::System> =
     compiler_profile::TrackingAllocator(std::alloc::System);
 
 fn main() -> ExitCode {
+    let mut args = Args::parse();
     let Some(path) = std::env::var_os("GIN_PROFILE_JSON") else {
-        return compile();
+        return compile(&mut args);
     };
-    let (result, report) = compiler_profile::capture(compile);
+    let (result, report) = compiler_profile::capture(|| compile(&mut args));
     let write = serde_json::to_vec_pretty(&report)
         .map_err(std::io::Error::other)
         .and_then(|bytes| std::fs::write(&path, bytes));
@@ -23,9 +24,8 @@ fn main() -> ExitCode {
     result
 }
 
-fn compile() -> ExitCode {
-    let mut args = Args::parse();
-    if GinCompiler::compile_cli(&mut args).is_success() {
+fn compile(args: &mut Args) -> ExitCode {
+    if GinCompiler::compile_cli(args).is_success() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

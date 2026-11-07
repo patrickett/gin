@@ -1,0 +1,17 @@
+classify(value in 0 to 10):
+    return when value is
+        0 then 2
+        1 then 8
+        else 11
+
+divide(value in 0 to 100, divisor in 0 to 10):
+    when divisor is
+        0 then return 0
+        1 then return value
+    return value / divisor
+
+guarded(value in 0 to 10):
+    return when value is
+        0 and value = 0 then 2
+        1 and (value = 1 or value = 0) then 8
+        else 11

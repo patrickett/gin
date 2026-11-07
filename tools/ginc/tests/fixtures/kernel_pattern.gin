@@ -1,0 +1,70 @@
+#unrestricted
+Result is in -9223372036854775808 to 9223372036854775807
+#unrestricted
+Size is in 0 to 18446744073709551615
+#unrestricted
+Address is in 0 to 18446744073709551615
+
+DarwinIn has
+    #register('x9')
+    pointer Address
+    #register('x10')
+    size Size
+    #register('x11')
+    fd Result
+
+#unrestricted
+DarwinOut has
+    #register('x0')
+    value Result
+    #register('x1')
+    clobbered_0 Result
+    #register('x2')
+    clobbered_1 Result
+    #register('x16')
+    clobbered_2 Result
+    #register('nzcv')
+    clobbered_3 Result
+
+#instruction('.byte 224, 3, 11, 170, 225, 3, 9, 170, 226, 3, 10, 170, 112, 0, 128, 210, 1, 16, 0, 212, 0, 52, 128, 218')
+read_darwin(input Type, output Type, inputs input) output
+
+#instruction('.byte 224, 3, 11, 170, 225, 3, 9, 170, 226, 3, 10, 170, 144, 0, 128, 210, 1, 16, 0, 212, 0, 52, 128, 218')
+write_darwin(input Type, output Type, inputs input) output
+
+X86In has
+    #register('rsi')
+    pointer Address
+    #register('rdx')
+    size Size
+    #register('rdi')
+    fd Result
+
+#unrestricted
+X86Out has
+    #register('rax')
+    value Result
+    #register('rcx')
+    clobbered_0 Result
+    #register('r11')
+    clobbered_1 Result
+    #register('flags')
+    clobbered_2 Result
+
+#instruction('.byte 72, 199, 192, 0, 0, 0, 0, 15, 5')
+read_x86(input Type, output Type, inputs input) output
+
+#instruction('.byte 72, 199, 192, 1, 0, 0, 0, 15, 5')
+write_x86(input Type, output Type, inputs input) output
+
+receive(fd Result, pointer Address, size Size) Result:
+    return when #target.triple is
+        'aarch64-apple-darwin' then read_darwin(DarwinIn, DarwinOut, DarwinIn(pointer: pointer, size: size, fd: fd)).value
+        'x86_64-unknown-linux-gnu' then read_x86(X86In, X86Out, X86In(pointer: pointer, size: size, fd: fd)).value
+        else 0
+
+send(fd Result, pointer Address, size Size) Result:
+    return when #target.triple is
+        'aarch64-apple-darwin' then write_darwin(DarwinIn, DarwinOut, DarwinIn(pointer: pointer, size: size, fd: fd)).value
+        'x86_64-unknown-linux-gnu' then write_x86(X86In, X86Out, X86In(pointer: pointer, size: size, fd: fd)).value
+        else 0

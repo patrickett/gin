@@ -1,0 +1,9 @@
+-- Same result shape, but only arbitrary descriptive input values are available.
+Buffer has
+    #private
+    base in 0 to 65535
+    #private
+    bytes in 1 to 64
+
+forge(base in 0 to 65535, bytes in 1 to 64) Buffer:
+    return Buffer(base: base, bytes: bytes)

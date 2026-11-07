@@ -18,8 +18,8 @@ target: "{}"
     )
     .unwrap();
     std::fs::write(
-        dir.path().join("lib.gin"),
-        "Word is in 0 to 255\nWord.finish(self): return\nidentity(a Word) Word: return a\n",
+        dir.path().join("application.gin"),
+        "#entry\nstart() in 0 to 255: return 0\n",
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_begin"))
@@ -40,11 +40,12 @@ target: "{}"
         "release [optimized]",
         "Artifact",
         "Timings",
-        "front-end",
+        "check",
     ] {
         assert!(stderr.contains(expected), "missing {expected}: {stderr}");
     }
     assert!(!stderr.contains('\u{1b}'));
+    assert!(dir.path().join("target/release/fixture").is_file());
     for quiet in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_begin"));
         command
@@ -61,6 +62,36 @@ target: "{}"
         assert!(output.stdout.is_empty());
         assert!(!stderr.contains("Timings"));
         assert_eq!(stderr.contains("Finished"), !quiet);
+    }
+}
+
+#[test]
+fn build_executes_new_entry_at_package_profile_output() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("mod.flask"),
+        format!(
+            "#settings\nmodule: 'app'\nversion: 1.0.0\ntarget: '{}'\n",
+            test_fixtures::host_target_triple()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("main.gin"),
+        "#entry\nstart() in 0 to 255: return 17\n",
+    )
+    .unwrap();
+    for (flags, profile) in [(&[][..], "debug"), (&["--release"][..], "release")] {
+        let output = Command::new(env!("CARGO_BIN_EXE_begin"))
+            .current_dir(dir.path())
+            .arg("build")
+            .args(flags)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let executable = dir.path().join("target").join(profile).join("app");
+        assert!(executable.is_file(), "{}", executable.display());
+        assert_eq!(Command::new(executable).status().unwrap().code(), Some(17));
     }
 }
 
@@ -99,6 +130,6 @@ version: 0.1.0
         .unwrap();
     assert!(!invalid.status.success());
     let stderr = String::from_utf8_lossy(&invalid.stderr);
-    assert!(stderr.contains("error:"));
+    assert!(stderr.contains("parse-"), "{stderr}");
     assert!(!stderr.contains("Finished"));
 }

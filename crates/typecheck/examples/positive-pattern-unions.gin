@@ -1,0 +1,14 @@
+literal(value in 0 to 10):
+    return when value is
+        1 or 2 then 7 / value
+        else 0
+
+signed_members(value in -10 to 10):
+    return when value is
+        in -3 to -2 or in 2 to 3 then value
+        else 0
+
+guarded(value in 0 to 10):
+    return when value is
+        1 or 2 and 7 % value = 0 then value
+        else 0

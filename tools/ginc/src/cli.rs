@@ -1,72 +1,102 @@
 use clap::{Parser, ValueEnum};
-pub use codegen::emit::Profile;
-use std::collections::HashMap;
-
 use std::path::PathBuf;
+
+pub use backend::Profile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum Emit {
-    /// Produce a native executable (default)
+    /// Build an executable when the selected module has an entry; otherwise check only.
     #[default]
+    Auto,
+    /// Produce a native executable.
     Exe,
-    /// Produce an object file only
+    /// Produce one object file per module in an output directory.
     Obj,
-    /// Print MLIR text to stdout
+    /// Emit MLIR text.
     Mlir,
-    /// Emit the resolved public interface artifact.
+    /// Emit the checked package interface.
     Interface,
+    /// Check without emission.
+    Check,
 }
 
 #[derive(Parser, Debug, Default)]
 #[command(version, about)]
 pub struct Args {
+    /// A package directory, module directory, or Gin source file.
     pub input: PathBuf,
-
-    /// Write output to <OUTPUT>
+    #[arg(long, value_enum, default_value = "auto")]
+    pub emit: Emit,
     #[arg(short, long)]
     pub output: Option<PathBuf>,
-
-    /// Target triple for cross-compilation
-    // TODO: add a better struct for this
+    /// Target triple; defaults to the package target or host.
     #[arg(long)]
     pub target: Option<String>,
-
-    /// What to emit
-    #[arg(long, default_value = "exe")]
-    pub emit: Emit,
-
-    /// Build profile
     #[arg(long, default_value = "debug")]
     pub profile: Profile,
-
-    /// Disable the compilation cache
+    #[arg(long, value_enum, default_value = "human")]
+    pub message_format: crate::reporting::MessageFormat,
+    /// Maximum errors to display; omitted errors still cause failure.
+    #[arg(long)]
+    pub max_errors: Option<usize>,
+    #[arg(long, value_enum, default_value = "own")]
+    pub warnings: crate::reporting::WarningScope,
+    /// Disable artifact reuse. Has no effect when no cache is available.
     #[arg(long)]
     pub no_cache: bool,
-
-    #[arg(skip)]
-    pub gin_home: Option<flask::GinHome>,
-
-    /// Print per-phase compilation timings.
-    ///
-    /// Also enabled when `GINC_TIMINGS` is set to `1`, `true`, or `on`.
+    /// Print per-phase timings, also enabled by GINC_TIMINGS.
     #[arg(long)]
     pub timings: bool,
-
-    /// Write compilation durations and object-cache outcome as JSON, suppressing build status.
+    /// Write JSON timings and suppress build status.
     #[arg(long)]
     pub timings_json: Option<PathBuf>,
-
-    /// Suppress build status messages; diagnostics and requested timings remain visible.
+    /// Suppress build status, but retain diagnostics and requested timings.
     #[arg(short, long)]
     pub quiet: bool,
-
-    /// Use a faster LLVM/MLIR path for development builds (disable MLIR optimize pipeline,
-    /// compile LLVM IR with `-O0`).
+    /// Skip MLIR optimization and compile LLVM IR with -O0.
     #[arg(long)]
     pub fast_llvm: bool,
+}
 
-    /// Resolved dependency paths: name → directory. Populated by `begin build` from mod.flask.
-    /// Not a CLI argument — set programmatically.
-    #[arg(skip)]
-    pub dependencies: HashMap<String, PathBuf>,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::reporting::MessageFormat;
+
+    #[test]
+    fn ordinary_commands_select_the_compiler_without_a_stack_flag() {
+        let args = Args::try_parse_from(["ginc", "package"]).unwrap();
+        assert_eq!(args.emit, Emit::Auto);
+        assert_eq!(args.profile, Profile::Debug);
+        assert!(args.output.is_none());
+    }
+
+    #[test]
+    fn all_emission_modes_accept_diagnostic_options() {
+        for mode in ["auto", "exe", "obj", "mlir", "check", "interface"] {
+            let args = Args::try_parse_from([
+                "ginc",
+                "package",
+                "--emit",
+                mode,
+                "--message-format=json",
+                "--max-errors=2",
+                "--warnings=deps",
+            ])
+            .unwrap();
+            assert_eq!(args.message_format, MessageFormat::Json);
+            assert_eq!(args.max_errors, Some(2));
+        }
+    }
+
+    #[test]
+    fn removed_stack_selection_flags_are_not_accepted() {
+        for arguments in [
+            vec!["ginc", "package", "--check-new"],
+            vec!["ginc", "package", "--emit-new", "exe"],
+            vec!["ginc", "package", "--legacy"],
+        ] {
+            assert!(Args::try_parse_from(arguments).is_err());
+        }
+    }
 }

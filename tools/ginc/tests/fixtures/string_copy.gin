@@ -1,0 +1,34 @@
+use core.io write
+use core.string String
+use core.collection ListFailure
+use core.alloc GlobalAllocator
+use core.slice Byte
+use core.ops Release
+
+emit(text ref String(GlobalAllocator)):
+    write(text.as_bytes)
+    return
+
+show_copy(text ref String(GlobalAllocator)):
+    copied: text.copy(GlobalAllocator())
+    when copied is Made(held) then
+        emit(held)
+        held.release
+        return
+    Failed(failure) := copied
+    failure.release
+    return
+
+#entry
+main:
+    attempt: String.with_capacity(GlobalAllocator, 4, GlobalAllocator())
+    when attempt is Made(held) then
+        held.push(104 as Byte)
+        held.push(105 as Byte)
+        held.push(10 as Byte)
+        show_copy(held)
+        held.release
+        return
+    Failed(failure) := attempt
+    failure.release
+    return

@@ -167,13 +167,14 @@ impl Diagnostic {
     /// The message should be a self-contained description. Use [`with_arg`](Self::with_arg)
     /// to attach structured data for IDE quickfix extraction.
     pub fn new(code: impl Into<DiagnosticCode>, message: impl Into<String>) -> Self {
+        let code = code.into();
         Self {
-            code: code.into(),
+            category: code::Code::category(&code),
+            code,
             message: message.into(),
             help_on_span: None,
             help: None,
             span: Span::new(0, 0),
-            category: Category::Flaw,
             details: None,
         }
     }

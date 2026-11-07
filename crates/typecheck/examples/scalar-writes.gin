@@ -1,0 +1,19 @@
+Small is in 0 to 255
+
+Small has
+    finish(self): return
+
+set_to_seven(value mut Small):
+    value:: 7
+    return
+
+update(value own Small) Small:
+    set_to_seven(value)
+    return value
+
+run:
+    original Small: 42
+    value: update(original)
+    set_to_seven(value)
+    value.finish
+    return

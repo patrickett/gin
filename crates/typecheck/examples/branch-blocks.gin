@@ -1,0 +1,15 @@
+Small is in 0 to 255
+Small has finish(self): return
+
+choose(flag in 0 to 1) Small:
+    return when flag = 0 then
+        adjusted: 20 + 2
+        adjusted
+    else
+        adjusted: 40 + 2
+        adjusted
+
+run(flag in 0 to 1):
+    value: choose(flag)
+    value.finish
+    return

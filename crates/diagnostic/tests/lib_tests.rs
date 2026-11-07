@@ -123,3 +123,46 @@ fn legacy_codes_without_prefixes_have_no_leading_separator() {
     assert_eq!(code.to_string(), "sum-payload-arity-mismatch");
     assert_eq!(DiagnosticCode::UnfilledHole.to_string(), "unfilled-hole");
 }
+
+mod category_from_code {
+    use diagnostic::code::{Code, LexCode, SourceCheckCode};
+    use diagnostic::{Category, Diagnostic, DiagnosticCode};
+
+    #[test]
+    fn a_code_decides_its_default_category() {
+        let warn = Diagnostic::new(SourceCheckCode::RedundantTerminal, "redundant");
+        assert_eq!(warn.category, Category::Warn);
+        let flaw = Diagnostic::new(SourceCheckCode::Type, "mismatch");
+        assert_eq!(flaw.category, Category::Flaw);
+    }
+
+    #[test]
+    fn a_producer_may_still_override_the_category() {
+        let help = Diagnostic::new(SourceCheckCode::RedundantTerminal, "redundant")
+            .with_category(Category::Help);
+        assert_eq!(help.category, Category::Help);
+    }
+
+    #[test]
+    fn stages_without_a_warning_code_stay_flaws() {
+        let lex = Diagnostic::new(LexCode::all().next().unwrap(), "lex");
+        assert_eq!(lex.category, Category::Flaw);
+    }
+
+    #[test]
+    fn only_the_codes_that_say_so_are_not_flaws() {
+        let warnings: Vec<_> = DiagnosticCode::all()
+            .filter(|code| code.category() != Category::Flaw)
+            .map(DiagnosticCode::slug)
+            .collect();
+        assert_eq!(
+            warnings,
+            [
+                "source-check-redundant-terminal",
+                "source-check-unreachable-code",
+                "source-check-hole"
+            ]
+        );
+        let _ = SourceCheckCode::RedundantTerminal.name();
+    }
+}

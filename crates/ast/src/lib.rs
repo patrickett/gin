@@ -1,109 +1,90 @@
-//! AST type definitions for the Gin compiler — parse-level types only.
+//! Source syntax for Gin, without resolution, evaluation, or staging state.
 //!
-//! Typed AST types live alongside analysis/typecheck logic in `typecheck`.
+//! Its compiler dependency is `span`; the parser constructs these source occurrences
+//! and semantic consumers interpret them without adding inferred facts to the tree.
+//!
+//! # Representation rules
+//!
+//! - Lists retain source order and duplicate occurrences.
+//! - [`Spanned<T>`] locates syntax in this file's [`SpanTable`]. A [`SpanId`] is
+//!   source provenance, not node identity or a key for semantic facts.
+//! - Names, explicit calls, and named arguments have different representations.
+//! - Annotations retain written header roles, never resolved types.
+//! - Literal values are not decoded or evaluated; their spelling is in the source.
+//! - Grouping and explicit returns survive; there is no desugaring here.
+//! - Recovery is explicit: missing expressions have zero-width spans; rejected
+//!   source uses error items/statements, never a semantic placeholder.
+//!
+//! The structs are deliberately ordinary owned Rust data. Producers (including
+//! the `parser` crate) are responsible for valid, UTF-8-aligned
+//! spans, enclosing child spans, and source order. Construction does not
+//! currently validate those invariants.
 
-pub mod expr;
-pub mod warnings;
+mod annotation;
+mod collection;
+mod domain;
+mod expr;
+mod import;
+mod item;
+mod query;
+mod type_prefix;
+
+use std::sync::Arc;
+
+pub use annotation::Annotation;
+pub use collection::{
+    ArrayExpression, ArrayLength, LoopExpression, LoopInvariant, NumericSelectExpression, RepeatExpression,
+    SelectExpression, SequenceDelimiters, SequenceExpression,
+};
+pub use domain::{DomainBase, Refinement, RefinementPredicate, TypeDomain};
 pub use expr::{
-    AttributeItem, BinOp, Binary, Bind, BindAttributes, BindOperator, BindValue,
-    BundleExportImport, COMPILER_QUERY_NAMES, CallSyntax, Complexity, ComplexityExpr, Condition,
-    Expr, FnCall, ForInLoop, FormatPart, FormatString, IfExpr, Import, ImportSource, Literal,
-    LocalBundleImport, Loop, LoopEnum, ModuleImport, NamedResult, OperatorRole,
-    PayloadPostcondition, Range, Return, SequenceElement, SequenceLiteral, TagCall, Typed, WhenArm,
-    WhenExpr, WhileLoop,
+    Argument, AssignStatement, BinaryOperator, Block, ChainArm, ChainExpression, ClauseItem, ConditionalExpression, Contract,
+    DestructureStatement,
+    ElseBranch, Expr, Expression, Guard, IsTest, LiteralKind, MatchArm, MatchExpression, MatchPattern, PatternFields,
+    ReturnStatement, Statement, Transition, UnaryOperator, VariantPattern,
+    WhenIsStatement, WhenStatement,
 };
-
-mod definitions;
-pub use definitions::{DefinitionId, OverloadGroups};
-mod file_ast;
-pub use file_ast::{DefMap, FileAst, SymbolAlias, TagMap};
-
-mod import_alias;
-
-mod module_qualify;
-
-pub mod ty_state;
-pub use ty_state::TyState;
-
-pub mod group_path;
-pub use group_path::GroupPath;
-
-pub mod parameter;
-pub use parameter::{GroupParam, ParamConvention, ParamSlot, Parameter, ParameterKind, Parameters};
-
-pub mod type_decl;
-pub use type_decl::TypeNameExt;
-
-pub mod normal_expr;
-pub use normal_expr::{
-    BinderId, BinderOwner, DependentArgId, NormalExpr, TargetQueryKind, TypeReference,
+pub use import::{Import, ImportEntry, ImportMember, ImportSource};
+pub use item::{
+    Binding, BindingConvention, BindingOperator, BindingValue, Convention, FieldAttribute, Item,
+    ExtraResult, Parameter, ResultAlternative, TypeBody, TypeDeclaration, TypeMember,
 };
-
-pub mod query;
-pub use query::QueryKind;
-
-pub mod integer;
-
-pub mod const_value;
-pub use const_value::ConstValue;
-
-pub mod folder;
-
-pub mod hash_float;
-pub use hash_float::HashFloat;
-
-pub mod type_expr;
-pub use type_expr::{InRangeBounds, TypeExpr};
-
-pub mod source;
-pub use source::{CharExt, LineStartsExt, SourceExt};
-
-pub mod path;
-pub use path::ModPath;
-
-pub mod variant;
-pub use variant::Variant;
-
-pub mod doc_comment;
-pub use doc_comment::DocComment;
-
-pub mod declare;
-pub use declare::{
-    Declare, DeclareAttributes, DeclareValue, FixedArrayContract, HasFunction, HasFunctionKind,
-    HasMember, HasMemberBody, HasProperty, ProvidedTrait,
+pub use query::{
+    AnnotationKeyword, CollectionPunctuation, Declaration, DeclarationKind, DomainKeyword,
+    GroupDelimiter, LoopKeyword, NodeAtOffset, SyntaxNode, SyntaxNodeKind,
 };
+pub use span::{Span, SpanId, SpanTable, Spanned};
+pub use type_prefix::{GroupPath, ParameterConvention, PrefixedType, TypePrefixKind};
 
-pub mod pattern;
-pub use pattern::{Pattern, PatternNameExt};
+/// An identifier's spelling and its own source location, without a resolved target.
+pub type Name = Spanned<String>;
 
-pub mod span;
-pub use span::{HasSpanId, Span, SpanId, SpanTable, Spanned, SubSpan};
+/// A source snapshot and the syntax occurrences represented in it.
+///
+/// `items` is not a symbol table. Repeated declarations, overloads, and type
+/// extensions remain separate occurrences. `private` remains a source marker.
+///
+/// The original text retains all whitespace and comments, but this is not a
+/// lossless CST: there is no token tree, printer, or edit operation yet. Syntax
+/// spans and the comment inventory refer to this exact, unmodified snapshot.
+///
+/// Cloning shares the text, but clones the tree and span table. There is no
+/// copy-on-write tree or stable identity across snapshots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceFile {
+    pub text: Arc<str>,
+    pub span_table: SpanTable,
+    pub items: Vec<Spanned<Item>>,
+    /// All comments, including docs, in source order; no attachment heuristics.
+    pub comments: Vec<Spanned<CommentKind>>,
+}
 
-pub mod ty;
-pub use ty::{
-    ParamKind, PredicateExpr, ProofProposition, ProofRelation, ProofTerm, ResultAlternative,
-    ResultFamilyOwner, Ty, TyArg, UnionVariant, VariantLookupResult, VariantMap, VariantMapEntry,
-};
-
-pub mod range_bounds;
-pub use range_bounds::InclusiveBounds;
-
-pub mod hover_format;
-pub use hover_format::{HoverDoc, HoverSection, SECTION_SEP};
-
-pub mod prelude {
-    pub use crate::declare::*;
-    pub use crate::doc_comment::*;
-    pub use crate::expr::*;
-    pub use crate::file_ast::*;
-    pub use crate::folder::*;
-
-    pub use crate::parameter::*;
-    pub use crate::path::*;
-    pub use crate::pattern::*;
-    pub use crate::source::{CharExt, LineStartsExt, SourceExt};
-    pub use crate::span::*;
-    pub use crate::type_expr::*;
-    pub use crate::variant::*;
-    pub use internment::Intern;
+/// Comment spelling comes from its span, including the comment introducer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentKind {
+    Ordinary,
+    /// `---`
+    Documentation,
+    /// `--|`
+    ModuleDocumentation,
 }

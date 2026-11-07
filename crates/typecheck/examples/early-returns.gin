@@ -1,0 +1,27 @@
+Small is in 0 to 255
+Small has finish(self): return
+noop: return
+
+choose(flag in 0 to 1) Small:
+    when flag = 0 then
+        adjusted: 20 + 2
+        return adjusted
+    else
+        noop
+    return 42
+
+numbers(flag in 0 to 1) Small: when flag = 0 then return 2 else return 8
+
+end(flag in 0 to 1, value own Small):
+    when flag = 0 then
+        value.finish
+        return
+    else
+        noop
+    value.finish
+    return
+
+run(flag in 0 to 1):
+    value: choose(flag)
+    end(0, value)
+    return

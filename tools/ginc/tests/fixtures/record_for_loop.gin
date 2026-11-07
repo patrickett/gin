@@ -1,0 +1,17 @@
+#unrestricted
+Stack has
+    n in 0 to 100
+    top in 0 to 9
+    pop(self mut and self.n > 0) in 0 to 9 where self.n :: self.n - 1:
+        self.n :: self.n - 1
+        return self.top
+    count(self ref) in 0 to 100: return self.n
+drain(s Stack and s.count = 5, k in 0 to 4) in 0 to 100:
+    rest: s
+    for i in 0 to 4 where rest.count + i = 5 do
+        got: rest.pop
+    return rest.count
+#entry
+start() in 0 to 100:
+    s: Stack(n: 5, top: 2)
+    return drain(s, 3)

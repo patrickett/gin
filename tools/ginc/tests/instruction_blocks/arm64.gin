@@ -1,0 +1,77 @@
+#unrestricted
+#wrap
+Word is in 0 to 18446744073709551615
+
+-- what a C call may destroy on arm64 macOS: x18 is reserved, x19-x28 are preserved
+#unrestricted
+CallerSaved has
+    #register('x0')
+    result Word
+    #register('x1')
+    x1 Word
+    #register('x2')
+    x2 Word
+    #register('x3')
+    x3 Word
+    #register('x4')
+    x4 Word
+    #register('x5')
+    x5 Word
+    #register('x6')
+    x6 Word
+    #register('x7')
+    x7 Word
+    #register('x8')
+    x8 Word
+    #register('x9')
+    x9 Word
+    #register('x10')
+    x10 Word
+    #register('x11')
+    x11 Word
+    #register('x12')
+    x12 Word
+    #register('x13')
+    x13 Word
+    #register('x14')
+    x14 Word
+    #register('x15')
+    x15 Word
+    #register('x16')
+    x16 Word
+    #register('x17')
+    x17 Word
+    #register('lr')
+    link Word
+
+#unrestricted
+Nothing has
+
+#unrestricted
+One has
+    #register('x0')
+    value Word
+
+#unrestricted
+Two has
+    #register('x1')
+    first Word
+    #register('x2')
+    second Word
+
+#instruction('bl $target')
+branch_link(target, input Type, output Type, inputs input) output
+
+-- write(1, "Hi\n", 3): the message is data in the same block, behind a branch over it. This
+-- assembler takes only a `.`-relative `adr`, so the data is a whole number of words and the
+-- address is that far back from the instruction that takes it.
+#instruction('b . + 8; .ascii "Hi"; .byte 10, 0; adr x1, . - 4; mov w0, #1; mov x2, #3; bl $target')
+write_hello(target, input Type, output Type, inputs input) output
+
+-- printf("%ld %ld\n", first, second): variadic arguments go on the stack
+#instruction('b . + 16; .ascii "%ld %ld"; .byte 10, 0, 0, 0, 0; adr x0, . - 12; sub sp, sp, #16; str x1, [sp]; str x2, [sp, #8]; bl $target; add sp, sp, #16')
+printf_two(target, input Type, output Type, inputs input) output
+
+-- qsort(array of two ints on the stack, 2, 4, callback): the callback is a Gin function
+#instruction('sub sp, sp, #16; mov w1, #2; str w1, [sp]; mov w1, #1; str w1, [sp, #4]; mov x0, sp; mov x1, #2; mov x2, #4; adrp x3, $callback@PAGE; add x3, x3, $callback@PAGEOFF; bl $target; add sp, sp, #16')
+sort_two(target, callback, input Type, output Type, inputs input) output

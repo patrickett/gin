@@ -2,26 +2,13 @@
 name = "parser"
 version = "0.1.0"
 edition = "2024"
+publish = false
+description = "Experimental Gin parser producing the source-only AST"
 
 [lints]
 workspace = true
 
 [dependencies]
-compiler-profile = { workspace = true }
 ast = { workspace = true }
-flask = { workspace = true }
-span = { workspace = true }
 lexer = { workspace = true }
 diagnostic = { workspace = true }
-indexmap = { workspace = true }
-internment = "0.8"
-i256 = { workspace = true }
-
-[dev-dependencies]
-typecheck = { workspace = true }
-criterion = "0.5"
-test-fixtures = { workspace = true }
-
-[[bench]]
-name = "parser_bench"
-harness = false

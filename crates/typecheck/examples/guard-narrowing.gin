@@ -1,0 +1,14 @@
+Small is in 0 to 255
+Small has finish(self): return
+
+divide(value in 0 to 100, divisor in 0 to 10):
+    return when divisor > 0 then value / divisor else 0
+
+signed(value in -100 to 100, divisor in -10 to 10):
+    return when divisor = 0 then 0 else value / divisor
+
+remainder(value in -100 to 100, divisor in -10 to 10):
+    return when divisor = 0 then 0 else value % divisor
+
+select(value in -10 to 10) Small:
+    return when value > 0 then value else 0

@@ -1,0 +1,1 @@
+flaw source-check-overwrite-linear 4:3-5:9 assigning here would drop a linear value; it has to be ended or moved first

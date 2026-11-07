@@ -1,0 +1,7 @@
+use example.buffers reserve, transfer, release
+
+exercise(bytes in 1 to 64):
+    buffer: reserve(bytes)
+    moved: transfer(buffer)
+    release(moved)
+    return

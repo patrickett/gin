@@ -1,0 +1,26 @@
+Small is in 0 to 255
+
+Small has
+    finish(self): return
+
+inspect(value ref Small):
+    return
+
+set_to_seven(value mut Small):
+    value:: 7
+    return
+
+identity(value ref Small): value
+
+forward(value ref Small):
+    alias: identity(value)
+    return alias
+
+run:
+    value Small: 42
+    view: forward(value)
+    alias: view
+    inspect(alias)
+    set_to_seven(value)
+    value.finish
+    return

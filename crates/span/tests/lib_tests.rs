@@ -64,3 +64,63 @@ fn extract_source() {
     );
     assert_eq!(spanned.extract_source(&table, source), "return");
 }
+
+#[test]
+fn file_tables_issue_module_unique_ids_that_name_their_file() {
+    let mut first = SpanTable::for_file(0);
+    let mut second = SpanTable::for_file(2);
+    let a = first.insert(Span::new(1, 2));
+    let b = second.insert(Span::new(3, 4));
+    assert_ne!(a, b);
+    assert_eq!(a.file(), 0);
+    assert_eq!(b.file(), 2);
+    assert_eq!(first.get(a), Span::new(1, 2));
+    assert_eq!(second.get(b), Span::new(3, 4));
+}
+
+#[test]
+fn a_file_table_does_not_resolve_another_files_ids() {
+    let mut first = SpanTable::for_file(0);
+    let mut second = SpanTable::for_file(1);
+    first.insert(Span::new(1, 2));
+    let foreign = second.insert(Span::new(3, 4));
+    assert_eq!(first.get(foreign), Span::new(0, 0));
+    assert_eq!(second.get(first.insert(Span::new(5, 6))), Span::new(0, 0));
+}
+
+#[test]
+fn merge_stays_inside_the_file_table() {
+    let mut table = SpanTable::for_file(3);
+    let a = table.insert(Span::new(1, 2));
+    let b = table.insert(Span::new(5, 9));
+    let merged = table.merge(a, b);
+    assert_eq!(merged.file(), 3);
+    assert_eq!(table.get(merged), Span::new(1, 9));
+}
+
+#[test]
+fn plain_tables_keep_their_unrestricted_ids() {
+    let mut table = SpanTable::new();
+    let id = table.insert(Span::new(0, 1));
+    assert_eq!(id.into_inner(), 0);
+    assert_eq!(table.get(id), Span::new(0, 1));
+}
+
+#[test]
+#[should_panic]
+fn file_index_past_the_limit_is_rejected() {
+    SpanTable::for_file(SpanId::FILES_MAX);
+}
+
+#[test]
+fn a_full_file_table_flags_overflow_instead_of_spilling_into_the_next_file() {
+    let mut table = SpanTable::for_file(0);
+    for _ in 0..SpanId::SPANS_PER_FILE {
+        table.insert(Span::new(0, 0));
+    }
+    assert!(!table.overflowed());
+    let last = table.insert(Span::new(7, 8));
+    assert!(table.overflowed());
+    assert_eq!(last.file(), 0, "an overflowed id still names this file");
+    assert!(last.is_valid());
+}

@@ -1,0 +1,4 @@
+-- ui: check-pass
+echo(value in 0 to 16) in 0 to 16 and >= value:
+  alias := value
+  return alias

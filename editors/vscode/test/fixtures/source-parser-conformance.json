@@ -1,0 +1,32 @@
+[
+  {
+    "name": "binding and integer literal",
+    "source": "answer := 42\n",
+    "accepted": true
+  },
+  {
+    "name": "function with conditional expression",
+    "source": "f(a in 0 to 9) in 0 to 1:\n  return when a < 3 then 1 else 0\n",
+    "accepted": true
+  },
+  {
+    "name": "source-first imports",
+    "source": "use core.string Text as Label, parse\nuse '../café' as module\nThing is Int\n",
+    "accepted": true
+  },
+  {
+    "name": "function postcondition",
+    "source": "reset(x mut in 0 to 9) where x :: 0:\n  x :: 0\n  return\n",
+    "accepted": true
+  },
+  {
+    "name": "incomplete import",
+    "source": "use\n",
+    "accepted": false
+  },
+  {
+    "name": "conditional missing else",
+    "source": "f(a in 0 to 9) in 0 to 1:\n  return when a < 3 then 1\n",
+    "accepted": false
+  }
+]

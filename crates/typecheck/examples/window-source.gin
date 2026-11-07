@@ -1,0 +1,19 @@
+Window(element) has
+    #private
+    payload element
+    #private
+    lower in 0 to 16
+    #private
+    upper in 0 to 16 and >= lower
+
+make_window(element Type, payload element,
+            lower in 0 to 16, upper in 0 to 16 and >= lower) Window(element):
+    return Window(payload: payload, lower: lower, upper: upper)
+
+rebuild_window(element Type, window Window(element)) Window(element):
+    Window(payload, lower, upper) := window
+    return Window(payload: payload, lower: lower, upper: upper)
+
+take_window(element Type, window Window(element)) element:
+    Window(payload, lower, upper) := window
+    return payload

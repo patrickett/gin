@@ -25,7 +25,7 @@ module.exports = grammar({
     global: ($) => [
       "private", "return", "ref", "mut",
       "own", "deref", "then", "to", "thus", "when", "else", "self", "for",
-      "while", "do", "use", "has", "and", "as", "in", "is", "not", "or",
+      "while", "do", "use", "has", "and", "as", "in", "is", "not", "or", "where",
     ],
   },
 
@@ -71,6 +71,8 @@ module.exports = grammar({
     [$.qualified_tag, $._expression],
     [$.tag, $.qualified_tag],
     [$.range_parameter, $._expression],
+    [$.where_clause, $._expression],
+    [$.named_argument, $._expression],
 
   ],
 
@@ -324,11 +326,22 @@ module.exports = grammar({
           field("name", $.identifier),
           optional($.parameters),
           optional(field("return_type", choice($._type_hint, $.named_results))),
+          optional($.where_clause),
           optional($.refinement),
           field("operator", choice(":=", ":", $._rebind_operator)),
           field("value", $._bind_value),
         ),
       ),
+
+    // TODO(header-layout): mirror continued function headers with declaration-aligned `where`
+    // and `:` lines and indented complete clauses. Keep strict-parser conformance tests in sync.
+    where_clause: ($) => seq(
+      "where",
+      sep1(",", choice(
+        seq(field("place", $.identifier), "::", field("value", $._expression)),
+        $._expression,
+      )),
+    ),
 
     method_bind_statement: ($) => seq(
       field("receiver", $.tag),

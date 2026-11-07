@@ -15,6 +15,16 @@ pub enum MessageFormat {
     Json,
 }
 
+/// Whose warnings are reported. Errors are always reported, wherever they are.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum WarningScope {
+    /// Warnings of the package being built only.
+    #[default]
+    Own,
+    /// Also the warnings of its dependencies.
+    Deps,
+}
+
 #[derive(Debug, Default)]
 pub struct CheckOptions {
     pub message_format: MessageFormat,
@@ -23,41 +33,41 @@ pub struct CheckOptions {
 
 pub(crate) struct DiagnosticReporter {
     options: CheckOptions,
-    root: PathBuf,
-    seen: HashSet<(PathBuf, Span, Category, String, String)>,
+    seen: HashSet<(PathBuf, Option<Span>, Category, String, String)>,
     errors: usize,
     warnings: usize,
     omitted: usize,
+    hidden_warnings: usize,
+    in_dependency: bool,
 }
 
 impl DiagnosticReporter {
-    pub(crate) fn new(input: &Path, options: CheckOptions) -> Self {
-        let root = flask::FlaskConfig::find_package_config(input)
-            .map(|(_, root)| root)
-            .unwrap_or_else(|| {
-                if input.is_dir() {
-                    input.to_path_buf()
-                } else {
-                    input.parent().unwrap_or(Path::new(".")).to_path_buf()
-                }
-            })
-            .normalize_diagnostic_path();
+    pub(crate) fn new(options: CheckOptions) -> Self {
         Self {
             options,
-            root,
             seen: HashSet::new(),
             errors: 0,
             warnings: 0,
             omitted: 0,
+            hidden_warnings: 0,
+            in_dependency: false,
         }
+    }
+
+    /// Package loading supplies the origin rather than rediscovering it per diagnostic.
+    pub(crate) fn set_dependency(&mut self, in_dependency: bool) {
+        self.in_dependency = in_dependency;
+    }
+
+    /// Count a warning from a dependency that is not shown.
+    pub(crate) fn hide_warning(&mut self) {
+        self.hidden_warnings += 1;
     }
 
     pub(crate) fn emit(&mut self, path: &Path, source: &str, diagnostics: &[Diagnostic]) -> bool {
         let path = path.normalize_diagnostic_path();
         let filename = path.diagnostic_report_path_from_cwd();
-        let dependency = flask::FlaskConfig::find_package_config(&path)
-            .map(|(_, root)| root.normalize_diagnostic_path() != self.root)
-            .unwrap_or_else(|| !path.starts_with(&self.root));
+        let dependency = self.in_dependency;
         let mut failed = false;
         let mut diagnostics: Vec<_> = diagnostics.iter().collect();
         diagnostics.sort_by(|a, b| {
@@ -70,27 +80,7 @@ impl DiagnosticReporter {
         });
         for d in diagnostics {
             failed |= d.category == Category::Flaw;
-            if !self.seen.insert((
-                path.clone(),
-                d.span,
-                d.category,
-                d.code.to_string(),
-                d.message.clone(),
-            )) {
-                continue;
-            }
-            match d.category {
-                Category::Flaw => self.errors += 1,
-                Category::Warn => self.warnings += 1,
-                Category::Help => {}
-            }
-            if d.category == Category::Flaw
-                && self
-                    .options
-                    .max_errors
-                    .is_some_and(|limit| self.errors > limit)
-            {
-                self.omitted += 1;
+            if !self.record(&path, Some(d.span), d.category, d.code, &d.message) {
                 continue;
             }
             let severity = d.category.as_str();
@@ -139,6 +129,74 @@ impl DiagnosticReporter {
         failed
     }
 
+    fn record(
+        &mut self,
+        path: &Path,
+        span: Option<Span>,
+        category: Category,
+        code: diagnostic::DiagnosticCode,
+        message: &str,
+    ) -> bool {
+        if !self.seen.insert((
+            path.to_path_buf(),
+            span,
+            category,
+            code.to_string(),
+            message.to_owned(),
+        )) {
+            return false;
+        }
+        match category {
+            Category::Flaw => self.errors += 1,
+            Category::Warn => self.warnings += 1,
+            Category::Help => {}
+        }
+        if category == Category::Flaw
+            && self
+                .options
+                .max_errors
+                .is_some_and(|limit| self.errors > limit)
+        {
+            self.omitted += 1;
+            return false;
+        }
+        true
+    }
+
+    /// Report a standalone failure without pretending byte zero is its location.
+    pub(crate) fn emit_unlocated(
+        &mut self,
+        path: &Path,
+        code: diagnostic::DiagnosticCode,
+        message: &str,
+    ) {
+        let path = path.normalize_diagnostic_path();
+        if !self.record(&path, None, Category::Flaw, code, message) {
+            return;
+        }
+        match self.options.message_format {
+            MessageFormat::Json => {
+                println!(
+                    "{}",
+                    unlocated_json(&path, code, message, self.in_dependency)
+                );
+            }
+            MessageFormat::Human | MessageFormat::Short => {
+                let filename = path.diagnostic_report_path_from_cwd();
+                let origin = if self.in_dependency {
+                    " [dependency]"
+                } else {
+                    ""
+                };
+                eprintln!(
+                    "{filename}: flaw[{}]{origin}: {}",
+                    code.slug(),
+                    single_line(message)
+                );
+            }
+        }
+    }
+
     pub(crate) fn failure(&mut self, message: &str) {
         self.errors += 1;
         if self
@@ -155,7 +213,7 @@ impl DiagnosticReporter {
                 json!({"reason": "diagnostic", "severity": "flaw", "code": "check-failed", "file": null, "range": null, "message": message, "help": null, "related": [], "dependency": false})
             );
         } else {
-            eprintln!("begin check: {message}");
+            eprintln!("error: {message}");
         }
     }
 
@@ -163,7 +221,7 @@ impl DiagnosticReporter {
         if self.options.message_format == MessageFormat::Json {
             println!(
                 "{}",
-                json!({"reason": "check-finished", "success": success, "errors": self.errors, "warnings": self.warnings, "omitted_errors": self.omitted})
+                json!({"reason": "check-finished", "success": success, "errors": self.errors, "warnings": self.warnings, "omitted_errors": self.omitted, "hidden_warnings": self.hidden_warnings})
             );
         } else {
             let omitted = if self.omitted == 0 {
@@ -171,8 +229,16 @@ impl DiagnosticReporter {
             } else {
                 format!(" ({} errors omitted)", self.omitted)
             };
+            let hidden = if self.hidden_warnings == 0 {
+                String::new()
+            } else {
+                format!(
+                    " ({} dependency warnings hidden; --warnings deps shows them)",
+                    self.hidden_warnings
+                )
+            };
             eprintln!(
-                "Check {}: {} errors, {} warnings{omitted}",
+                "Check {}: {} errors, {} warnings{omitted}{hidden}",
                 if success { "passed" } else { "failed" },
                 self.errors,
                 self.warnings
@@ -183,6 +249,19 @@ impl DiagnosticReporter {
 
 fn single_line(text: &str) -> String {
     text.replace(['\n', '\r'], " ")
+}
+
+fn unlocated_json(
+    path: &Path,
+    code: diagnostic::DiagnosticCode,
+    message: &str,
+    dependency: bool,
+) -> Value {
+    json!({
+        "reason": "diagnostic", "severity": "flaw", "code": code.slug(),
+        "file": path, "range": null, "message": message,
+        "help": null, "label": null, "related": [], "args": [], "dependency": dependency
+    })
 }
 
 fn range(source: &str, span: Span) -> Value {
@@ -199,13 +278,10 @@ mod tests {
 
     #[test]
     fn duplicate_identity_keeps_distinct_files_spans_and_messages() {
-        let mut reporter = DiagnosticReporter::new(
-            Path::new("/virtual"),
-            CheckOptions {
-                max_errors: Some(0),
-                ..Default::default()
-            },
-        );
+        let mut reporter = DiagnosticReporter::new(CheckOptions {
+            max_errors: Some(0),
+            ..Default::default()
+        });
         let d = Diagnostic::new(SymbolCode::Unknown, "unknown symbol").at_span(Span::new(1, 2));
         assert!(reporter.emit(
             Path::new("/virtual/a.gin"),
@@ -232,5 +308,40 @@ mod tests {
         assert_eq!(range["start"]["column"], 3);
         assert_eq!(range["start"]["line"], 2);
         assert_eq!(range["byte_start"], 6);
+    }
+
+    #[test]
+    fn standalone_unlocated_errors_have_no_fabricated_range() {
+        let code = diagnostic::code::SourceCheckCode::Budget.into();
+        for dependency in [false, true] {
+            let value = unlocated_json(
+                Path::new("/virtual/source.gin"),
+                code,
+                "budget exceeded",
+                dependency,
+            );
+            assert_eq!(value["range"], Value::Null);
+            assert_eq!(value["code"], "source-check-budget");
+            assert_eq!(value["dependency"], dependency);
+        }
+    }
+
+    #[test]
+    fn standalone_unlocated_errors_share_deduplication_and_limits() {
+        let mut reporter = DiagnosticReporter::new(CheckOptions {
+            message_format: MessageFormat::Short,
+            max_errors: Some(0),
+        });
+        let path = Path::new("/virtual/source.gin");
+        let code = diagnostic::code::SourceCheckCode::Budget;
+        reporter.emit_unlocated(path, code.into(), "budget exceeded");
+        reporter.emit_unlocated(path, code.into(), "budget exceeded");
+        reporter.emit(
+            path,
+            "x",
+            &[Diagnostic::new(code, "budget exceeded").at_span(Span::new(0, 0))],
+        );
+        assert_eq!(reporter.errors, 2);
+        assert_eq!(reporter.omitted, 2);
     }
 }

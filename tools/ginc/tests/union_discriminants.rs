@@ -1,69 +1,93 @@
-mod common;
-use common::compile_exe;
-use ginc::cli::Profile;
-use std::io::Write;
-use std::process::{Command, Stdio};
-use test_fixtures::TempPackage;
+//! Union discriminants on the new stack, built for the host and run natively: a text
+//! discriminant read at run time is the active variant's bytes (`modules/log_level_test`), and
+//! an integer one is the variant's tag, usable as an exit status.
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// Build `source` (with `modules/core` as `core`) into an executable.
+fn build(name: &str, source: &str) -> Result<(tempfile::TempDir, PathBuf), String> {
+    let directory = tempfile::tempdir().unwrap();
+    let core = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../modules/core");
+    std::os::unix::fs::symlink(core.canonicalize().unwrap(), directory.path().join("core"))
+        .unwrap();
+    std::fs::write(
+        directory.path().join("mod.flask"),
+        format!("#settings\nmodule: \"{name}\"\nversion: 0.1.0\ntarget: \"aarch64-apple-darwin\"\n\n#dependencies\ncore: \"./core\"\n"),
+    )
+    .unwrap();
+    std::fs::write(directory.path().join("main.gin"), source).unwrap();
+    let program = directory.path().join("program");
+    let built = Command::new(env!("CARGO_BIN_EXE_ginc"))
+        .args(["--emit", "exe", "--output"])
+        .arg(&program)
+        .arg(directory.path())
+        .output()
+        .unwrap();
+    if built.status.success() {
+        Ok((directory, program))
+    } else {
+        Err(String::from_utf8_lossy(&built.stderr).into_owned())
+    }
+}
+
+fn run(program: &Path) -> (String, Option<i32>) {
+    let done = Command::new(program).output().unwrap();
+    (
+        String::from_utf8_lossy(&done.stdout).into_owned(),
+        done.status.code(),
+    )
+}
 
 #[test]
-fn numbered_unions_match_convert_and_store_across_module_boundaries() {
-    let package = TempPackage::new("union_discriminants");
-    package.write_flask("union_discriminants");
-    package.write(
-        "codes/codes.gin",
-        "#bits(16)\nCode is Foo := 300 or Bar := -2 or Baz := 1\n",
-    );
-    let source = r#"use union_discriminants.codes Code
-Word is in -9223372036854775808 to 9223372036854775807
-Word.finish(self):
-    return
-Holder has
-    code Code
-    take(self) Code: return self.code
-runtime_read_int Word: return runtime_number as Word
-runtime_print_int(value Word) Word: return runtime_print(value as RuntimeInt) as Word
-decode(value Word) Code: return when value = 300 then value as Code else Code.Bar
-encode(value Code) Word: return value as Word
-round_trip(value Code) Code: return (value as Word) as Code
-inspect(value Code) Word: return when value is
-    Foo then 30
-    Bar then 20
-    Baz then 10
-#entry
-main Word:
-    runtime_print_int(encode(decode(runtime_read_int)))
-    runtime_print_int(inspect(decode(runtime_read_int)))
-    holder := Holder(code: round_trip(decode(runtime_read_int)))
-    runtime_print_int(encode(holder.take))
-    return 0
-"#;
-    let input_file = package.write("main.gin", &test_fixtures::with_runtime(source));
-    let executable = package.join("union_discriminants");
-    let result = compile_exe(
-        input_file.parent().unwrap().to_path_buf(),
-        &executable.clone(),
-        Profile::Debug,
-    );
-    assert!(result.is_success(), "compilation failed: {result:?}");
-    assert!(!result.has_typecheck_diagnostics(), "{result:?}");
-    for (input, expected) in [
-        ("300\n", "300\n30\n300\n"),
-        ("-2\n", "-2\n20\n-2\n"),
-        ("99\n", "-2\n20\n-2\n"),
+fn log_level_prints_the_text_of_each_level() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../modules/log_level_test");
+    let source = std::fs::read_to_string(root.join("main.gin")).unwrap();
+    let cases: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("cases.json")).unwrap()).unwrap();
+    let (_directory, program) = build("log_level_test", &source).unwrap_or_else(|e| panic!("{e}"));
+    let expected = cases[0]["stdout"].as_str().unwrap();
+    assert_eq!(run(&program), (expected.to_owned(), Some(0)));
+}
+
+const EXIT: &str = "\
+#unrestricted
+ExitCode is Success   = 0
+         or FirstFlaw = 1
+         or SecFlaw   = 7
+
+-- A variant that is only known at run time: the one after `code`.
+next(code ExitCode) ExitCode: when code is
+    Success then ExitCode.FirstFlaw
+    FirstFlaw then ExitCode.SecFlaw
+    SecFlaw then ExitCode.Success
+
+status(code ExitCode) in 0 to 7: return code.value
+";
+
+#[test]
+fn an_integer_value_is_the_exit_status() {
+    for (expression, expected) in [
+        ("ExitCode.Success", 0),
+        ("ExitCode.FirstFlaw", 1),
+        ("ExitCode.SecFlaw", 7),
+        ("next(ExitCode.Success)", 1),
+        ("next(next(ExitCode.Success))", 7),
+        ("next(ExitCode.SecFlaw)", 0),
     ] {
-        let mut child = Command::new(&executable)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .expect("run compiled numbered union");
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.repeat(3).as_bytes())
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+        let source =
+            format!("{EXIT}\n#entry\nmain in 0 to 255:\n    return status({expression})\n");
+        let (_directory, program) =
+            build("exit_code", &source).unwrap_or_else(|e| panic!("{expression}: {e}"));
+        assert_eq!(
+            run(&program),
+            (String::new(), Some(expected)),
+            "{expression}"
+        );
     }
+}
+
+#[test]
+fn a_union_without_values_has_no_value_to_read() {
+    let source = "#unrestricted\nColor is Red or Blue\n\n#entry\nmain in 0 to 255:\n    c: Color.Red\n    return c.value\n";
+    assert!(build("no_value", source).is_err());
 }

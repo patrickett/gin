@@ -157,5 +157,6 @@
 (interpolation "\\(" @punctuation.special ")" @punctuation.special)
 
 "thus" @keyword
+"where" @keyword
 "==" @operator
 "/=" @operator

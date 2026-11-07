@@ -1,0 +1,24 @@
+Small is in 0 to 255
+
+Small has
+    finish(self): return
+
+inspect(value ref Small):
+    return
+
+exclusive(value mut Small):
+    return
+
+forward(value mut Small):
+    inspect(value)
+    exclusive(value)
+    inspect(value)
+    return
+
+run:
+    value Small: 42
+    forward(value)
+    exclusive(value)
+    inspect(value)
+    value.finish
+    return

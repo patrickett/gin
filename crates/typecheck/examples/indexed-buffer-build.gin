@@ -1,0 +1,27 @@
+-- The gate can fail only after the first insertion has succeeded.
+-- Failure returns the partial owner AND the still-uninserted proposal.
+use example.buffers Buffer, empty_buffer, insert_at
+use example.lifecycle Token, Ended, end_token, drain
+
+BuildResult is Built(buffer Buffer(Token)) or Failed(buffer Buffer(Token), proposal Token)
+
+build(first Token, second Token, gate in 0 to 1) BuildResult:
+    empty: empty_buffer(Token)
+    Inserted(partial) := insert_at(Token, empty, 0, first)
+    return when gate is
+        0 then Failed(buffer: partial, proposal: second)
+        1 then
+            Inserted(complete) := insert_at(Token, partial, 1, second)
+            return Built(buffer: complete)
+
+FinishResult is Finished(ended Ended) or Aborted(ended Ended, proposal_number in 1 to 16)
+
+finish(result BuildResult) FinishResult:
+    return when result is
+        Built(buffer) then Finished(ended: drain(buffer))
+        Failed(buffer, proposal) then abort(buffer, proposal)
+
+abort(buffer Buffer(Token), proposal Token) FinishResult:
+    ended: drain(buffer)
+    proposal_number: end_token(proposal)
+    return Aborted(ended, proposal_number)

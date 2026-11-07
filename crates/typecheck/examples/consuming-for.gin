@@ -1,0 +1,23 @@
+-- Consuming iteration over fixed sequences, not bracket-array or while semantics.
+Token has number in 0 to 16
+Element is Empty or Token(Token)
+
+consume(value Token):
+    Token(number) := value
+    return
+
+consume_element(value Element):
+    return when value is
+        Empty then ()
+        Token(token) then consume(token)
+
+drain(values (Element, Element)):
+    for value in values do
+        consume_element(value)
+    return
+
+drain_nested(values ((Token, Token), (Token, Token))):
+    for row in values do
+        for value in row do
+            consume(value)
+    return

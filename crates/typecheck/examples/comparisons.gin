@@ -1,0 +1,7 @@
+same(left in 0 to 100, right in 0 to 100):
+    return left = right
+
+below_limit(value in 0 to 255): value < 100
+
+equal: same(20, 20)
+different: same(20, 22)

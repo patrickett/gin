@@ -1,0 +1,23 @@
+-- Structural fixed arrays of ordinary owned values; no raw allocation semantics.
+Pair(element) has left element, right element
+Holder(element) has values [element; 2]
+
+from_values(element Type, first element, second element) [element; 2]:
+    return [first, second]
+
+swap(element Type, values [element; 2]) [element; 2]:
+    first: values.[0]
+    second: values.[1]
+    return [second, first]
+
+take_both(element Type, values [element; 2]) Pair(element):
+    first: values.[0]
+    second: values.[1]
+    return Pair(left: first, right: second)
+
+pack(element Type, values [element; 2]) Holder(element):
+    return Holder(values)
+
+unpack(element Type, holder Holder(element)) [element; 2]:
+    Holder(values) := holder
+    return values

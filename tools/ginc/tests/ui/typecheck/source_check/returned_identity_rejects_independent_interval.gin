@@ -1,0 +1,3 @@
+-- ui: compile-fail
+echo(value in 0 to 16) in 0 to 16 and >= value:
+  return 0 --~ ERROR source-check-unproved

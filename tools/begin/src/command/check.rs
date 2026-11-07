@@ -1,4 +1,4 @@
-use ginc::cli::Args;
+use ginc::cli::{Args, Emit};
 use ginc::compile::GinCompiler;
 use ginc::reporting::CheckOptions;
 use std::path::Path;
@@ -19,6 +19,7 @@ pub fn begin_check(
     };
     let mut args = Args {
         input,
+        emit: Emit::Check,
         target: target.map(str::to_owned),
         ..Args::default()
     };

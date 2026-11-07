@@ -1,0 +1,24 @@
+[package]
+name = "ginfmt-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lexer = { path = "../../../crates/lexer" }
+parser = { path = "../../../crates/parser" }
+ginfmt = { path = ".." }
+
+[[bin]]
+name = "frontend"
+path = "fuzz_targets/frontend.rs"
+test = false
+doc = false
+bench = false

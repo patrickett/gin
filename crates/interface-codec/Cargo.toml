@@ -1,0 +1,14 @@
+[package]
+name = "interface-codec"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+i256 = { workspace = true }
+minicbor = { version = "2.3.1", features = ["std"] }
+sha2 = { workspace = true }
+thiserror = { workspace = true }

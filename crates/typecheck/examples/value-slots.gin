@@ -1,0 +1,67 @@
+-- Statically known value states, not raw storage or a runtime-tagged sum.
+EmptySlot has
+
+FullSlot(element) has
+    #private
+    value element
+
+Extracted(element, remainder) has
+    value element
+    rest remainder
+
+SlotPair(left_state, right_state) has
+    #private
+    left left_state
+    #private
+    right right_state
+
+empty_slot EmptySlot:
+    return EmptySlot
+
+fill_slot(element Type, slot EmptySlot, value element) FullSlot(element):
+    EmptySlot := slot
+    return FullSlot(value)
+
+take_slot(element Type, slot FullSlot(element)) Extracted(element, EmptySlot):
+    FullSlot(value) := slot
+    return Extracted(value, rest: EmptySlot)
+
+replace_slot(element Type, slot FullSlot(element),
+             next element) Extracted(element, FullSlot(element)):
+    FullSlot(previous) := slot
+    return Extracted(value: previous, rest: FullSlot(value: next))
+
+empty_pair SlotPair(EmptySlot, EmptySlot):
+    return SlotPair(left: EmptySlot, right: EmptySlot)
+
+put_left(element Type, right_state Type,
+         pair SlotPair(EmptySlot, right_state), value element) SlotPair(
+             FullSlot(element), right_state):
+    SlotPair(left, right) := pair
+    return SlotPair(left: fill_slot(element, left, value), right)
+
+put_right(element Type, left_state Type,
+          pair SlotPair(left_state, EmptySlot), value element) SlotPair(
+              left_state, FullSlot(element)):
+    SlotPair(left, right) := pair
+    return SlotPair(left, right: fill_slot(element, right, value))
+
+take_left(element Type, right_state Type,
+          pair SlotPair(FullSlot(element), right_state)) Extracted(
+              element, SlotPair(EmptySlot, right_state)):
+    SlotPair(left, right) := pair
+    Extracted(value, empty) := take_slot(element, left)
+    return Extracted(value, rest: SlotPair(left: empty, right))
+
+take_right(element Type, left_state Type,
+           pair SlotPair(left_state, FullSlot(element))) Extracted(
+               element, SlotPair(left_state, EmptySlot)):
+    SlotPair(left, right) := pair
+    Extracted(value, empty) := take_slot(element, right)
+    return Extracted(value, rest: SlotPair(left, right: empty))
+
+finish_empty_pair(pair SlotPair(EmptySlot, EmptySlot)):
+    SlotPair(left, right) := pair
+    EmptySlot := left
+    EmptySlot := right
+    return

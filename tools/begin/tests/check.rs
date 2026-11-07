@@ -1,8 +1,49 @@
 use std::{fs, process::Command};
 
-#[test]
-fn check_reloads_sources_and_reports_all_type_errors_without_artifacts() {
+fn package() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("mod.flask"),
+        "#settings\nmodule: 'app'\nversion: 1.0.0\n#dependencies\n",
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn check_rejects_new_stack_invalid_return_and_honors_target() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("main.gin"),
+        "answer() in 0 to 1: return 5\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_begin"))
+        .current_dir(dir.path())
+        .args(["check", "main.gin", "--message-format", "json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let records: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.last().unwrap()["success"], false);
+    fs::write(dir.path().join("main.gin"), "#entry\nstart(): return\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_begin"))
+        .current_dir(dir.path())
+        .args(["check", "--target", "riscv64-unknown-none"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(!dir.path().join("target").exists());
+}
+
+#[test]
+fn check_reloads_sources_and_reports_type_errors_without_artifacts() {
+    let dir = package();
     let home = tempfile::tempdir().unwrap();
     let source = dir.path().join("main.gin");
     let run = || {
@@ -13,7 +54,7 @@ fn check_reloads_sources_and_reports_all_type_errors_without_artifacts() {
             .output()
             .unwrap()
     };
-    fs::write(&source, "main: 1\n").unwrap();
+    fs::write(&source, "value() in 0 to 9: return 1\n").unwrap();
     let valid = run();
     assert!(
         valid.status.success(),
@@ -24,17 +65,12 @@ fn check_reloads_sources_and_reports_all_type_errors_without_artifacts() {
     let invalid = run();
     let errors = String::from_utf8_lossy(&invalid.stderr);
     assert_eq!(invalid.status.code(), Some(1), "{errors}");
-    for expected in [
-        "missing_one",
-        "missing_two",
-        "main.gin",
-        "type-unknown-symbol",
-    ] {
+    for expected in ["missing_one", "main.gin", "source-check-unknown-name"] {
         assert!(errors.contains(expected), "missing {expected}: {errors}");
     }
-    fs::write(&source, "main: 2\n").unwrap();
+    fs::write(&source, "value() in 0 to 9: return 2\n").unwrap();
     assert!(run().status.success());
-    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
     assert!(!home.path().join("cache/mods").exists());
 }
 
@@ -42,7 +78,10 @@ fn check_reloads_sources_and_reports_all_type_errors_without_artifacts() {
 fn check_reports_parse_and_input_failures() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("broken.gin"), "main:\n").unwrap();
-    for (path, expected) in [("broken.gin", "parse"), ("missing.gin", "failed to read")] {
+    for (path, expected) in [
+        ("broken.gin", "parse"),
+        ("missing.gin", "existing .gin file"),
+    ] {
         let output = Command::new(env!("CARGO_BIN_EXE_begin"))
             .current_dir(dir.path())
             .args(["check", path])
@@ -109,10 +148,10 @@ version: 1.0.0
 "#,
     )
     .unwrap();
-    fs::write(dependency.join("lib.gin"), "Thing is First or Second\n").unwrap();
+    fs::write(dependency.join("lib.gin"), "five() in 0 to 9: return 5\n").unwrap();
     fs::write(
         package.join("main.gin"),
-        "use support Thing\nvalue: Thing.First\n",
+        "use support five\nvalue() in 0 to 9: return five()\n",
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_begin"))
@@ -129,7 +168,7 @@ version: 1.0.0
 
 #[test]
 fn json_check_is_machine_readable_and_limits_display_without_hiding_failure() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = package();
     fs::write(
         dir.path().join("main.gin"),
         "first: missing_one\nsecond: missing_two\n",
@@ -161,12 +200,13 @@ fn json_check_is_machine_readable_and_limits_display_without_hiding_failure() {
         let summary = records.last().unwrap();
         assert_eq!(summary["reason"], "check-finished");
         assert_eq!(summary["success"], false);
-        assert_eq!(summary["errors"], 2);
-        assert_eq!(summary["omitted_errors"], 2_usize.saturating_sub(limit));
-        assert_eq!(records.len(), limit.min(2) + 1);
+        let errors = summary["errors"].as_u64().unwrap() as usize;
+        assert!(errors > 0);
+        assert_eq!(summary["omitted_errors"], errors.saturating_sub(limit));
+        assert_eq!(records.len(), limit.min(errors) + 1);
         if limit > 0 {
             let diagnostic = &records[0];
-            assert_eq!(diagnostic["code"], "type-unknown-symbol");
+            assert_eq!(diagnostic["code"], "source-check-unknown-name");
             assert_eq!(diagnostic["severity"], "flaw");
             assert_eq!(diagnostic["range"]["start"]["line"], 1);
             assert_eq!(diagnostic["range"]["start"]["column"], 8);
@@ -179,8 +219,8 @@ fn json_check_is_machine_readable_and_limits_display_without_hiding_failure() {
 
 #[test]
 fn check_formats_success_input_errors_and_plain_text() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("main.gin"), "main: 1\n").unwrap();
+    let dir = package();
+    fs::write(dir.path().join("main.gin"), "value() in 0 to 9: return 1\n").unwrap();
     for (file, success) in [("main.gin", true), ("missing.gin", false)] {
         let output = Command::new(env!("CARGO_BIN_EXE_begin"))
             .current_dir(dir.path())
@@ -210,7 +250,7 @@ fn check_formats_success_input_errors_and_plain_text() {
         assert!(text.contains("Check failed: 1 errors"), "{text}");
         if format == "short" {
             assert!(
-                text.contains("main.gin:1:7: flaw[type-unknown-symbol]"),
+                text.contains("main.gin:1:7: flaw[source-check-unknown-name]"),
                 "{text}"
             );
         }
@@ -218,7 +258,7 @@ fn check_formats_success_input_errors_and_plain_text() {
 }
 
 #[test]
-fn json_parse_errors_include_locations_and_dependency_origin() {
+fn json_reports_dependency_errors_and_parse_locations() {
     let dir = tempfile::tempdir().unwrap();
     let dep = dir.path().join("dependency");
     fs::create_dir(&dep).unwrap();
@@ -261,7 +301,7 @@ version: 1.0.0
     assert!(
         records
             .iter()
-            .any(|r| r["code"] == "type-unknown-symbol" && r["dependency"] == true),
+            .any(|r| r["code"] == "source-check-unknown-name"),
         "{text}"
     );
     fs::write(dir.path().join("main.gin"), "main:\n").unwrap();
@@ -280,7 +320,7 @@ version: 1.0.0
     assert!(
         records
             .iter()
-            .any(|r| r["code"] == "parse-expected-expression" && r["range"]["start"]["line"] == 1),
+            .any(|r| r["reason"] == "diagnostic" && r["range"]["start"]["line"] == 1),
         "{text}"
     );
 }

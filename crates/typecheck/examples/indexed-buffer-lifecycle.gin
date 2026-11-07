@@ -1,0 +1,24 @@
+-- Concrete payload ending, not a generic destructor or raw-memory release.
+use example.buffers Buffer
+use example.buffers take_at, close_buffer
+
+Token has number in 1 to 16
+Ended has zero in 0 to 16, one in 0 to 16
+DrainedPosition has buffer Buffer(Token), number in 0 to 16
+
+end_token(value Token) in 1 to 16:
+    Token(number) := value
+    return number
+
+drain(buffer Buffer(Token)) Ended:
+    DrainedPosition(after_zero, zero) := drain_at(buffer, 0)
+    DrainedPosition(empty, one) := drain_at(after_zero, 1)
+    Closed := close_buffer(Token, empty)
+    return Ended(zero, one)
+
+drain_at(buffer Buffer(Token), index in 0 to 1) DrainedPosition:
+    attempt: take_at(Token, buffer, index)
+    return when attempt is
+        Removed(rest, value) then
+            return DrainedPosition(buffer: rest, number: end_token(value))
+        Vacant(rest) then DrainedPosition(buffer: rest, number: 0)

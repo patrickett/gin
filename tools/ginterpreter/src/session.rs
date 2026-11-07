@@ -1,1443 +1,558 @@
-use crate::runtime::{
-    GenerationId, LiveRuntime, NativeExport, NativeGeneration, RuntimeDeclarationKind,
-    RuntimeFunction, RuntimeStorage, RuntimeType, RuntimeValue, generation_wrapper_name,
-    runtime_symbol_name,
-};
-use crate::source::RuntimeDeclaration;
-use crate::{
-    GeneratedEvaluation, InterpreterCondition, InterpreterContext, InterpreterDiagnostic,
-    InterpreterFrame, SessionSource,
-};
-use ast_format::declare::BindFormatExt;
-use codegen::{NativeCompiler, NativeEngine};
-use diagnostic::code::{EvaluationCode, InterpreterCode};
-use diagnostic::{Category, Diagnostic, DiagnosticCode, DiagnosticPathExt, Span};
-use ginc::driver::{CheckedFile, CheckedPackage, CompilerDriver, LoweredFileDiagnostics};
-use parser::query::SourceParseExt;
-use std::collections::HashMap;
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-    mpsc::{self, Receiver, TryRecvError},
-};
-use std::thread;
+//! The session: an accumulated module that declarations extend or replace, and the operations
+//! over it. Everything here is data; `jsonl.rs` and `repl.rs` only present it.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Command {
-    Clear,
-    Reset,
-    Help,
-    Quit,
-    Tasks,
-    TaskStarted(TaskId),
-    TaskStopRequested(TaskId),
+use std::path::Path;
+
+use interpreter::{Error, Interpreter, Program, Value};
+use serde_json::{Value as Json, json};
+use typecheck::{CheckedSourceBodyKind, CheckedSourceModule};
+
+use crate::check::{Checked, SESSION_FILE, check_package, check_text, show_type};
+use crate::image::Image;
+use crate::flaw::Flaw;
+use crate::source::{Split, split};
+
+/// What a declaration submission did.
+pub struct Declared {
+    pub accepted: bool,
+    /// Definitions of the image whose own text or dependencies changed (their derived state is
+    /// dropped), and those that were not touched (it is kept).
+    pub changed: Vec<String>,
+    pub kept: Vec<String>,
+    pub revision: u64,
+    pub added: Vec<String>,
+    pub replaced: Vec<String>,
+    pub flaws: Vec<Flaw>,
+    pub warnings: Vec<Flaw>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, derive_more::From)]
-pub struct TaskId(pub u64);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskState {
-    Running,
-    Cancelled,
-    Completed,
-    Failed,
+/// What to evaluate against.
+pub enum Target {
+    Session,
+    Text(String),
+    Package(std::path::PathBuf),
 }
 
-#[derive(Debug)]
-pub struct TaskSummary {
-    pub id: TaskId,
-    pub state: TaskState,
-    pub expression: String,
+pub enum Arg {
+    Known(Value),
+    Unknown,
 }
 
-#[derive(Debug)]
-pub struct TaskResult {
-    pub id: TaskId,
-    pub expression: String,
-    pub state: TaskState,
-    pub submission: Submission,
+pub enum EvalWhat {
+    Expression(String),
+    Call { function: String, arguments: Vec<Arg> },
+    /// The `#entry` function.
+    Entry,
 }
 
-struct SpawnedTask {
-    expression: String,
-    stop_requested: Arc<AtomicBool>,
-    receiver: Receiver<TaskResult>,
+pub enum EvalOutcome {
+    Value { json: Json, display: String, ty: String },
+    /// Not known at compile time, and exactly why.
+    Unknown { reason: Json, text: String },
+    /// The program (or the expression) has flaws; nothing was run.
+    Flawed(Vec<Flaw>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubmissionKind {
-    Declaration,
-    Expression,
-    Mixed,
-}
-
-#[derive(Debug)]
-pub enum Submission {
-    DeclarationAccepted {
-        diagnostics: Vec<InterpreterDiagnostic>,
-    },
-    Evaluated {
-        value: crate::value::EvaluatedValue,
-        diagnostics: Vec<InterpreterDiagnostic>,
-    },
-    Inspected {
-        value: crate::value::EvaluatedValue,
-        diagnostics: Vec<InterpreterDiagnostic>,
-    },
-    Answered {
-        text: String,
-    },
-    Command(Command),
-    Empty,
-    Incomplete,
-    Rejected {
-        diagnostics: Vec<InterpreterDiagnostic>,
-    },
-    Cancelled {
-        diagnostics: Vec<InterpreterDiagnostic>,
-    },
-    UnknownCommand(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Restart {
-    Retry,
-    Abort,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopeEntry {
+    pub kind: &'static str,
     pub name: String,
     pub signature: String,
 }
 
-#[derive(Debug)]
-pub enum QueryOutcome {
-    Answered(String),
-    Rejected(Vec<InterpreterDiagnostic>),
-    Empty,
+#[derive(Default)]
+pub struct Session {
+    /// (key, text) in order.
+    pub(crate) decls: Vec<(String, String)>,
+    /// The flaws that rejected the last declaration, for `:flaws`.
+    pub last_flaws: Vec<Flaw>,
+    counter: u64,
+    pub(crate) revision: u64,
+    /// The check of the accumulated module, kept between operations until a declaration
+    /// changes it.
+    pub(crate) current: Option<Checked>,
+    /// Derived state per definition name (inspected layouts and values), with the closure hash
+    /// of the definition when it was computed; valid while that hash is unchanged.
+    pub(crate) cache: std::collections::HashMap<String, (u64, Json)>,
 }
 
-pub struct InterpreterSession {
-    context: InterpreterContext,
-    source: SessionSource,
-    image: Option<queries::AcceptedImage>,
-    package_image: std::cell::OnceCell<queries::AcceptedImage>,
-    next_generation: u64,
-    next_runtime_generation: u64,
-    next_task_id: u64,
-    live_runtime: LiveRuntime,
-    running_tasks: HashMap<TaskId, SpawnedTask>,
-    driver: CompilerDriver,
-    eval_state: Arc<Mutex<typecheck::EvalState>>,
-    pending: Option<InterpreterCondition>,
-    task_conditions: HashMap<TaskId, InterpreterCondition>,
-}
+const WIDE: &str = "in -57896044618658097711785492504343953926634992332820282019728792003956564819968 to 57896044618658097711785492504343953926634992332820282019728792003956564819967";
 
-const RUNTIME_I64_MIN: &str = "-9223372036854775808";
-const RUNTIME_I64_MAX: &str = "9223372036854775807";
-impl Default for InterpreterSession {
-    fn default() -> Self {
-        Self::with_context(InterpreterContext::isolated())
+impl Session {
+    pub fn source(&self) -> String {
+        let mut out = String::new();
+        for (_, text) in &self.decls {
+            out.push_str(text.trim_end());
+            out.push_str("\n\n");
+        }
+        out
     }
-}
 
-impl InterpreterSession {
-    pub fn with_context(context: InterpreterContext) -> Self {
-        Self {
-            context,
-            source: SessionSource::default(),
-            image: None,
-            package_image: std::cell::OnceCell::new(),
-            next_generation: 1,
-            next_runtime_generation: 1,
-            next_task_id: 1,
-            running_tasks: HashMap::new(),
-            live_runtime: LiveRuntime::default(),
-            driver: CompilerDriver::default(),
-            eval_state: Arc::new(Mutex::new(typecheck::EvalState::default())),
-            pending: None,
-            task_conditions: HashMap::new(),
+    pub fn reset(&mut self) {
+        self.decls.clear();
+        self.last_flaws.clear();
+        self.current = None;
+        self.cache.clear();
+        self.revision += 1;
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub(crate) fn ensure_current_pub(&mut self) {
+        self.ensure_current();
+    }
+
+    fn ensure_current(&mut self) {
+        if self.current.is_none() {
+            self.current = Some(check_text(SESSION_FILE, &self.source()));
         }
     }
 
-    pub fn context(&self) -> &InterpreterContext {
-        &self.context
+    /// The image of the accumulated module: dependencies and closure hashes.
+    pub fn image(&mut self) -> (Json, u64) {
+        self.ensure_current();
+        let checked = self.current.take().expect("current");
+        let image = Image::build(&checked);
+        let kept = |i: usize| Some(self.cache.values().any(|(h, _)| *h == image.closure_of_name(&image.defs[i].name)));
+        let json = crate::inspect::image_json(&checked, &image, &kept, self.revision);
+        self.current = Some(checked);
+        (json, self.revision)
     }
 
-    pub fn declarations(&self) -> &str {
-        self.source.declarations()
-    }
-
-    pub fn pending(&self) -> Option<&str> {
-        self.pending
-            .as_ref()
-            .map(|condition| condition.submission.as_str())
-    }
-
-    pub fn condition(&self) -> Option<&InterpreterCondition> {
-        self.pending.as_ref()
-    }
-
-    pub fn frames(&self) -> &[InterpreterFrame] {
-        self.condition()
-            .map(InterpreterCondition::frames)
-            .unwrap_or_default()
-    }
-
-    pub fn frame(&self, index: usize) -> Option<&InterpreterFrame> {
-        self.frames().get(index)
-    }
-
-    pub fn task_condition(&self, id: TaskId) -> Option<&InterpreterCondition> {
-        self.task_conditions.get(&id)
-    }
-
-    pub fn retry_task(&mut self, id: TaskId) -> Option<Submission> {
-        let expression = self.task_conditions.get(&id)?.submission.clone();
-        let task = self.spawn_task(&expression);
-        self.task_conditions.remove(&id);
-        Some(Submission::Command(Command::TaskStarted(task)))
-    }
-
-    pub fn abort_task(&mut self, id: TaskId) -> bool {
-        self.task_conditions.remove(&id).is_some()
-    }
-
-    pub fn restarts(&self) -> &'static [Restart] {
-        self.condition()
-            .map(InterpreterCondition::restarts)
-            .unwrap_or_default()
-    }
-
-    pub fn retry(&mut self) -> Option<Submission> {
-        let pending = self.pending()?.to_string();
-        let result = self.dispatch(&pending);
-        self.pending = result.condition(&pending);
-        Some(result)
-    }
-
-    pub fn abort(&mut self) -> bool {
-        self.pending.take().is_some()
-    }
-
-    pub fn materialize(&mut self) -> Result<&str, Vec<InterpreterDiagnostic>> {
-        let source = self.source.declarations().to_string();
-        let context = self.context.reload().map_err(|error| {
-            vec![submitted_diagnostic(
-                &source,
-                // interpreter-materialization-context-unavailable
-                Diagnostic::new(
-                    InterpreterCode::MaterializationContextUnavailable,
-                    error.to_string(),
-                ),
-            )]
-        })?;
-        let checked = context
-            .check_source(
-                &mut CompilerDriver::default(),
-                &source,
-                context.package().sources().to_vec(),
-            )
-            .expect("interpreter includes its primary session source");
-        let mut diagnostics = package_diagnostics(&checked, None);
-        diagnostics
-            .retain(|diagnostic| diagnostic.diagnostic().code != DiagnosticCode::UnfilledHole);
-        for file in checked.files() {
-            diagnostics.extend(file_diagnostics(
-                file,
-                file.hole_diagnostics(),
-                checked.primary_path(),
-                None,
-            ));
-        }
-        if has_flaws(&diagnostics) {
-            Err(diagnostics)
-        } else {
-            Ok(self.source.declarations())
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn live_runtime(&self) -> &LiveRuntime {
-        &self.live_runtime
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn live_runtime_mut(&mut self) -> &mut LiveRuntime {
-        &mut self.live_runtime
-    }
-
-    pub fn task_summaries(&self) -> Vec<TaskSummary> {
-        self.running_tasks
-            .iter()
-            .map(|task| TaskSummary {
-                id: *task.0,
-                state: TaskState::Running,
-                expression: task.1.expression.clone(),
-            })
-            .collect()
-    }
-
-    pub fn poll_task_results(&mut self) -> Vec<TaskResult> {
-        let mut completed = Vec::new();
-        let task_ids: Vec<_> = self.running_tasks.keys().copied().collect();
-        let mut done = Vec::new();
-
-        for task_id in task_ids {
-            let task = match self.running_tasks.get_mut(&task_id) {
-                Some(task) => task,
-                None => continue,
-            };
-
-            match task.receiver.try_recv() {
-                Ok(result) => {
-                    completed.push(result);
-                    done.push(task_id);
-                }
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => {
-                    completed.push(TaskResult {
-                        id: task_id,
-                        expression: task.expression.clone(),
-                        state: TaskState::Failed,
-                        submission: Submission::Rejected {
-                            diagnostics: vec![submitted_diagnostic(
-                                "",
-                                // interpreter-task-failure
-                                Diagnostic::new(
-                                    InterpreterCode::TaskFailure,
-                                    "task worker terminated unexpectedly",
-                                ),
-                            )],
-                        },
-                    });
-                    done.push(task_id);
-                }
+    /// Inspect a name: a type, alias, constant or function. Derived results are kept per
+    /// definition and reused while neither it nor anything it uses has changed.
+    pub fn inspect(&mut self, name: &str) -> Json {
+        self.ensure_current();
+        let checked = self.current.take().expect("current");
+        let image = Image::build(&checked);
+        let head = name.split('(').next().unwrap_or(name).trim().to_owned();
+        let hash = image.closure_of_name(&head);
+        let applied = name.contains('(');
+        let key = name.to_owned();
+        let known = !image.find(&head).is_empty();
+        let mut out = match self.cache.get(&key) {
+            Some((h, cached)) if *h == hash && known => {
+                let mut cached = cached.clone();
+                cached["cached"] = json!(true);
+                cached
             }
-        }
-
-        for task_id in done {
-            self.running_tasks.remove(&task_id);
-        }
-
-        for result in &completed {
-            if let Some(condition) = result.condition() {
-                self.task_conditions.insert(result.id, condition);
+            _ => {
+                let mut fresh = derive(&checked, name);
+                if known && fresh["found"] == true {
+                    self.cache.insert(key, (hash, fresh.clone()));
+                }
+                fresh["cached"] = json!(false);
+                fresh
             }
-        }
-
-        completed
-    }
-
-    pub fn stop_task(&mut self, task_id: TaskId) -> bool {
-        let Some(task) = self.running_tasks.get_mut(&task_id) else {
-            return false;
         };
-
-        task.stop_requested.store(true, Ordering::SeqCst);
-        true
-    }
-
-    pub fn clear_tasks(&mut self) {
-        for task in self.running_tasks.values() {
-            task.stop_requested.store(true, Ordering::SeqCst);
-        }
-        self.running_tasks.clear();
-    }
-
-    fn spawn_task(&mut self, expression: &str) -> TaskId {
-        let generation = self.next_generation;
-        self.next_generation = self
-            .next_generation
-            .checked_add(1)
-            .expect("interpreter evaluation generation overflow");
-        let evaluation = self.source.evaluation_candidate_with_dispatches(
-            expression,
-            generation,
-            &HashMap::new(),
-        );
-        let context = self.context.clone();
-        let eval_state = self.eval_state.clone();
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_token = stop.clone();
-        let id = TaskId(self.next_task_id);
-        self.next_task_id = self
-            .next_task_id
-            .checked_add(1)
-            .expect("interpreter task id overflow");
-
-        let (sender, receiver) = mpsc::channel();
-
-        let task_id = id;
-        thread::spawn(move || {
-            let result = run_task_submission(context, evaluation, task_id, stop_token, eval_state);
-            let _ = sender.send(result);
-        });
-
-        self.running_tasks.insert(
-            id,
-            SpawnedTask {
-                expression: expression.to_string(),
-                stop_requested: stop,
-                receiver,
-            },
-        );
-
-        id
-    }
-
-    pub fn submit(&mut self, input: &str) -> Submission {
-        if input.trim() == "#retry" {
-            return self.retry().unwrap_or_else(|| Submission::Answered {
-                text: "no pending condition".to_string(),
+        let _ = applied;
+        if known {
+            let indexes = image.find(&head);
+            out["image"] = json!({
+                "uses": indexes.iter().flat_map(|i| image.defs[*i].uses.keys().map(|t| image.defs[*t].key.clone())).collect::<Vec<_>>(),
+                "used_by": indexes.iter().flat_map(|i| image.used_by(*i).into_iter().map(|u| image.defs[u].key.clone())).collect::<Vec<_>>(),
+                "affects": indexes.iter().flat_map(|i| image.affects(*i).into_iter().map(|u| image.defs[u].key.clone())).collect::<Vec<_>>(),
             });
         }
-        let result = self.dispatch(input);
-        if !queries::is_query_command(input)
-            && let Some(condition) = result.condition(input.trim_end())
-        {
-            self.pending = Some(condition);
-        }
-        result
+        out["revision"] = json!(self.revision);
+        self.current = Some(checked);
+        out
     }
 
-    fn dispatch(&mut self, input: &str) -> Submission {
-        let input = input.trim_end();
-        if input.trim().is_empty() {
-            return Submission::Empty;
-        }
+    pub fn declaration_count(&self) -> usize {
+        self.decls.len()
+    }
 
-        if let Some(command) = input.trim().strip_prefix('#') {
-            let name = command.split_whitespace().next();
-            if matches!(
-                name,
-                Some(
-                    "clear"
-                        | "reset"
-                        | "tasks"
-                        | "stop"
-                        | "run"
-                        | "type"
-                        | "inspect"
-                        | "scope"
-                        | "doc"
-                        | "search"
-                        | "complete"
-                        | "queries"
-                        | "suggest"
-                        | "frames"
-                        | "frame"
-                        | "retry"
-                        | "abort"
-                        | "save"
-                        | "help"
-                        | "exit"
-                        | "quit"
-                        | "q"
-                )
-            ) {
-                return self.command(command);
+    /// Check the accumulated module.
+    pub fn check(&self) -> Checked {
+        check_text(SESSION_FILE, &self.source())
+    }
+
+    /// Add or replace declarations. Accepted only if the accumulated module still checks; a
+    /// rejected submission leaves the session as it was.
+    pub fn declare(&mut self, source: &str) -> Result<Declared, Vec<Flaw>> {
+        let parts = match split(source) {
+            Ok(Split::Declarations(parts)) => parts,
+            Ok(Split::Empty) => Vec::new(),
+            Ok(Split::Expression(_)) => {
+                return Err(vec![message_flaw("a declaration was expected, found an expression; use eval")]);
             }
-        }
-
-        let parsed = input.parse_source_full();
-        if parsed.is_incomplete() {
-            return Submission::Incomplete;
-        }
-        if crate::submission_syntax::is_standalone_expression(input, &parsed) {
-            return self.evaluate(input);
-        }
-
-        let declaration_names = declaration_names(&parsed.ast);
-        let user_source = match SubmissionKind::from_ast(&parsed.ast) {
-            SubmissionKind::Declaration => self
-                .source
-                .candidate_without_shadowed(input, &declaration_names),
-            SubmissionKind::Expression => self.source.candidate(input),
-            SubmissionKind::Mixed => self.source.candidate(input),
+            Err(diagnostics) => {
+                let text: std::sync::Arc<str> = std::sync::Arc::from(source);
+                return Err(diagnostics.iter().map(|d| crate::flaw::from_diagnostic("parse", d, "<submission>", &text, &[])).collect());
+            }
         };
-        if compiler_has_flaws(&parsed.symptoms) {
-            return Submission::Rejected {
-                diagnostics: submitted_diagnostics(input, parsed.symptoms),
-            };
-        }
-        if self.context.is_isolated() && !parsed.ast.uses.is_empty() {
-            return Submission::Rejected {
-                diagnostics: vec![submitted_diagnostic(
-                    input,
-                    // interpreter-import-requires-package
-                    Diagnostic::new(
-                        InterpreterCode::ImportRequiresPackage,
-                        "imports require a package context",
-                    )
-                    .at_span(Span::new(0, input.len()))
-                    .with_help("start in a package directory or pass its path to ginterpreter"),
-                )],
-            };
-        }
-
-        match SubmissionKind::from_ast(&parsed.ast) {
-            SubmissionKind::Mixed => Submission::Rejected {
-                diagnostics: submitted_diagnostics(
-                    input,
-                    // interpreter-mixed-submission
-                    vec![Diagnostic::new(
-                        InterpreterCode::MixedSubmission,
-                        "declarations and expressions must be submitted separately",
-                    )],
-                ),
-            },
-            SubmissionKind::Declaration => {
-                self.submit_declaration(input, user_source, declaration_names, &parsed.ast)
-            }
-            SubmissionKind::Expression => self.evaluate(input),
-        }
-    }
-
-    fn submit_declaration(
-        &mut self,
-        input: &str,
-        candidate: String,
-        declaration_names: Vec<String>,
-        ast: &ast::FileAst,
-    ) -> Submission {
-        let mut result = self.submit_declaration_checked(input, &candidate, declaration_names, ast);
-        let diagnostics = match &mut result {
-            Submission::DeclarationAccepted { diagnostics }
-            | Submission::Rejected { diagnostics }
-            | Submission::Cancelled { diagnostics } => diagnostics,
-            _ => return result,
-        };
-        let start = candidate.len() - input.len() - 1;
-        assert_eq!(&candidate[start..candidate.len() - 1], input);
-        for diagnostic in diagnostics {
-            diagnostic.rebase_submission(&candidate, input, start);
-        }
-        result
-    }
-
-    fn submit_declaration_checked(
-        &mut self,
-        input: &str,
-        candidate: &str,
-        declaration_names: Vec<String>,
-        ast: &ast::FileAst,
-    ) -> Submission {
-        if let Some(help) = self.source.replacement_conflict(&declaration_names) {
-            return Submission::Rejected {
-                diagnostics: vec![submitted_diagnostic(
-                    input,
-                    // interpreter-shared-declaration
-                    Diagnostic::new(
-                        InterpreterCode::SharedDeclaration,
-                        "replacement would remove other names from a shared declaration",
-                    )
-                    .at_span(Span::new(0, input.len()))
-                    .with_help(help),
-                )],
-            };
-        }
-        let checked = self.check(candidate);
-        let mut diagnostics = package_diagnostics(&checked, None);
-        if checked.has_front_end_flaws() || checked.has_typecheck_flaws() {
-            return Submission::Rejected { diagnostics };
-        }
-
-        let combined_ast = &checked.primary_file().parsed().output.ast;
-        let newly_private = ast
-            .defs
-            .values()
-            .map(|bind| bind.name)
-            .find(|name| {
-                !ast.private_defs.contains(name) && combined_ast.private_defs.contains(name)
-            })
-            .or_else(|| {
-                ast.tags.keys().copied().find(|name| {
-                    !ast.private_tags.contains(name) && combined_ast.private_tags.contains(name)
-                })
-            });
-        if let Some(name) = newly_private {
-            return Submission::Rejected {
-                diagnostics: vec![submitted_diagnostic(
-                    input,
-                    // interpreter-private-section
-                    Diagnostic::new(
-                        InterpreterCode::PrivateSection,
-                        format!("`{name}` would become private after the session's private section"),
-                    )
-                    .at_span(Span::new(0, input.len()))
-                    .with_help("save the session, place public declarations before `private`, then #clear and resubmit the combined source"),
-                )],
-            };
-        }
-
-        let runtime_metadata = declaration_runtime_metadata(&checked, &declaration_names);
-        let mut compatible = true;
-        for declaration in &runtime_metadata {
-            let Some(existing_value) = self.live_runtime.value_for_symbol(&declaration.name) else {
-                continue;
-            };
-            if !declarations_compatible(existing_value, declaration) {
-                diagnostics.push(submitted_diagnostic(
-                    input,
-                    incompatible_redefinition_diagnostic(
-                        &declaration.name,
-                        existing_value,
-                        declaration,
-                    ),
-                ));
-                compatible = false;
-            }
-        }
-        if !compatible {
-            return Submission::Rejected { diagnostics };
-        }
-
-        if declaration_names.is_empty() {
-            self.source.accept_declaration(input, declaration_names);
-            self.image = Some(queries::AcceptedImage::new(checked));
-            return Submission::DeclarationAccepted { diagnostics };
-        }
-
-        if !checked.has_holes() {
-            let context = NativeCompiler::create_context();
-            let lowered = self.driver.lower_package(&context, &checked);
-            diagnostics.extend(lowered_diagnostics(&checked, lowered.diagnostics, None));
-            if has_flaws(&diagnostics) || lowered.module.is_none() {
-                if lowered.module.is_none() && !has_flaws(&diagnostics) {
-                    diagnostics.push(submitted_diagnostic(
-                        input,
-                        codegen_failure("code generation produced no module"),
-                    ));
+        let mut next = self.decls.clone();
+        let (mut added, mut replaced) = (Vec::new(), Vec::new());
+        for (decl, text) in parts {
+            match next.iter_mut().find(|(key, _)| *key == decl.key) {
+                Some(slot) => {
+                    slot.1 = text;
+                    replaced.push(decl.key.clone());
                 }
-                return Submission::Rejected { diagnostics };
+                None => {
+                    next.push((decl.key.clone(), text));
+                    added.push(decl.key.clone());
+                }
             }
         }
+        let joined: String = next.iter().map(|(_, t)| format!("{}\n\n", t.trim_end())).collect();
+        let checked = check_text(SESSION_FILE, &joined);
+        let unchanged = || (Vec::new(), Vec::new());
+        if !checked.flaws.is_empty() {
+            self.last_flaws = checked.flaws.clone();
+            let (changed, kept) = unchanged();
+            return Ok(Declared { accepted: false, changed, kept, revision: self.revision, added, replaced, flaws: checked.flaws, warnings: checked.warnings });
+        }
+        // What this declaration changed in the image: a definition whose own text or whose
+        // dependencies differ is new state; every other keeps what was derived for it.
+        self.ensure_current();
+        let before = Image::build(self.current.as_ref().expect("current"));
+        let after = Image::build(&checked);
+        let mut changed = Vec::new();
+        let mut kept = Vec::new();
+        for (i, def) in after.defs.iter().enumerate() {
+            let old = before.defs.iter().position(|d| d.key == def.key);
+            if old.is_some_and(|o| before.closure[o] == after.closure[i]) {
+                kept.push(def.key.clone());
+            } else {
+                changed.push(def.key.clone());
+            }
+        }
+        for def in &before.defs {
+            if !after.defs.iter().any(|d| d.key == def.key) {
+                changed.push(def.key.clone());
+            }
+        }
+        self.decls = next;
+        self.last_flaws.clear();
+        self.revision += 1;
+        let warnings = checked.warnings.clone();
+        self.current = Some(checked);
+        Ok(Declared { accepted: true, changed, kept, revision: self.revision, added, replaced, flaws: Vec::new(), warnings })
+    }
 
-        let generation_id = GenerationId(self.next_runtime_generation);
-        let generation_symbol = generation_wrapper_name(generation_id);
-        let generation_candidate =
-            generation_candidate(candidate, &generation_symbol, generation_id);
-        let runtime_engine = if checked.has_holes() {
-            None
-        } else {
-            self.build_runtime_generation(&generation_candidate, &generation_symbol)
-        };
-
-        let runtime_declarations =
-            extract_runtime_declarations(ast, checked.primary_file().typed());
-        let declared_logical_symbols: Vec<_> = runtime_declarations
-            .iter()
-            .map(|declaration| declaration.name.clone())
-            .collect();
-        let exports = generation_exports(&declared_logical_symbols, generation_id);
-        self.live_runtime.install_generation(NativeGeneration {
-            id: generation_id,
-            engine: runtime_engine,
-            exports,
+    /// Remove a declaration by key or by name (all with that name).
+    pub fn remove(&mut self, name: &str) -> Vec<String> {
+        self.current = None;
+        self.revision += 1;
+        let (keep, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut self.decls).into_iter().partition(|(key, _)| {
+            key != name && !key.split_whitespace().nth(1).is_some_and(|n| n.split('/').next() == Some(name))
         });
-        self.next_runtime_generation = self
-            .next_runtime_generation
-            .checked_add(1)
-            .expect("interpreter runtime generation overflow");
-
-        self.source.accept_declaration_with_dispatches(
-            input,
-            declaration_names,
-            runtime_declarations,
-        );
-        self.live_runtime.retire_unused_generations();
-
-        for declaration in runtime_metadata {
-            let runtime_value = match declaration.kind {
-                RuntimeDeclarationKind::Value => RuntimeValue::new(
-                    declaration.return_type,
-                    RuntimeStorage::zero(usize::from(declaration.return_type.size)),
-                ),
-                RuntimeDeclarationKind::Function => RuntimeValue::new_function(
-                    declaration.return_type,
-                    declaration.parameter_types,
-                    declaration.param_conventions,
-                    declaration.capture_layout,
-                ),
-            };
-            self.live_runtime
-                .store_value(declaration.name, runtime_value);
-        }
-
-        self.image = Some(queries::AcceptedImage::new(checked));
-        Submission::DeclarationAccepted { diagnostics }
+        self.decls = keep;
+        gone.into_iter().map(|(key, _)| key).collect()
     }
 
-    fn evaluate(&mut self, input: &str) -> Submission {
-        let generation = self.next_generation;
-        self.next_generation = self
-            .next_generation
-            .checked_add(1)
-            .expect("interpreter evaluation generation overflow");
-        let evaluation =
-            self.source
-                .evaluation_candidate_with_dispatches(input, generation, &HashMap::new());
-        let checked = self.check(evaluation.source());
-        evaluate_checked_submission(
-            &checked,
-            &evaluation,
-            Arc::new(AtomicBool::new(false)),
-            &self.eval_state,
-        )
+    pub fn load_text(&mut self, text: &str) -> Result<Declared, Vec<Flaw>> {
+        self.declare(text)
     }
 
-    fn check(&mut self, source: &str) -> CheckedPackage {
-        self.context
-            .check_source(
-                &mut self.driver,
-                source,
-                self.context.package().sources().to_vec(),
-            )
-            .expect("interpreter includes its primary session source")
-    }
-
-    fn command(&mut self, command: &str) -> Submission {
-        let command = command.trim();
-        let mut parts = command.splitn(2, char::is_whitespace).map(str::trim);
-        match parts.next() {
-            Some(action @ ("clear" | "reset")) => {
-                let reset = action == "reset";
-                self.source.clear();
-                self.image = None;
-                self.live_runtime.clear();
-                self.pending = None;
-                self.task_conditions.clear();
-                *self.eval_state.lock().expect("evaluator state lock") =
-                    typecheck::EvalState::default();
-                if reset {
-                    self.clear_tasks();
-                }
-                Submission::Command(if reset {
-                    Command::Reset
-                } else {
-                    Command::Clear
-                })
-            }
-            Some("tasks") => Submission::Command(Command::Tasks),
-            Some("stop") => match parts.next().and_then(|id| id.parse::<u64>().ok()) {
-                Some(task_id) if self.stop_task(TaskId(task_id)) => {
-                    Submission::Command(Command::TaskStopRequested(TaskId(task_id)))
-                }
-                Some(_) => Submission::Rejected {
-                    diagnostics: vec![submitted_diagnostic(
-                        command,
-                        // interpreter-invalid-task-id
-                        Diagnostic::new(InterpreterCode::InvalidTaskId, "unknown task id"),
-                    )],
-                },
-                None => Submission::Rejected {
-                    diagnostics: vec![submitted_diagnostic(
-                        command,
-                        // interpreter-invalid-command-usage
-                        Diagnostic::new(
-                            InterpreterCode::InvalidCommandUsage,
-                            "usage: #stop <task-id>",
-                        ),
-                    )],
-                },
-            },
-            Some("run") => match parts
-                .next()
-                .map(str::trim)
-                .filter(|expression| !expression.is_empty())
-            {
-                Some(expression) => {
-                    let task_id = self.spawn_task(expression);
-                    Submission::Command(Command::TaskStarted(task_id))
-                }
-                None => Submission::Rejected {
-                    diagnostics: vec![submitted_diagnostic(
-                        command,
-                        // interpreter-invalid-command-usage
-                        Diagnostic::new(
-                            InterpreterCode::InvalidCommandUsage,
-                            "usage: #run <expression>",
-                        ),
-                    )],
-                },
-            },
-            Some("type") => match parts
-                .next()
-                .map(str::trim)
-                .filter(|query| !query.is_empty())
-            {
-                Some(expression) => self.type_submission(expression),
-                None => Submission::Answered {
-                    text: "usage: #type <expression>".to_string(),
-                },
-            },
-            Some("scope") => Submission::Answered {
-                text: self.scope_report(),
-            },
-            Some("doc") => self.documentation_report(parts.next()),
-            Some("inspect") => self.inspect(parts.next().unwrap_or_default()),
-            Some("search") => self.search_report(parts.next()),
-            Some("complete") => self.completions_report(parts.next()),
-            Some("queries") => Submission::Answered {
-                text: crate::help::query_help(parts.next()),
-            },
-            Some("suggest") => self.suggestions_report(parts.next()),
-            Some(name @ ("frames" | "frame" | "retry" | "abort")) => {
-                self.condition_command(name, parts.next())
-            }
-            Some("save") => match parts.next().map(str::trim).filter(|path| !path.is_empty()) {
-                Some(path) => self.save_report(path),
-                None => Submission::Answered {
-                    text: "usage: #save <path>".to_string(),
-                },
-            },
-            Some("help") => Submission::Answered {
-                text: crate::help(parts.next()),
-            },
-            Some("exit") | Some("quit") | Some("q") => Submission::Command(Command::Quit),
-            Some(other) => Submission::UnknownCommand(other.to_string()),
-            None => Submission::Rejected {
-                diagnostics: vec![submitted_diagnostic(
-                    command,
-                    // interpreter-invalid-command
-                    Diagnostic::new(InterpreterCode::InvalidCommand, "unknown command"),
-                )],
-            },
-        }
-    }
-
-    fn type_submission(&mut self, expression: &str) -> Submission {
-        match self.type_of(expression) {
-            QueryOutcome::Answered(text) => Submission::Answered { text },
-            QueryOutcome::Rejected(diagnostics) => Submission::Rejected { diagnostics },
-            QueryOutcome::Empty => Submission::Answered {
-                text: "expression has no result type".to_string(),
-            },
-        }
-    }
-
-    fn scope_report(&self) -> String {
-        let entries = self.scope();
-        if entries.is_empty() {
-            return "empty image".to_string();
-        }
-        entries
-            .iter()
-            .map(|entry| {
-                if entry.name.is_empty() {
-                    entry.signature.clone()
-                } else {
-                    format!("{}: {}", entry.name, entry.signature)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    fn save_report(&mut self, path: &str) -> Submission {
-        let source = match self.materialize() {
-            Ok(source) => source,
-            Err(diagnostics) => return Submission::Rejected { diagnostics },
+    pub fn scope(&self) -> Vec<ScopeEntry> {
+        let checked = self.check();
+        let Some(module) = &checked.module else {
+            return checked
+                .decls
+                .iter()
+                .map(|d| ScopeEntry { kind: d.kind, name: d.name.clone(), signature: d.key.clone() })
+                .collect();
         };
-        match std::fs::write(path, source) {
-            Ok(()) => Submission::Answered {
-                text: format!("saved image source to {path}"),
-            },
-            Err(error) => Submission::Rejected {
-                diagnostics: vec![submitted_diagnostic(
-                    "#save",
-                    // interpreter-save-failed
-                    Diagnostic::new(InterpreterCode::SaveFailed, error.to_string()),
-                )],
-            },
+        scope_of(module)
+    }
+
+    fn base_text(&self, target: &Target) -> Option<String> {
+        match target {
+            Target::Session => Some(self.source()),
+            Target::Text(text) => Some(text.clone()),
+            Target::Package(_) => None,
         }
     }
 
-    fn build_runtime_generation(
-        &mut self,
-        generation_candidate: &str,
-        generation_symbol: &str,
-    ) -> Option<NativeEngine> {
-        let context = NativeCompiler::create_context();
-        let runtime_checked = self.check(generation_candidate);
-        if runtime_checked.has_front_end_flaws() || runtime_checked.has_typecheck_flaws() {
-            return None;
+    pub fn eval(&mut self, target: &Target, what: &EvalWhat) -> EvalOutcome {
+        self.counter += 1;
+        if let Target::Package(path) = target {
+            return eval_package(path, what);
         }
-
-        let runtime_lowered = self.driver.lower_package(&context, &runtime_checked);
-        let runtime_module = runtime_lowered.module?;
-
-        let engine = NativeEngine::new(runtime_module, generation_symbol).ok()?;
-        Some(engine)
-    }
-}
-
-fn run_task_submission(
-    context: InterpreterContext,
-    evaluation: GeneratedEvaluation,
-    task_id: TaskId,
-    stop_requested: Arc<AtomicBool>,
-    eval_state: Arc<Mutex<typecheck::EvalState>>,
-) -> TaskResult {
-    let worker = std::panic::AssertUnwindSafe(|| {
-        run_task_evaluation(&context, &evaluation, stop_requested, &eval_state)
-    });
-    let submission = match std::panic::catch_unwind(worker) {
-        Ok(submission) => submission,
-        Err(_) => Submission::Rejected {
-            diagnostics: vec![submitted_diagnostic(
-                evaluation.expression(),
-                // interpreter-task-failed
-                Diagnostic::new(InterpreterCode::TaskFailed, "task panicked"),
-            )],
-        },
-    };
-    let state = match &submission {
-        Submission::Evaluated { .. } => TaskState::Completed,
-        Submission::Cancelled { .. } => TaskState::Cancelled,
-        _ => TaskState::Failed,
-    };
-    TaskResult {
-        id: task_id,
-        expression: evaluation.expression().to_string(),
-        state,
-        submission,
-    }
-}
-
-fn run_task_evaluation(
-    context: &InterpreterContext,
-    evaluation: &GeneratedEvaluation,
-    stop_requested: Arc<AtomicBool>,
-    eval_state: &Mutex<typecheck::EvalState>,
-) -> Submission {
-    if stop_requested.load(Ordering::SeqCst) {
-        return Submission::Cancelled {
-            diagnostics: vec![submitted_diagnostic(
-                evaluation.expression(),
-                // compile-time-cancelled
-                Diagnostic::new(EvaluationCode::Cancelled, "evaluation was cancelled"),
-            )],
+        let base = self.base_text(target).expect("text target");
+        let checked = check_text(SESSION_FILE, &base);
+        let Some(module) = checked.module else {
+            return EvalOutcome::Flawed(checked.flaws);
         };
-    }
-    let mut driver = CompilerDriver::default();
-    let checked = match context.check_source(
-        &mut driver,
-        evaluation.source(),
-        context.package().sources().to_vec(),
-    ) {
-        Ok(checked) => checked,
-        Err(error) => {
-            return Submission::Rejected {
-                diagnostics: vec![submitted_diagnostic(
-                    evaluation.expression(),
-                    // interpreter-task-failed
-                    Diagnostic::new(InterpreterCode::TaskFailed, error.to_string()),
-                )],
-            };
-        }
-    };
-    evaluate_checked_submission(&checked, evaluation, stop_requested, eval_state)
-}
-
-fn evaluate_checked_submission(
-    checked: &CheckedPackage,
-    evaluation: &GeneratedEvaluation,
-    stop_requested: Arc<AtomicBool>,
-    eval_state: &Mutex<typecheck::EvalState>,
-) -> Submission {
-    let mut diagnostics = package_diagnostics(checked, Some(evaluation));
-    if checked.has_front_end_flaws() || checked.has_typecheck_flaws() {
-        return Submission::Rejected { diagnostics };
-    }
-    match crate::execution::execute(checked, evaluation.symbol(), stop_requested, eval_state) {
-        crate::execution::Execution::Completed(value) => {
-            Submission::Evaluated { value, diagnostics }
-        }
-        crate::execution::Execution::Failed(failure) => {
-            diagnostics.push(execution_failure(checked, evaluation, failure));
-            Submission::Rejected { diagnostics }
-        }
-        crate::execution::Execution::Cancelled(failure) => {
-            diagnostics.push(execution_failure(checked, evaluation, failure));
-            Submission::Cancelled { diagnostics }
-        }
-    }
-}
-
-fn execution_diagnostic(
-    evaluation: &GeneratedEvaluation,
-    mut diagnostic: Diagnostic,
-) -> InterpreterDiagnostic {
-    if diagnostic.span.is_empty() {
-        diagnostic.span = Span::new(0, evaluation.expression().len());
-        submitted_diagnostic(evaluation.expression(), diagnostic)
-    } else {
-        evaluation_diagnostic(evaluation, diagnostic)
-    }
-}
-
-fn execution_failure(
-    checked: &CheckedPackage,
-    evaluation: &GeneratedEvaluation,
-    failure: crate::execution::ExecutionFailure,
-) -> InterpreterDiagnostic {
-    execution_diagnostic(evaluation, failure.diagnostic).with_frames(
-        crate::condition::resolve_frames(checked, Some(evaluation), failure.frames),
-    )
-}
-
-impl SubmissionKind {
-    fn from_ast(ast: &ast::FileAst) -> Self {
-        let has_declarations = !ast.uses.is_empty()
-            || !ast.tags.is_empty()
-            || !ast.defs.is_empty()
-            || !ast.method_binds.is_empty()
-            || !ast.symbol_aliases.is_empty();
-        let has_expressions = !ast.exprs.is_empty();
-
-        match (has_declarations, has_expressions) {
-            (true, true) => Self::Mixed,
-            (false, true) => Self::Expression,
-            _ => Self::Declaration,
-        }
-    }
-}
-
-fn declaration_names(ast: &ast::FileAst) -> Vec<String> {
-    let mut names = Vec::new();
-
-    names.extend(ast.tags.keys().map(|name| name.to_string()));
-    names.extend(ast.defs.keys().map(|id| id.0.to_string()));
-    names.extend(ast.method_binds.iter().map(|bind| bind.name.to_string()));
-    names.extend(
-        ast.symbol_aliases
-            .iter()
-            .map(|alias| alias.alias.to_string()),
-    );
-
-    names.sort();
-    names.dedup();
-    names
-}
-
-#[derive(Debug, Clone)]
-struct DeclarationRuntimeMetadata {
-    name: String,
-    kind: RuntimeDeclarationKind,
-    return_type: RuntimeType,
-    parameter_types: Vec<RuntimeType>,
-    param_conventions: Vec<ast::ParamConvention>,
-    capture_layout: Vec<RuntimeType>,
-}
-
-fn declaration_runtime_metadata(
-    checked: &CheckedPackage,
-    declaration_names: &[String],
-) -> Vec<DeclarationRuntimeMetadata> {
-    let declaration_names: std::collections::HashSet<String> =
-        declaration_names.iter().cloned().collect();
-    let typed = checked.primary_file().typed();
-    typed
-        .defs
-        .values()
-        .filter_map(|declaration| {
-            if !declaration_names.contains(declaration.name.as_ref()) {
-                return None;
+        match what {
+            EvalWhat::Expression(expression) => eval_expression(&base, expression),
+            EvalWhat::Call { function, arguments } => {
+                let ty = declared_result(&module, function);
+                typed(run(vec![module], |i| call(i, function, arguments), arguments), ty)
             }
-            declaration_runtime_type(&declaration.return_type, &typed.type_registry).map(
-                |return_type| DeclarationRuntimeMetadata {
-                    name: declaration.name.as_ref().to_string(),
-                    kind: if declaration.is_constant {
-                        RuntimeDeclarationKind::Value
-                    } else {
-                        RuntimeDeclarationKind::Function
-                    },
-                    return_type,
-                    parameter_types: declaration
-                        .params
-                        .iter()
-                        .filter_map(|(_, ty)| declaration_runtime_type(ty, &typed.type_registry))
-                        .collect(),
-                    param_conventions: declaration.param_conventions.to_vec(),
-                    capture_layout: Vec::new(),
-                },
-            )
-        })
-        .collect()
-}
+            EvalWhat::Entry => {
+                let ty = module.checked().entry.map(|e| show_type(module.checked(), module.checked().functions[e as usize].result, &[])).unwrap_or_default();
+                typed(run(vec![module], |i| i.run_entry(), &[]), ty)
+            }
+        }
+    }
 
-fn declarations_compatible(
-    existing: &RuntimeValue,
-    replacement: &DeclarationRuntimeMetadata,
-) -> bool {
-    match (&existing.kind, &replacement.kind) {
-        (RuntimeDeclarationKind::Value, RuntimeDeclarationKind::Value) => {
-            existing.ty == replacement.return_type
+    /// The type of an expression, and whether it can be known now.
+    pub fn type_of(&self, expression: &str) -> Result<String, Vec<Flaw>> {
+        match synthesize(&self.source(), expression) {
+            Ok((module, _label)) => Ok(result_type(&module)),
+            Err(flaws) => Err(flaws),
         }
-        (RuntimeDeclarationKind::Function, RuntimeDeclarationKind::Function) => {
-            let Some(existing_function) = existing.function.as_ref() else {
-                return false;
-            };
-            let replacement_function = RuntimeFunction {
-                return_type: replacement.return_type,
-                parameter_types: replacement.parameter_types.clone(),
-                parameter_conventions: replacement.param_conventions.clone(),
-                capture_layout: replacement.capture_layout.clone(),
-            };
-            existing_function.is_compatible_with(&replacement_function)
-        }
-        _ => false,
+    }
+
+    /// The holes of the accumulated module.
+    pub fn holes(&self) -> Checked {
+        self.check()
     }
 }
 
-fn declaration_runtime_type(
-    return_type: &ast::ty::Ty,
-    registry: &typecheck::TypeRegistry,
-) -> Option<RuntimeType> {
-    let width = u8::try_from(registry.integer_width_for_type(return_type)?).ok()?;
-    let size = width.div_ceil(8);
-    if size == 0 {
-        return None;
+/// What `inspect` derives for `name` from the checked session: the shape and layout, and for a
+/// function the value. This is the state that is kept per definition and saved in snapshots.
+pub(crate) fn derive(checked: &Checked, name: &str) -> Json {
+    let head = name.split('(').next().unwrap_or(name).trim();
+    let mut fresh = crate::inspect::inspect(checked, name);
+    if fresh["kind"] == "function" {
+        if let Some(value) = crate::inspect::value_of_function(checked, head) {
+            fresh["value"] = value;
+        }
     }
-    Some(RuntimeType {
-        size,
-        align: u8::try_from(typecheck::layout::scalar_alignment(u64::from(size)))
-            .expect("runtime alignment is always small"),
+    fresh
+}
+
+pub fn message_flaw(message: &str) -> Flaw {
+    let text: std::sync::Arc<str> = std::sync::Arc::from("");
+    let d = diagnostic::Diagnostic::new(diagnostic::code::SourceCheckCode::Malformed, message);
+    crate::flaw::from_diagnostic("parse", &d, "<submission>", &text, &[])
+}
+
+fn scope_of(module: &CheckedSourceModule) -> Vec<ScopeEntry> {
+    let file = module.checked();
+    let mut out = Vec::new();
+    for (index, f) in file.functions.iter().enumerate() {
+        if module.function_home(index).is_some_and(|(home, own)| home == module.name() && own as usize == index) && !f.name.starts_with("__gin_") {
+            let params = f.parameters.iter().map(|t| show_type(file, *t, &f.type_parameters)).collect::<Vec<_>>().join(", ");
+            let types = if f.type_parameters.is_empty() { String::new() } else { format!("[{}]", f.type_parameters.join(", ")) };
+            out.push(ScopeEntry { kind: "function", name: f.name.clone(), signature: format!("{}{types}({params}) -> {}", f.name, show_type(file, f.result, &f.type_parameters)) });
+        }
+    }
+    for a in file.aggregates.iter().filter(|a| !a.name.contains('.')) {
+        out.push(ScopeEntry { kind: "type", name: a.name.clone(), signature: format!("{:?}", a.kind).to_lowercase() });
+    }
+    out
+}
+
+/// Check `base` plus a function returning `expression`, trying result types until one fits.
+fn synthesize(base: &str, expression: &str) -> Result<(CheckedSourceModule, String), Vec<Flaw>> {
+    synthesize_inner(base, expression).map_err(|mut flaws| {
+        // The wrapper function is ours: a flaw inside it is the expression's, not a place in
+        // the session's source.
+        for flaw in &mut flaws {
+            if flaw.span.as_ref().is_some_and(|s| s.byte_start >= base.len()) {
+                flaw.span = None;
+                flaw.construct = None;
+                flaw.file = "<expression>".to_owned();
+                flaw.message = format!("in `{expression}`: {}", flaw.message);
+            }
+        }
+        flaws
     })
 }
 
-fn incompatible_redefinition_diagnostic(
-    symbol: &str,
-    existing: &RuntimeValue,
-    replacement: &DeclarationRuntimeMetadata,
-) -> Diagnostic {
-    let replacement_description = match replacement.kind {
-        RuntimeDeclarationKind::Value => "value".to_string(),
-        RuntimeDeclarationKind::Function => format!(
-            "function return {:?} with params {:?} and conventions {:?}",
-            replacement.return_type, replacement.parameter_types, replacement.param_conventions
-        ),
+fn synthesize_inner(base: &str, expression: &str) -> Result<(CheckedSourceModule, String), Vec<Flaw>> {
+    let body: String = expression.lines().collect::<Vec<_>>().join("\n        ");
+    let attempt = |annotation: &str| {
+        let text = format!("{base}\n__gin_eval() {annotation}:\n    return {body}\n");
+        check_once(&text)
     };
-    let existing_description = match existing.kind {
-        RuntimeDeclarationKind::Value => "value".to_string(),
-        RuntimeDeclarationKind::Function => {
-            let function = existing.function.as_ref().map(|existing_function| {
-                format!(
-                    "function return {:?} with params {:?} and conventions {:?}",
-                    existing_function.return_type,
-                    existing_function.parameter_types,
-                    existing_function.parameter_conventions
-                )
-            });
-            function
-                .as_deref()
-                .unwrap_or("function (missing metadata)")
-                .to_string()
-        }
+    let first = attempt(WIDE);
+    let first_flaws = match first {
+        Ok(module) => return Ok((module, "integer".to_owned())),
+        Err(flaws) => flaws,
     };
-
-    // interpreter-incompatible-redefinition
-    Diagnostic::new(
-        InterpreterCode::IncompatibleRedefinition,
-        format!(
-            "cannot redefine `{symbol}` because declaration changed from `{existing_description}` to `{replacement_description}`"
-        ),
-    )
-    .with_arg("symbol", symbol)
-    .with_arg("existing_type", format!("{:?}", existing.ty))
-    .with_arg("existing_kind", format!("{:?}", existing.kind))
-    .with_arg(
-        "replacement_type",
-        match replacement.kind {
-            RuntimeDeclarationKind::Value => format!("{:?}", replacement.return_type),
-            RuntimeDeclarationKind::Function => format!(
-                "fn({:?}) -> {:?}",
-                replacement.param_conventions,
-                replacement.return_type
-            ),
-        },
-    )
-    .with_arg("replacement_kind", format!("{:?}", replacement.kind))
-}
-
-fn extract_runtime_declarations(
-    ast: &ast::FileAst,
-    typed: &typecheck::TypedFileAst,
-) -> Vec<RuntimeDeclaration> {
-    let mut declarations = Vec::new();
-
-    for bind in ast.defs.values().chain(&ast.method_binds) {
-        let param_conventions = bind
-            .params
-            .as_ref()
-            .map(|params| {
-                params
-                    .keys()
-                    .map(|name| {
-                        bind.param_conventions
-                            .get(name)
-                            .copied()
-                            .unwrap_or(ast::ParamConvention::Terminal)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        declarations.push(RuntimeDeclaration::new(
-            bind.name.as_str().to_string(),
-            runtime_signature(bind, typed),
-            bind.params
-                .as_ref()
-                .map(|params| params.keys().map(|name| name.to_string()).collect())
-                .unwrap_or_default(),
-            param_conventions,
-            bind.is_constant(),
-        ));
+    // Only a type mismatch says the result is not an integer; any other flaw is the answer.
+    if first_flaws.iter().any(|f| f.code != "source-check-type") {
+        return Err(first_flaws);
     }
-
-    declarations
-}
-
-fn runtime_signature(bind: &ast::Bind, typed: &typecheck::TypedFileAst) -> String {
-    let mut signature = bind.signature_surface();
-    if bind.return_tag.is_none()
-        && bind.return_type_name.is_none()
-        && let Some(return_type) = typed
-            .defs
-            .values()
-            .find(|typed_bind| typed_bind.name == bind.name)
-            .map(|typed_bind| &typed_bind.return_type)
-        && matches!(return_type, ast::ty::Ty::Named { .. })
-    {
-        signature.push(' ');
-        signature.push_str(&return_type.format_for_hover());
-    }
-    signature
-}
-
-fn runtime_type_name(generation: GenerationId) -> String {
-    format!("RuntimeI64Generation{}", generation.0)
-}
-
-fn generation_candidate(candidate: &str, symbol: &str, generation: GenerationId) -> String {
-    let runtime_type = runtime_type_name(generation);
-    let type_declaration = format!(
-        "{runtime_type} is in {RUNTIME_I64_MIN} to {RUNTIME_I64_MAX}\n{runtime_type} has\n    finish(self):\n        return\n"
-    );
-    let mut generation_source =
-        String::with_capacity(type_declaration.len() + candidate.len() + symbol.len() + 20);
-    generation_source.push_str(&type_declaration);
-    generation_source.push_str(candidate);
-    generation_source.push('\n');
-    generation_source.push_str(symbol);
-    generation_source.push(' ');
-    generation_source.push_str(&runtime_type);
-    generation_source.push_str(": 0\n");
-    generation_source
-}
-
-fn generation_exports(declared_symbols: &[String], generation: GenerationId) -> Vec<NativeExport> {
-    declared_symbols
-        .iter()
-        .map(|symbol| NativeExport {
-            logical_symbol: symbol.clone(),
-            generation_symbol: runtime_symbol_name(symbol, generation),
-        })
-        .collect()
-}
-
-fn package_diagnostics(
-    package: &CheckedPackage,
-    evaluation: Option<&GeneratedEvaluation>,
-) -> Vec<InterpreterDiagnostic> {
-    package
-        .files()
-        .iter()
-        .flat_map(|file| checked_file_diagnostics(package, file, evaluation))
-        .collect()
-}
-
-fn checked_file_diagnostics(
-    package: &CheckedPackage,
-    file: &CheckedFile,
-    evaluation: Option<&GeneratedEvaluation>,
-) -> Vec<InterpreterDiagnostic> {
-    file.front_end_diagnostics()
-        .iter()
-        .chain(file.typecheck_diagnostics())
-        .map(|diagnostic| {
-            let frames = file
-                .typed()
-                .eval_conditions
-                .iter()
-                .find(|condition| condition.failure.diagnostic == *diagnostic)
-                .map(|condition| {
-                    crate::condition::resolve_frames(
-                        package,
-                        evaluation,
-                        condition.failure.frames.clone(),
-                    )
-                })
-                .unwrap_or_default();
-            file_diagnostics(
-                file,
-                vec![diagnostic.clone()],
-                package.primary_path(),
-                evaluation,
-            )
-            .pop()
-            .expect("one diagnostic retains its source")
-            .with_frames(frames)
-        })
-        .collect()
-}
-
-fn lowered_diagnostics(
-    package: &CheckedPackage,
-    diagnostics: Vec<LoweredFileDiagnostics>,
-    evaluation: Option<&GeneratedEvaluation>,
-) -> Vec<InterpreterDiagnostic> {
-    let session_path = package.primary_path();
-    diagnostics
-        .into_iter()
-        .flat_map(|lowered| {
-            let file = package
-                .file(&lowered.path)
-                .expect("lowered diagnostics retain their checked source path");
-            file_diagnostics(file, lowered.diagnostics, session_path, evaluation)
-        })
-        .collect()
-}
-
-fn file_diagnostics(
-    file: &CheckedFile,
-    diagnostics: Vec<Diagnostic>,
-    session_path: &std::path::Path,
-    evaluation: Option<&GeneratedEvaluation>,
-) -> Vec<InterpreterDiagnostic> {
-    if file.path() == session_path {
-        match evaluation {
-            Some(evaluation) => evaluation_diagnostics(evaluation, diagnostics),
-            None => submitted_diagnostics(file.source(), diagnostics),
+    let names: Vec<String> = match check_once(base) {
+        Ok(module) => module.checked().aggregates.iter().filter(|a| a.parameters.is_empty() && !a.name.contains('.')).map(|a| a.name.clone()).collect(),
+        Err(flaws) => return Err(flaws),
+    };
+    for name in names {
+        if let Ok(module) = attempt(&name) {
+            return Ok((module, name));
         }
-    } else {
-        let display_path = file.path().diagnostic_report_path_from_cwd();
-        diagnostics
-            .into_iter()
-            .map(|diagnostic| InterpreterDiagnostic::new(file.source(), &display_path, diagnostic))
-            .collect()
     }
+    if let Ok(module) = check_once(&format!("{base}\n__gin_eval():\n    return {body}\n")) {
+        return Ok((module, "()".to_owned()));
+    }
+    Err(first_flaws)
 }
 
-fn submitted_diagnostics(source: &str, diagnostics: Vec<Diagnostic>) -> Vec<InterpreterDiagnostic> {
-    diagnostics
-        .into_iter()
-        .map(|diagnostic| submitted_diagnostic(source, diagnostic))
-        .collect()
+pub fn check_once(text: &str) -> Result<CheckedSourceModule, Vec<Flaw>> {
+    let source: std::sync::Arc<str> = std::sync::Arc::from(text);
+    let parsed = parser::parse_strict(text).map_err(|ds| {
+        ds.iter().map(|d| crate::flaw::from_diagnostic("parse", d, SESSION_FILE, &source, &[])).collect::<Vec<_>>()
+    })?;
+    let decls = crate::source::declarations(&parsed);
+    typecheck::check_module_diagnostic("main", &parsed, &[], typecheck::Limits::default())
+        .map_err(|failure| vec![crate::check::check_failure_flaw(&failure, SESSION_FILE, &source, &decls)])
 }
 
-fn submitted_diagnostic(source: &str, diagnostic: Diagnostic) -> InterpreterDiagnostic {
-    InterpreterDiagnostic::new(source, "<interpreter>", diagnostic)
-}
-
-fn evaluation_diagnostics(
-    evaluation: &GeneratedEvaluation,
-    diagnostics: Vec<Diagnostic>,
-) -> Vec<InterpreterDiagnostic> {
-    diagnostics
-        .into_iter()
-        .map(|diagnostic| evaluation_diagnostic(evaluation, diagnostic))
-        .collect()
-}
-
-fn evaluation_diagnostic(
-    evaluation: &GeneratedEvaluation,
-    mut diagnostic: Diagnostic,
-) -> InterpreterDiagnostic {
-    let range = evaluation.expression_range();
-    if diagnostic.span.start() >= range.start && diagnostic.span.end() <= range.end {
-        diagnostic.span = Span::new(
-            diagnostic.span.start() - range.start,
-            diagnostic.span.end() - range.start,
-        );
-        diagnostic.related_mut().retain_mut(|related| {
-            if related.span.start() < range.start || related.span.end() > range.end {
-                return false;
+fn result_type(module: &CheckedSourceModule) -> String {
+    let file = module.checked();
+    let Some(index) = file.functions.iter().position(|f| f.name == "__gin_eval") else { return "?".to_owned() };
+    if let Some(body) = &file.bodies[index] {
+        if let Some(CheckedSourceBodyKind::Block { result, .. }) = body.expressions.get(body.root as usize).map(|e| &e.kind) {
+            if let Some(CheckedSourceBodyKind::Return { value }) = body.expressions.get(*result as usize).map(|e| &e.kind) {
+                return show_type(file, body.expressions[*value as usize].ty, &[]);
             }
-            related.span = Span::new(
-                related.span.start() - range.start,
-                related.span.end() - range.start,
-            );
-            true
-        });
-        submitted_diagnostic(evaluation.expression(), diagnostic)
-    } else {
-        generated_diagnostic(evaluation, diagnostic)
+        }
+    }
+    show_type(file, file.functions[index].result, &[])
+}
+
+fn eval_expression(base: &str, expression: &str) -> EvalOutcome {
+    match synthesize(base, expression) {
+        Err(flaws) => EvalOutcome::Flawed(flaws),
+        Ok((module, label)) => {
+            let ty = if label == "integer" { result_type(&module) } else { label };
+            let mut outcome = run(vec![module], |i| i.call("__gin_eval", &[], &[]), &[]);
+            if let EvalOutcome::Value { ty: slot, .. } = &mut outcome {
+                *slot = ty;
+            }
+            outcome
+        }
     }
 }
 
-fn generated_diagnostic(
-    evaluation: &GeneratedEvaluation,
-    diagnostic: Diagnostic,
-) -> InterpreterDiagnostic {
-    InterpreterDiagnostic::new(evaluation.source(), "<interpreter-generated>", diagnostic)
-}
-
-fn codegen_failure(message: &str) -> Diagnostic {
-    // interpreter-codegen-failure
-    Diagnostic::new(InterpreterCode::CodegenFailure, message)
-}
-
-fn has_flaws(diagnostics: &[InterpreterDiagnostic]) -> bool {
-    diagnostics
+fn call(interpreter: &mut Interpreter<'_>, function: &str, arguments: &[Arg]) -> Result<interpreter::Outcome, Error> {
+    let values: Vec<Value> = arguments
         .iter()
-        .any(|diagnostic| diagnostic.diagnostic().category == Category::Flaw)
+        .filter_map(|a| match a {
+            Arg::Known(v) => Some(v.clone()),
+            Arg::Unknown => None,
+        })
+        .collect();
+    interpreter.call(function, &[], &values)
 }
 
-fn compiler_has_flaws(diagnostics: &[Diagnostic]) -> bool {
-    diagnostics
+fn run(
+    modules: Vec<CheckedSourceModule>,
+    go: impl FnOnce(&mut Interpreter<'_>) -> Result<interpreter::Outcome, Error>,
+    arguments: &[Arg],
+) -> EvalOutcome {
+    if let Some(position) = arguments.iter().position(|a| matches!(a, Arg::Unknown)) {
+        return unknown(json!({
+            "kind": "unknown_input",
+            "detail": format!("argument {position} is not known at compile time"),
+        }));
+    }
+    let program = Program::from_modules(modules);
+    finish(&program, go(&mut Interpreter::new(&program)))
+}
+
+fn eval_package(path: &Path, what: &EvalWhat) -> EvalOutcome {
+    let checked = check_package(path);
+    if !checked.flaws.is_empty() {
+        return EvalOutcome::Flawed(checked.flaws);
+    }
+    let program = match Program::from_package(path) {
+        Ok(program) => program,
+        Err(error) => return unknown(json!({"kind": "load_failed", "detail": error.to_string()})),
+    };
+    let mut interpreter = Interpreter::new(&program);
+    let outcome = match what {
+        EvalWhat::Entry => interpreter.run_entry(),
+        EvalWhat::Call { function, arguments } => {
+            if arguments.iter().any(|a| matches!(a, Arg::Unknown)) {
+                return unknown(json!({"kind": "unknown_input", "detail": "an argument is not known at compile time"}));
+            }
+            call(&mut interpreter, function, arguments)
+        }
+        EvalWhat::Expression(_) => {
+            return unknown(json!({"kind": "unsupported_target", "detail": "an expression is evaluated against the session or a source text; for a package give a call or the entry"}));
+        }
+    };
+    finish(&program, outcome)
+}
+
+fn declared_result(module: &CheckedSourceModule, function: &str) -> String {
+    let file = module.checked();
+    file.functions
         .iter()
-        .any(|diagnostic| diagnostic.category == Category::Flaw)
+        .find(|f| f.name == function)
+        .map(|f| show_type(file, f.result, &f.type_parameters))
+        .unwrap_or_default()
 }
 
-#[cfg(test)]
-#[path = "tests/session_tests.rs"]
-mod tests;
+fn typed(mut outcome: EvalOutcome, ty: String) -> EvalOutcome {
+    if let EvalOutcome::Value { ty: slot, .. } = &mut outcome {
+        *slot = ty;
+    }
+    outcome
+}
 
-#[cfg(test)]
-#[path = "tests/execution_tests.rs"]
-mod execution_tests;
+fn unknown(reason: Json) -> EvalOutcome {
+    let text = reason["detail"].as_str().unwrap_or("").to_owned();
+    EvalOutcome::Unknown { reason, text }
+}
 
-#[cfg(test)]
-#[path = "tests/condition_tests.rs"]
-mod condition_tests;
+fn finish(program: &Program, outcome: Result<interpreter::Outcome, Error>) -> EvalOutcome {
+    match outcome {
+        Ok(outcome) => EvalOutcome::Value {
+            json: value_json(program, &outcome.value),
+            display: program.render(&outcome.value),
+            ty: String::new(),
+        },
+        Err(error) => unknown(reason_of(&error)),
+    }
+}
 
-#[cfg(test)]
-#[path = "tests/hole_tests.rs"]
-mod hole_tests;
+pub fn reason_of(error: &Error) -> Json {
+    let detail = error.to_string();
+    match error {
+        Error::NoBody(function) => json!({"kind": "unrecorded_body", "function": function, "detail": detail}),
+        Error::Unsupported { what, function } if what.contains("instruction") => {
+            json!({"kind": "instruction_refused", "function": function, "detail": detail})
+        }
+        Error::Unsupported { function, .. } => json!({"kind": "unsupported", "function": function, "detail": detail}),
+        Error::HoleReached { function, stack, .. } => {
+            json!({"kind": "hole_reached", "function": function, "call_chain": stack, "detail": detail})
+        }
+        Error::ArgumentOutOfDomain { function, .. } => json!({"kind": "argument_out_of_domain", "function": function, "detail": detail}),
+        Error::DomainViolated { function, .. } => json!({"kind": "checker_bug", "function": function, "detail": detail}),
+        Error::OutOfFuel(_) | Error::DepthExceeded(_) => json!({"kind": "out_of_fuel", "detail": detail}),
+        Error::NoSuchFunction(_) | Error::Arity { .. } | Error::TypeArity { .. } => json!({"kind": "invalid_call", "detail": detail}),
+        _ => json!({"kind": "internal", "detail": detail}),
+    }
+}
 
-#[cfg(test)]
-#[path = "tests/compiler_condition_tests.rs"]
-mod compiler_condition_tests;
+pub fn value_json(program: &Program, value: &Value) -> Json {
+    match value {
+        Value::Unit => json!({"kind": "unit"}),
+        Value::Integer(n) => match i64::try_from(n.as_i128()) {
+            Ok(small) if n.as_i128() == i128::from(small) => json!({"kind": "integer", "value": small}),
+            _ => json!({"kind": "integer", "value": n.to_string()}),
+        },
+        Value::Text(text) => json!({"kind": "text", "value": text}),
+        Value::Record { tag, fields } => {
+            let names = program.field_names(tag);
+            let fields: Vec<Json> = fields
+                .iter()
+                .enumerate()
+                .map(|(i, f)| json!({"name": names.get(i).filter(|_| names.len() == fields.len()), "value": value_json(program, f)}))
+                .collect();
+            json!({"kind": "record", "type": tag.short(), "sum": tag.sum(), "home": &*tag.home, "fields": fields})
+        }
+    }
+}
 
-#[path = "session_actions.rs"]
-mod actions;
-
-#[cfg(test)]
-#[path = "tests/code_action_tests.rs"]
-mod code_action_tests;
-
-#[path = "session_queries.rs"]
-mod queries;
-pub use queries::{InterpreterCompletion, SearchMatch};
-
-#[path = "session_inspection.rs"]
-mod inspection;
-
-#[cfg(test)]
-#[path = "tests/query_tests.rs"]
-mod query_tests;
+/// Parse a JSON request argument into a value; `null` or `{"unknown": ...}` is unknown.
+pub fn arg_of(json: &Json) -> Result<Arg, String> {
+    match json {
+        Json::Null => Ok(Arg::Unknown),
+        Json::Object(o) if o.contains_key("unknown") => Ok(Arg::Unknown),
+        Json::Number(n) => n.as_i64().map(|v| Arg::Known(Value::integer(i128::from(v)))).ok_or_else(|| "integers must fit 64 bits; pass larger ones as strings".to_owned()),
+        Json::String(s) => s.parse::<i128>().map(|v| Arg::Known(Value::integer(v))).map_err(|_| format!("`{s}` is not an integer")),
+        other => Err(format!("unsupported argument {other}; integers (and null for unknown) only")),
+    }
+}

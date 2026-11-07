@@ -7,6 +7,12 @@ pub trait Prefix {
 pub trait Code: Prefix {
     fn name(&self) -> &'static str;
 
+    /// How serious this code is by default. A producer may override it per diagnostic with
+    /// [`crate::Diagnostic::with_category`], but the code decides unless it says otherwise.
+    fn category(&self) -> crate::Category {
+        crate::Category::Flaw
+    }
+
     fn fmt_code(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let prefix = self.prefix();
         if !prefix.is_empty() {

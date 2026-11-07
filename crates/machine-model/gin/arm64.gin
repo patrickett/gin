@@ -1,0 +1,164 @@
+-- Arm64 instruction encodings, as ordinary Gin.
+--
+-- Each function is the 32-bit word of one instruction form. The fields of an A64
+-- instruction occupy disjoint bits, so a field shifted left by n is `field * 2^n` and
+-- the word is a sum. Parameter domains are the field widths: a value outside its field
+-- is not a smaller instruction, it is no instruction, and the checker refuses it.
+--
+-- Nothing here names a register file or an operating system, and nothing is evaluated by
+-- a hand-written Rust table: the compiler evaluates these bodies when their arguments
+-- are known, exactly as it evaluates any other Gin call.
+
+-- MOVZ Xd, #imm16        1 10 100101 hw=00 imm16 Rd
+movz(dest in 0 to 30, imm in 0 to 65535) in 0 to 4294967295: return 3531603968 + imm * 32 + dest
+
+-- ADRP Xd, page          the page offset is a relocation, so its bits are zero here
+adrp(dest in 0 to 30) in 0 to 4294967295: return 2415919104 + dest
+
+-- ADD Xd, Xn, #0         the low 12 bits of the symbol are a relocation, zero here
+add_immediate(dest in 0 to 30, src in 0 to 30) in 0 to 4294967295: return 2432696320 + src * 32 + dest
+
+-- BL                     the 26-bit branch offset is a relocation, zero here
+branch_link() in 0 to 4294967295: return 2483027968
+
+-- STP Xt, Xt2, [Xn, #imm]!    imm7 is the scaled offset in two's complement
+store_pair_pre(first in 0 to 30, second in 0 to 30, base in 0 to 31, imm7 in 0 to 127) in 0 to 4294967295: return 2843738112 + imm7 * 32768 + second * 1024 + base * 32 + first
+
+-- LDP Xt, Xt2, [Xn], #imm     imm7 is the scaled offset in two's complement
+load_pair_post(first in 0 to 30, second in 0 to 30, base in 0 to 31, imm7 in 0 to 127) in 0 to 4294967295: return 2831155200 + imm7 * 32768 + second * 1024 + base * 32 + first
+
+-- RET (x30)
+ret() in 0 to 4294967295: return 3596551104
+
+-- ADD Xd, Xn, Xm         shifted register, shift 0; two's-complement, so it wraps
+add_register(dest in 0 to 30, left in 0 to 30, right in 0 to 30) in 0 to 4294967295: return 2332033024 + right * 65536 + left * 32 + dest
+
+-- SUB Xd, Xn, Xm
+sub_register(dest in 0 to 30, left in 0 to 30, right in 0 to 30) in 0 to 4294967295: return 3405774848 + right * 65536 + left * 32 + dest
+
+-- MUL Xd, Xn, Xm         MADD with the zero register as addend: the low 64 bits
+multiply(dest in 0 to 30, left in 0 to 30, right in 0 to 30) in 0 to 4294967295: return 2600500224 + right * 65536 + left * 32 + dest
+
+-- MOV Xd, Xm             ORR Xd, XZR, Xm
+move_register(dest in 0 to 30, src in 0 to 30) in 0 to 4294967295: return 2852127712 + src * 65536 + dest
+
+-- Calling convention: AAPCS64 for functions of integers that call nothing.
+--
+-- The compiler reads these when it lowers a function; none of it is written in Rust.
+-- A result domain of `0 to 30` is the register field, so the checker has proven each
+-- of these names a register, and `allocatable` bounds every register a leaf may touch
+-- (x16/x17 are intra-procedure scratch and x18 is reserved by the platform).
+
+-- how many integer arguments arrive in registers
+argument_count() in 0 to 255: return 8
+
+-- the register carrying argument `index`: x0, x1, ...
+argument_register(index in 0 to 7) in 0 to 30: return index
+
+-- the register the result leaves in
+result_register() in 0 to 30: return 0
+
+-- x0..x(n-1) may be used without saving
+allocatable() in 1 to 31: return 16
+
+-- the largest constant one MOVZ loads: its immediate field is 16 bits
+constant_max() in 0 to 65535: return 65535
+
+-- Machine model: the register file as linear records, and what instructions do to it.
+--
+-- A register is a `Register` record, so the checker already refuses reading one twice or
+-- dropping one: the file below is rebuilt, never aliased. `Word` is the 64-bit register
+-- width and wraps, so `a + b` stored in a `Word` is addition modulo 2^64 exactly as the
+-- hardware does it; there is no overflow to refuse and none to forget.
+--
+-- Only x0..x2 are modelled: the lowering rules are verified on them. A wider file is the
+-- same text with more fields and arms.
+
+-- A named domain has no arithmetic of its own: `Numeric` gives one the three operations, each
+-- computed on the integer inside it and stored back, which is where `#wrap` reduces it.
+Numeric has
+    #infix('+')
+    add(self, rhs Self):
+        a in Self: self
+        b in Self: rhs
+        return a + b
+
+    #infix('-')
+    subtract(self, rhs Self):
+        a in Self: self
+        b in Self: rhs
+        return a - b
+
+    #infix('*')
+    multiply(self, rhs Self):
+        a in Self: self
+        b in Self: rhs
+        return a * b
+
+#unrestricted
+#wrap
+Word is in 0 to 18446744073709551615
+Word has Numeric
+
+Register has contents Word
+
+Machine has
+    x0 Register
+    x1 Register
+    x2 Register
+
+-- an operand names a register; it holds nothing, so it can be named any number of times
+ArmRegister is X0 or X1 or X2
+
+-- the machine, handed back with the value read from it
+Read has
+    machine Machine
+    value Word
+
+read_register(machine Machine, name ArmRegister) Read:
+    Machine(x0, x1, x2) := machine
+    Register(c0) := x0
+    Register(c1) := x1
+    Register(c2) := x2
+    return when name is
+        X0 then Read(machine: Machine(x0: Register(contents: c0), x1: Register(contents: c1), x2: Register(contents: c2)), value: c0)
+        X1 then Read(machine: Machine(x0: Register(contents: c0), x1: Register(contents: c1), x2: Register(contents: c2)), value: c1)
+        X2 then Read(machine: Machine(x0: Register(contents: c0), x1: Register(contents: c1), x2: Register(contents: c2)), value: c2)
+
+write_register(machine Machine, name ArmRegister, value Word) Machine:
+    Machine(x0, x1, x2) := machine
+    Register(c0) := x0
+    Register(c1) := x1
+    Register(c2) := x2
+    return when name is
+        X0 then Machine(x0: Register(contents: value), x1: Register(contents: c1), x2: Register(contents: c2))
+        X1 then Machine(x0: Register(contents: c0), x1: Register(contents: value), x2: Register(contents: c2))
+        X2 then Machine(x0: Register(contents: c0), x1: Register(contents: c1), x2: Register(contents: value))
+
+-- the three operations, each stored in a Word and so each modulo 2^64
+sum(a Word, b Word) Word: return a + b
+difference(a Word, b Word) Word: return a - b
+product(a Word, b Word) Word: return a * b
+
+-- ADD Xd, Xn, Xm
+execute_add(machine Machine, dest ArmRegister, left ArmRegister, right ArmRegister) Machine:
+    Read(after_left, a) := read_register(machine, left)
+    Read(after_right, b) := read_register(after_left, right)
+    return write_register(after_right, dest, sum(a, b))
+
+-- SUB Xd, Xn, Xm
+execute_sub(machine Machine, dest ArmRegister, left ArmRegister, right ArmRegister) Machine:
+    Read(after_left, a) := read_register(machine, left)
+    Read(after_right, b) := read_register(after_left, right)
+    return write_register(after_right, dest, difference(a, b))
+
+-- MUL Xd, Xn, Xm
+execute_mul(machine Machine, dest ArmRegister, left ArmRegister, right ArmRegister) Machine:
+    Read(after_left, a) := read_register(machine, left)
+    Read(after_right, b) := read_register(after_left, right)
+    return write_register(after_right, dest, product(a, b))
+
+-- MOV Xd, Xm
+execute_mov(machine Machine, dest ArmRegister, src ArmRegister) Machine:
+    Read(after, value) := read_register(machine, src)
+    return write_register(after, dest, value)

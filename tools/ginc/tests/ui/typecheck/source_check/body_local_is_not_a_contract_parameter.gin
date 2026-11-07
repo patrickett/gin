@@ -1,0 +1,4 @@
+-- ui: compile-fail
+f(value in 0 to 16) out in 0 to 16 where out = local:
+  local := 0
+  return value --~ ERROR source-check-unknown-name

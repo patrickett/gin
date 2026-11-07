@@ -1,0 +1,7 @@
+-- A union and a function of another module, which the library both calls and hands to C.
+#unrestricted
+Mode is Loud
+     or Quiet
+
+callback(left Mode) in 0 to 0:
+    return 0

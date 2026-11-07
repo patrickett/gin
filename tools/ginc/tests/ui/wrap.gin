@@ -1,0 +1,14 @@
+-- ui: check-pass snapshot=mlir
+Numeric has
+  #infix('+')
+  add(self, rhs Self):
+    a in Self: self
+    b in Self: rhs
+    return a + b
+#unrestricted, #wrap
+Level is in 0 to 9
+Level has Numeric
+level():
+  a Level: 7
+  a +: 5
+  return

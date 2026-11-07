@@ -1,0 +1,21 @@
+use example.buffers empty_buffer, insert_at
+use example.lifecycle Token, Ended, drain
+
+empty Ended:
+    return drain(empty_buffer(Token))
+
+zero_only(number in 1 to 16) Ended:
+    buffer: empty_buffer(Token)
+    Inserted(full) := insert_at(Token, buffer, 0, Token(number))
+    return drain(full)
+
+one_only(number in 1 to 16) Ended:
+    buffer: empty_buffer(Token)
+    Inserted(full) := insert_at(Token, buffer, 1, Token(number))
+    return drain(full)
+
+both(first in 1 to 16, second in 1 to 16) Ended:
+    buffer: empty_buffer(Token)
+    Inserted(partial) := insert_at(Token, buffer, 0, Token(number: first))
+    Inserted(full) := insert_at(Token, partial, 1, Token(number: second))
+    return drain(full)

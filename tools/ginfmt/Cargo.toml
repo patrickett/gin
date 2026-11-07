@@ -2,22 +2,25 @@
 name = "ginfmt"
 version = "0.1.0"
 edition = "2024"
+publish = false
+description = "Formatter for Gin source on the new frontend (lexer, parser, ast)"
 
 [lints]
 workspace = true
 
-[dependencies]
-parser = { workspace = true }
-ast = { workspace = true }
-resolve = { workspace = true }
-internment = "0.8"
-indexmap = { workspace = true }
+[lib]
+name = "ginfmt"
+path = "src/lib.rs"
 
-lexer = { workspace = true }
+[[bin]]
+name = "ginfmt"
+path = "src/main.rs"
+
+[dependencies]
 diagnostic = { workspace = true }
-ast-format = { workspace = true }
-flask = { workspace = true }
-typecheck = { workspace = true }
+ast = { workspace = true }
+lexer = { workspace = true }
+parser = { workspace = true }
 
 [dev-dependencies]
-test-fixtures = { workspace = true }
+tempfile = "3"

@@ -1,0 +1,20 @@
+[package]
+name = "package"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Loads folder modules from disk for the source-AST pipeline"
+
+[lints]
+workspace = true
+
+[dependencies]
+diagnostic = { workspace = true }
+flask = { workspace = true }
+ast = { workspace = true }
+parser = { workspace = true }
+typecheck = { package = "typecheck", path = "../typecheck" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

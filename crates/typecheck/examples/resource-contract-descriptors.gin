@@ -1,0 +1,11 @@
+-- Descriptor-only control. These bodies do not allocate or release memory.
+Extent has
+    base in 0 to 65535
+    bytes in 1 to 64
+
+acquire(bytes in 1 to 64) Extent:
+    return Extent(base: 0, bytes: bytes)
+
+relinquish(extent Extent):
+    Extent(base, bytes) := extent
+    return

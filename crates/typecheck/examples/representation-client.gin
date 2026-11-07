@@ -1,0 +1,18 @@
+use demo.representation Marker, Region, make_region, reconstruct_region
+
+Outer has
+    region Region
+
+wrap(region Region) Outer:
+    return Outer(region: region)
+
+unwrap(outer Outer) Region:
+    Outer(region) := outer
+    return region
+
+roundtrip(address @Marker) Region:
+    region: make_region(address)
+    return unwrap(wrap(region))
+
+through_defining_factory(address @Region) Region:
+    return reconstruct_region(address)

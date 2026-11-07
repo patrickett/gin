@@ -1,0 +1,4 @@
+use demo.window Window, make_window
+
+bad(item Type, value item) Window(item):
+    return make_window(item, value, 5, 0)

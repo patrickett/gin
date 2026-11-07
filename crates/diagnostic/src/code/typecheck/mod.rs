@@ -176,6 +176,6 @@ impl TypeCode {
             .chain(TextCode::all().map(Self::Text))
             .chain(TraitCode::all().map(Self::Trait))
             .chain(UnionCode::all().map(Self::Union))
-            .chain([Self::Mismatch].into_iter())
+            .chain([Self::Mismatch])
     }
 }

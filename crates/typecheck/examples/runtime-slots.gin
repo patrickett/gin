@@ -1,0 +1,40 @@
+-- Ordinary nominal alternatives; no allocation, raw layout, or borrowed extraction.
+Slot(element) is Empty or Full(element)
+
+TakeResult(element) is Empty or Taken(element)
+
+Swapped(element) has
+    previous Slot(element)
+    current element
+
+Holder(element) has
+    #private
+    slot Slot(element)
+
+empty_slot(element Type) Slot(element):
+    return Empty
+
+fill_slot(element Type, value element) Slot(element):
+    return Full(value)
+
+take_slot(element Type, slot Slot(element)) TakeResult(element):
+    return when slot is
+        Empty then Empty
+        Full(value) then Taken(value)
+
+replace_slot(element Type, slot Slot(element), next element) Swapped(element):
+    return when slot is
+        Empty then Swapped(previous: Empty, current: next)
+        Full(previous) then Swapped(previous: Full(previous), current: next)
+
+rebuild_slot(element Type, slot Slot(element)) Slot(element):
+    return when slot is
+        Empty then Empty
+        Full(value) then Full(value)
+
+pack_slot(element Type, slot Slot(element)) Holder(element):
+    return Holder(slot)
+
+unpack_slot(element Type, holder Holder(element)) Slot(element):
+    Holder(slot) := holder
+    return slot

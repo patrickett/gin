@@ -1,0 +1,20 @@
+-- Candidate bodies; the resource interpretations described in the design are missing.
+use storage.boundary Extent, acquire, relinquish
+
+Buffer has
+    #private
+    base in 0 to 65535
+    #private
+    bytes in 1 to 64
+
+reserve(bytes in 1 to 64) Buffer:
+    Extent(base, size) := acquire(bytes)
+    return Buffer(base: base, bytes: size)
+
+transfer(buffer Buffer) Buffer:
+    return buffer
+
+release(buffer Buffer):
+    Buffer(base, size) := buffer
+    relinquish(Extent(base: base, bytes: size))
+    return

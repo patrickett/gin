@@ -1,0 +1,8 @@
+use example.buffers reserve, wrap, take, release
+
+exercise(bytes in 1 to 64):
+    buffer: reserve(bytes)
+    storage: take(buffer)
+    rebuilt: wrap(storage)
+    release(rebuilt)
+    return

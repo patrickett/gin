@@ -1,0 +1,31 @@
+==================
+function postcondition transition
+==================
+reset(x mut in 0 to 9) where x :: 0:
+  x :: 0
+  return
+
+---
+
+(source_file
+  (bind_statement
+    name: (identifier)
+    (parameters
+      (parameter
+        name: (identifier)
+        type: (tag
+          (reference_type
+            type: (in_range_type
+              (range_type
+                (number)
+                (number)))))))
+    (where_clause
+      place: (identifier)
+      value: (literal
+        (number)))
+    value: (block_body
+      (bind_statement
+        name: (identifier)
+        value: (literal
+          (number)))
+      (return_statement))))

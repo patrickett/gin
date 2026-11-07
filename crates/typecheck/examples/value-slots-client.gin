@@ -1,0 +1,17 @@
+use example.slots EmptySlot, FullSlot, Extracted
+use example.slots empty_pair, put_left, put_right, take_left, take_right, finish_empty_pair
+
+Values(element) has
+    first element
+    second element
+
+cycle(element Type, first element, second element) Values(element):
+    empty: empty_pair
+    right_only: put_right(element, EmptySlot, empty, first)
+    both: put_left(element, FullSlot(element), right_only, second)
+    Extracted(right_value, left_only) := take_right(element, FullSlot(element), both)
+    refilled: put_right(element, FullSlot(element), left_only, right_value)
+    Extracted(left_value, right_again) := take_left(element, FullSlot(element), refilled)
+    Extracted(returned_right, empty_again) := take_right(element, EmptySlot, right_again)
+    finish_empty_pair(empty_again)
+    return Values(first: returned_right, second: left_value)

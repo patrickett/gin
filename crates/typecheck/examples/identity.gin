@@ -1,0 +1,11 @@
+Small is in 0 to 255
+
+Small has
+    finish(self): return
+
+identity(value own Small): value
+
+answer:
+    value Small: 42
+    result: identity(value)
+    return result

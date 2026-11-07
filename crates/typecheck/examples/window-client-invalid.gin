@@ -1,0 +1,4 @@
+use demo.window Window
+
+forge(item Type, value item) Window(item):
+    return Window(payload: value, lower: 0, upper: 0)

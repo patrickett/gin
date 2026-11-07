@@ -227,12 +227,19 @@ test('operator grouping follows the handwritten Pratt parser', () => {
 });
 
 test('shared query covers every reserved lexer keyword', () => {
-  const lexer = fs.readFileSync(path.resolve(__dirname, '../../../crates/lexer/src/token.rs'), 'utf8');
   const query = fs.readFileSync(path.resolve(__dirname, '../../tree-sitter-gin/queries/highlights.scm'), 'utf8');
-  const keywords = lexer.match(/define_tokens!\s*\{\s*keywords\s*\{([\s\S]*?)\}/)?.[1] ?? '';
-  const words = [...keywords.matchAll(/[A-Za-z]+ => "([a-z]+)",/g)].map(m => m[1]);
+  const run = spawnSync('cargo', [
+    'run', '--quiet', '--locked', '--manifest-path',
+    path.resolve(__dirname, '../../tree-sitter-gin/test/compiler/Cargo.toml'), '--', '--keywords',
+  ], { encoding: 'utf8', timeout: 300_000 });
+  assert.equal(run.status, 0, `${run.error ?? ''}\n${run.stderr}`);
+  const words = JSON.parse(run.stdout);
   assert.ok(words.length > 0);
-  for (const word of words.filter(word => !["extern", "if", "loop", "break", "continue"].includes(word))) assert.ok(query.includes(JSON.stringify(word)), word);
+  const intentionally_unhighlighted = new Set(['extern', 'if', 'loop', 'Self']);
+  for (const word of words) {
+    if (intentionally_unhighlighted.has(word)) continue;
+    assert.ok(query.includes(JSON.stringify(word)), word);
+  }
 });
 
 test('consecutive imports retain highlighting after editing selected exports', () => {

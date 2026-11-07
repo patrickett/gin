@@ -1,0 +1,36 @@
+-- Parenthesized sequences, distinct from the experimental bracket-array forms.
+Holder(element) has value (element, element)
+
+from_values(element Type, first element, second element) (element, element):
+    return (first, second)
+
+swap(element Type, values (element, element)) (element, element):
+    first: values.0
+    second: values.[1]
+    return (second, first)
+
+swap_bare(element Type, values (element, element)) (element, element):
+    first: values.[0]
+    second: values.1
+    return second, first
+
+swap_mixed(left Type, right Type, values (left, right)) (right, left):
+    first: values.0
+    second: values.[1]
+    return (second, first)
+
+pack(element Type, value (element, element)) Holder(element):
+    return Holder(value)
+
+unpack(element Type, holder Holder(element)) (element, element):
+    Holder(value) := holder
+    return value
+
+singleton(element Type, value element) (element,):
+    return (value,)
+
+take_one(element Type, value (element,)) element:
+    return value.0
+
+unit:
+    return ()

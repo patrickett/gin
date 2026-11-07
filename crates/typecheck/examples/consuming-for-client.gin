@@ -1,0 +1,17 @@
+use library.loops Element, Token, drain, drain_nested
+
+empty_positions:
+    drain((Empty, Empty))
+    return
+
+one_payload(number in 0 to 16):
+    drain((Empty, Token(Token(number: number))))
+    return
+
+two_payloads(first in 0 to 16, second in 0 to 16):
+    drain((Token(Token(number: first)), Token(Token(number: second))))
+    return
+
+nested(a in 0 to 16, b in 0 to 16, c in 0 to 16, d in 0 to 16):
+    drain_nested(((Token(number: a), Token(number: b)), (Token(number: c), Token(number: d))))
+    return

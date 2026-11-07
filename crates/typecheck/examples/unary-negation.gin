@@ -1,0 +1,8 @@
+Negative is in -100 to 0
+Negative has finish(self): return
+
+flip(value in -10 to 20): -value
+double(value in -5 to 8): -(-value)
+shift(value in 0 to 10): -(value + 2)
+forward(value in -10 to 20): -flip(value)
+materialize(value in 0 to 100) Negative: -value

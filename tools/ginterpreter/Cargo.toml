@@ -2,28 +2,32 @@
 name = "ginterpreter"
 version = "0.1.0"
 edition = "2024"
+publish = false
+description = "Check, holes and compile-time evaluation as a session, a REPL and a JSONL protocol, on the new frontend"
+default-run = "ginterpreter"
 
 [lints]
 workspace = true
 
+[[bin]]
+name = "interpreter"
+path = "src/bin/interpreter.rs"
+# Runtime API docs belong to the library, which has the same target name.
+doc = false
+
 [dependencies]
-analysis = { workspace = true }
-ast = { workspace = true }
-ast-format = { workspace = true }
 clap = { workspace = true }
-codegen = { workspace = true }
 diagnostic = { workspace = true }
-flask = { workspace = true }
 ginc = { workspace = true }
-ginfmt = { workspace = true }
-parser = { workspace = true }
-resolve = { workspace = true }
-typecheck = { workspace = true }
+i256 = { workspace = true }
+interpreter = { path = "../../crates/interpreter" }
+package = { path = "../../crates/package" }
 rustyline = "17"
-thiserror = { workspace = true }
-derive_more = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+ast = { workspace = true }
+parser = { workspace = true }
+typecheck = { package = "typecheck", path = "../../crates/typecheck" }
 
 [dev-dependencies]
-test-fixtures = { workspace = true }
+tempfile = "3"

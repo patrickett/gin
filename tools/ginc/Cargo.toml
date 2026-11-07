@@ -8,13 +8,13 @@ workspace = true
 
 [dependencies]
 compiler-profile = { workspace = true }
-ast = { workspace = true }
-interface = { workspace = true }
+num-traits = { workspace = true }
 diagnostic = { workspace = true }
-typecheck = { workspace = true }
-codegen = { workspace = true }
-resolve = { workspace = true }
+backend = { workspace = true }
 parser = { workspace = true }
+ast = { workspace = true }
+package = { path = "../../crates/package" }
+typecheck = { path = "../../crates/typecheck" }
 flask = { workspace = true }
 clap = { workspace = true }
 strum = { workspace = true }
@@ -22,16 +22,12 @@ thiserror = { workspace = true }
 sha2 = { workspace = true }
 tempfile = "3"
 serde_json = { workspace = true }
+melior = "0.27"
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 sha2 = { workspace = true, features = ["asm"] }
 
 [dev-dependencies]
-analysis = { workspace = true }
-ed25519-dalek = "2"
-semver = { workspace = true }
-tar = "0.4"
-criterion = "0.5"
 test-fixtures = { workspace = true }
 
 # [[bench]]

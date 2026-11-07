@@ -1,0 +1,6 @@
+-- Untrusted header, not an implemented or authorized foreign interface.
+Extent has
+    base in 0 to 65535
+    bytes in 1 to 64
+
+acquire(bytes in 1 to 64) Extent

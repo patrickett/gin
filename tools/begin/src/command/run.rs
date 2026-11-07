@@ -1,12 +1,12 @@
 use flask::FlaskConfig;
 use ginc::cli::{Args, Emit};
 use ginc::compile::{CompileResult, GinCompiler};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 
 // TODO: support passing args to the executable: begin run -- --some-arg
 
-/// `begin (r)un` compiles and executes the default entry file (see [`super::DEFAULT_ENTRY`])
-/// or the given file. Without that entry, treats the package as a library and does not run.
+/// Compile and execute the package's default entry or the supplied source.
 pub fn begin_run(
     config: FlaskConfig,
     input: Option<PathBuf>,
@@ -21,33 +21,22 @@ pub fn begin_run(
         }
     };
 
-    let main_path = cwd.join(super::DEFAULT_ENTRY);
+    let root = FlaskConfig::find_package_config(&cwd)
+        .map(|(_, root)| root)
+        .unwrap_or(cwd);
     let path = match input {
         Some(p) => p,
-        None if main_path.is_file() => main_path,
-        None => {
-            eprintln!(
-                "warning: '{}' has no {} — library package. Use `begin build` for libraries.",
-                config.name,
-                super::DEFAULT_ENTRY
-            );
-            return;
-        }
+        None => root,
     };
 
     if !path.exists() {
         eprintln!("error: Entry file not found: {}", path.display());
-        return;
+        std::process::exit(1);
     }
-
-    // Resolve path dependencies relative to cwd (where mod.flask lives).
-    let config_dir = std::env::current_dir().unwrap_or_default();
-    let dependencies = config.resolve_path_dependencies(&config_dir);
 
     eprintln!("Compiling {} v{}", config.name, config.version);
     let mut args = Args {
-        input: path.clone(),
-        dependencies,
+        input: path,
         emit: Emit::Exe,
         ..Default::default()
     };
@@ -61,25 +50,10 @@ pub fn begin_run(
 
     eprintln!("Running `{}`", exe_path.display());
 
-    let scratch = match tempfile::tempdir() {
-        Ok(dir) => dir,
+    let status = match run_in_sandbox(&exe_path, sandbox) {
+        Ok(status) => status,
         Err(error) => {
-            eprintln!("error: cannot create execution sandbox: {error}");
-            std::process::exit(1);
-        }
-    };
-    let mut cmd = match sandbox.command(&exe_path, scratch.path()) {
-        Ok(command) => command,
-        Err(error) => {
-            eprintln!("error: cannot configure execution sandbox: {error}");
-            std::process::exit(1);
-        }
-    };
-    // TODO: forward args to executable when args passthrough is implemented
-    let status = match cmd.status() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: Failed to execute in sandbox: {}", e);
+            eprintln!("error: {error}");
             std::process::exit(1);
         }
     };
@@ -93,4 +67,18 @@ pub fn begin_run(
     if watch {
         eprintln!("warning: Watch mode not yet implemented - run once");
     }
+}
+
+fn run_in_sandbox(
+    executable: &Path,
+    sandbox: flask::ExecutionSandbox,
+) -> Result<ExitStatus, String> {
+    let scratch =
+        tempfile::tempdir().map_err(|error| format!("cannot create execution sandbox: {error}"))?;
+    let mut command = sandbox
+        .command(executable, scratch.path())
+        .map_err(|error| format!("cannot configure execution sandbox: {error}"))?;
+    command
+        .status()
+        .map_err(|error| format!("failed to execute in sandbox: {error}"))
 }
